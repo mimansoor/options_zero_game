@@ -1,0 +1,58 @@
+3964b8a
+
+commit 3964b8aa787adb10c816d2734a2d563287e0eb7c
+Author: Illyas Mansoor <mimansoor@gmail.com>
+Date:   Tue Jul 22 03:14:21 2025 +0530
+
+    still bringing up
+
+ .../envs/options_zero_game_env.py                  | 69 +++++++++++-----------
+ 1 file changed, 36 insertions(+), 33 deletions(-)
+
+commit 7d246ad5fd7ccb2cee2f81dc88d48b50efd3ecc8
+Author: Illyas Mansoor <mimansoor@gmail.com>
+Date:   Tue Jul 22 03:12:34 2025 +0530
+
+    still scaffoling..
+
+ .../config/options_zero_game_muzero_config.py      |  81 +++++++--------
+ zoo/options_zero_game/entry/__init__.py            |   0
+ .../entry/options_zero_game_eval.py                |  52 ++++++++++
+ .../envs/options_zero_game_env.py                  | 112 +++++++++++++--------
+ 4 files changed, 154 insertions(+), 91 deletions(-)
+
+commit a1b9d1eb9b24f5d52da3cf18ff876b1d017d1852
+Author: Illyas Mansoor <mimansoor@gmail.com>
+Date:   Tue Jul 22 02:11:56 2025 +0530
+
+    fix some issues and make the env to run in single thread
+
+ .../config/options_zero_game_muzero_config.py      | 55 ++++++++++++----------
+ .../envs/options_zero_game_env.py                  | 45 +++++-------------
+ 2 files changed, 41 insertions(+), 59 deletions(-)
+
+commit dc341696be0fca955c164f075fad915c4f87c61a
+Author: Illyas Mansoor <mimansoor@gmail.com>
+Date:   Tue Jul 22 01:55:10 2025 +0530
+
+    Initial scaffolding options-zero-game, still not working
+
+ requirements-options-zero-game.txt                 | 142 +++++++++++++++++++++
+ requirements.txt                                   |   4 +-
+ zoo/options_zero_game/__init__.py                  |   0
+ zoo/options_zero_game/config/__init__.py           |   0
+ .../config/options_zero_game_muzero_config.py      |  89 +++++++++++++
+ zoo/options_zero_game/envs/__init__.py             |   8 ++
+ .../envs/options_zero_game_env.py                  | 130 +++++++++++++++++++
+ 7 files changed, 371 insertions(+), 2 deletions(-)
+
+commit 527d355437caf90e7ab1e7ece1d1bd27f8659d74
+Author: 蒲源 <48008469+puyuan1996@users.noreply.github.com>
+Date:   Tue Jul 22 01:14:46 2025 +0800
+
+    polish(fir): polish ensure_softmax function (#389)
+    
+    Co-authored-by: puyuan <puyuan1996@qq.com>
+
+ lzero/policy/scaling_transform.py | 18 +-----------------
+ 1 file changed, 1 insertion(+), 17 deletions(-)
