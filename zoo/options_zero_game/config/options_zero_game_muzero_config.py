@@ -1,13 +1,9 @@
 import warnings
 from easydict import EasyDict
 
-# ==============================================================
-# NEW: Suppress annoying warnings from dependencies
-# ==============================================================
-# This will hide the DeprecationWarnings and FutureWarnings
+# Suppress annoying warnings from dependencies
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 warnings.filterwarnings("ignore", category=FutureWarning)
-
 
 # ==============================================================
 #                 Options-Zero-Game Config
@@ -33,6 +29,7 @@ options_zero_game_muzero_config = dict(
         manager=dict(shared_memory=False, ),
     ),
     policy=dict(
+        cuda=True,
         model=dict(
             observation_shape=4,
             action_space_size=8,
@@ -45,22 +42,29 @@ options_zero_game_muzero_config = dict(
             stochastic_dynamics=True,
             num_of_possible_chance_moves=5,
         ),
-        cuda=True,
-        env_type='not_board_games',
-        game_segment_length=30,
-        update_per_collect=update_per_collect,
-        batch_size=batch_size,
-        optim_type='AdamW',
-        lr_piecewise_constant_decay=False,
-        learning_rate=0.0005,
-        num_simulations=num_simulations,
-        reanalyze_ratio=reanalyze_ratio,
-        n_episode=8,
-        eval_freq=int(1e3),
-        replay_buffer_size=int(1e5),
-        collector_env_num=collector_env_num,
-        evaluator_env_num=evaluator_env_num,
-        gumbel_algo=True,
+        learn=dict(
+            update_per_collect=update_per_collect,
+            batch_size=batch_size,
+            optim_type='AdamW',
+            lr_piecewise_constant_decay=False,
+            learning_rate=0.0005,
+            reanalyze_ratio=reanalyze_ratio,
+        ),
+        collect=dict(
+            n_episode=8,
+            collector_env_num=collector_env_num,
+            game_segment_length=30,
+        ),
+        eval=dict(
+            eval_freq=int(1e3),
+            evaluator_env_num=evaluator_env_num,
+        ),
+        other=dict(
+            env_type='not_board_games',
+            replay_buffer_size=int(1e5),
+            num_simulations=num_simulations,
+            gumbel_algo=True,
+        ),
     ),
 )
 options_zero_game_muzero_config = EasyDict(options_zero_game_muzero_config)
@@ -74,16 +78,15 @@ create_config = dict(
         type='options_zero_game',
         import_names=['zoo.options_zero_game.envs'],
     ),
-    env_manager=dict(type='subprocess'),
+    # THE FIX 2: Use 'base' env_manager for development to suppress warnings and ease debugging.
+    env_manager=dict(type='base'),
     policy=dict(
-        type='stochastic_muzero'
+        # THE FIX 1: Use the base 'muzero' type. Stochasticity is enabled by the flags in main_config.
+        type='muzero'
     ),
 )
 create_config = EasyDict(create_config)
 
 if __name__ == '__main__':
-    # ==============================================================
-    # THE FIX: Use the generic 'serial_pipeline' entry point
-    # ==============================================================
     from ding.entry import serial_pipeline
     serial_pipeline([main_config, create_config], seed=0, max_env_step=max_env_step)
