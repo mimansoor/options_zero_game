@@ -10,7 +10,7 @@ num_simulations = 50
 update_per_collect = 1000
 max_env_step = 100000
 reanalyze_ratio = 0.
-action_space_size = 8 # Our defined action space size
+action_space_size = 8
 
 # ==============================================================
 #                    Main Config (The Parameters)
@@ -19,33 +19,33 @@ options_zero_game_stochastic_muzero_config = dict(
     exp_name=f'options_zero_game_stochastic_muzero_ns{num_simulations}_upc{update_per_collect}_bs{batch_size}',
     env=dict(
         env_id='OptionsZeroGame-v0',
-        # Pass any custom env configs here
         collector_env_num=collector_env_num,
         evaluator_env_num=evaluator_env_num,
         n_evaluator_episode=evaluator_env_num,
         manager=dict(shared_memory=False, ),
     ),
     policy=dict(
-        # This structure now mirrors the 2048 example (flat structure)
         model=dict(
             observation_shape=4,
             action_space_size=action_space_size,
             model_type='mlp',
             lstm_hidden_size=512,
             latent_state_dim=512,
-            self_supervised_learning_loss=True, # Recommended for MuZero
+            self_supervised_learning_loss=True,
             discrete_action_encoding_type='one_hot',
             norm_type='BN',
-            # NOTE: stochastic_dynamics and num_of_possible_chance_moves from PRD are implicitly handled
-            # by the stochastic_muzero policy. We don't need to specify them here.
         ),
         cuda=True,
         game_segment_length=30,
         update_per_collect=update_per_collect,
         batch_size=batch_size,
-        optim_type='AdamW',
+        # ==============================================================
+        # THE FINAL FIX: Change the optimizer to 'Adam' to match the
+        # assertion in the policy's source code.
+        # ==============================================================
+        optim_type='Adam',
         learning_rate=0.0005,
-        weight_decay=1e-4, # A common practice
+        weight_decay=1e-4,
         num_simulations=num_simulations,
         reanalyze_ratio=reanalyze_ratio,
         n_episode=8,
@@ -65,7 +65,7 @@ create_config = dict(
         type='options_zero_game',
         import_names=['zoo.options_zero_game.envs'],
     ),
-    env_manager=dict(type='base'), # Use 'base' for easier debugging
+    env_manager=dict(type='base'),
     policy=dict(
         type='stochastic_muzero',
         import_names=['lzero.policy.stochastic_muzero'],
@@ -74,6 +74,5 @@ create_config = dict(
 create_config = EasyDict(create_config)
 
 if __name__ == "__main__":
-    # Use the same entry point as the 2048 example
     from lzero.entry import train_muzero
     train_muzero([main_config, create_config], seed=0, max_env_step=max_env_step)
