@@ -10,7 +10,7 @@ num_simulations = 50
 update_per_collect = 1000
 max_env_step = 100000
 reanalyze_ratio = 0.
-action_space_size = 8
+action_space_size = 10
 
 # ==============================================================
 #                    Main Config (The Parameters)

@@ -54,6 +54,7 @@ class OptionsZeroGameEnv(gym.Env):
         self.pnl_scaling_factor = self._cfg.pnl_scaling_factor
         self.ignore_legal_actions = self._cfg.ignore_legal_actions
 
+        # We are now implementing all actions except the multi-strike ones
         self.actions_to_indices = {
             'HOLD': 0,
             'OPEN_LONG_CALL_ATM': 1,
@@ -63,6 +64,9 @@ class OptionsZeroGameEnv(gym.Env):
             'CLOSE_POSITION_2': 5,
             'CLOSE_POSITION_3': 6,
             'CLOSE_ALL': 7,
+            # <<< NEW: Add short actions to the map
+            'OPEN_SHORT_CALL_ATM': 8,
+            'OPEN_SHORT_PUT_ATM': 9,
         }
         self.indices_to_actions = {v: k for k, v in self.actions_to_indices.items()}
         self.action_space_size = len(self.actions_to_indices)
@@ -146,28 +150,32 @@ class OptionsZeroGameEnv(gym.Env):
                 atm_strike = round(self.current_price / self.strike_distance) * self.strike_distance
                 days_to_expiry = self.total_steps - self.current_step
                 entry_premium = self._get_option_price(self.current_price, atm_strike, days_to_expiry, 'call', is_buy=True)
-                self.portfolio.append({
-                    'type': 'call', 'direction': 'long', 'entry_step': self.current_step,
-                    'strike_price': atm_strike, 'entry_premium': entry_premium, 'days_to_expiry': days_to_expiry,
-                })
-        # <<< NEW: Add logic for opening a long put
+                self.portfolio.append({'type': 'call', 'direction': 'long', 'entry_step': self.current_step, 'strike_price': atm_strike, 'entry_premium': entry_premium, 'days_to_expiry': days_to_expiry})
         elif action_name == 'OPEN_LONG_PUT_ATM':
             if len(self.portfolio) < self.max_positions:
                 atm_strike = round(self.current_price / self.strike_distance) * self.strike_distance
                 days_to_expiry = self.total_steps - self.current_step
                 entry_premium = self._get_option_price(self.current_price, atm_strike, days_to_expiry, 'put', is_buy=True)
-                self.portfolio.append({
-                    'type': 'put', 'direction': 'long', 'entry_step': self.current_step,
-                    'strike_price': atm_strike, 'entry_premium': entry_premium, 'days_to_expiry': days_to_expiry,
-                })
-        elif action_name == 'CLOSE_POSITION_0':
-            self._close_position(0)
-        elif action_name == 'CLOSE_POSITION_1':
-            self._close_position(1)
-        elif action_name == 'CLOSE_POSITION_2':
-            self._close_position(2)
-        elif action_name == 'CLOSE_POSITION_3':
-            self._close_position(3)
+                self.portfolio.append({'type': 'put', 'direction': 'long', 'entry_step': self.current_step, 'strike_price': atm_strike, 'entry_premium': entry_premium, 'days_to_expiry': days_to_expiry})
+        # <<< NEW: Implement logic for opening short positions
+        elif action_name == 'OPEN_SHORT_CALL_ATM':
+            if len(self.portfolio) < self.max_positions:
+                atm_strike = round(self.current_price / self.strike_distance) * self.strike_distance
+                days_to_expiry = self.total_steps - self.current_step
+                entry_premium = self._get_option_price(self.current_price, atm_strike, days_to_expiry, 'call', is_buy=False) # Sell to open
+                self.portfolio.append({'type': 'call', 'direction': 'short', 'entry_step': self.current_step, 'strike_price': atm_strike, 'entry_premium': entry_premium, 'days_to_expiry': days_to_expiry})
+        elif action_name == 'OPEN_SHORT_PUT_ATM':
+            if len(self.portfolio) < self.max_positions:
+                atm_strike = round(self.current_price / self.strike_distance) * self.strike_distance
+                days_to_expiry = self.total_steps - self.current_step
+                entry_premium = self._get_option_price(self.current_price, atm_strike, days_to_expiry, 'put', is_buy=False) # Sell to open
+                self.portfolio.append({'type': 'put', 'direction': 'short', 'entry_step': self.current_step, 'strike_price': atm_strike, 'entry_premium': entry_premium, 'days_to_expiry': days_to_expiry})
+        elif action_name.startswith('CLOSE_POSITION_'):
+            try:
+                pos_index = int(action_name.split('_')[-1])
+                self._close_position(pos_index)
+            except (ValueError, IndexError):
+                pass # Invalid index, do nothing
         elif action_name == 'CLOSE_ALL':
             while len(self.portfolio) > 0:
                 self._close_position(0)
@@ -184,8 +192,7 @@ class OptionsZeroGameEnv(gym.Env):
 
         done = self.current_step >= self.total_steps
         if done:
-            while len(self.portfolio) > 0:
-                self._close_position(0)
+            while len(self.portfolio) > 0: self._close_position(0)
             tpv_after = self._get_portfolio_value()
             raw_reward = tpv_after - tpv_before
             final_reward = math.tanh(raw_reward / self.pnl_scaling_factor)
@@ -207,12 +214,12 @@ class OptionsZeroGameEnv(gym.Env):
         else:
             action_mask = np.zeros(self.action_space_size, dtype=np.int8)
             action_mask[self.actions_to_indices['HOLD']] = 1
-            
             if len(self.portfolio) < self.max_positions:
                  action_mask[self.actions_to_indices['OPEN_LONG_CALL_ATM']] = 1
-                 # <<< NEW: Enable the new action in the mask
                  action_mask[self.actions_to_indices['OPEN_LONG_PUT_ATM']] = 1
-            
+                 # <<< NEW: Enable short actions in the mask
+                 action_mask[self.actions_to_indices['OPEN_SHORT_CALL_ATM']] = 1
+                 action_mask[self.actions_to_indices['OPEN_SHORT_PUT_ATM']] = 1
             if len(self.portfolio) > 0:
                 action_mask[self.actions_to_indices['CLOSE_ALL']] = 1
             for i in range(len(self.portfolio)):
@@ -224,24 +231,21 @@ class OptionsZeroGameEnv(gym.Env):
         portfolio_val = self._get_portfolio_value()
         print(f"Step: {self.current_step:02d} | Price: ${self.current_price:8.2f} | Positions: {len(self.portfolio):1d} | Total PnL: ${portfolio_val:9.2f}")
 
+    # ... (Properties and static methods are unchanged)
     @property
     def observation_space(self) -> gym.spaces.Space: return self._observation_space
     @property
     def action_space(self) -> gym.spaces.Space: return self._action_space
     @property
     def reward_space(self) -> gym.spaces.Space: return self._reward_range
-
     @staticmethod
     def create_collector_env_cfg(cfg: dict) -> list:
         collector_env_num = cfg.pop('collector_env_num')
         cfg = copy.deepcopy(cfg)
         return [cfg for _ in range(collector_env_num)]
-
     @staticmethod
     def create_evaluator_env_cfg(cfg: dict) -> list:
         evaluator_env_num = cfg.pop('evaluator_env_num')
         cfg = copy.deepcopy(cfg)
         return [cfg for _ in range(evaluator_env_num)]
-
-    def __repr__(self):
-        return "LightZero Options-Zero-Game Env"
+    def __repr__(self): return "LightZero Options-Zero-Game Env"
