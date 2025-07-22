@@ -8,6 +8,7 @@ from easydict import EasyDict
 from gym import spaces
 from gymnasium.utils import seeding
 from py_vollib.black_scholes import black_scholes
+from py_vollib.black_scholes.greeks.analytical import delta
 
 from ding.envs import BaseEnvTimestep
 from ding.utils import ENV_REGISTRY
@@ -42,6 +43,7 @@ class OptionsZeroGameEnv(gym.Env):
         if cfg is not None:
             self._cfg.update(cfg)
 
+        # Environment Parameters
         self.start_price = self._cfg.start_price
         self.trend = self._cfg.trend
         self.volatility = self._cfg.volatility
@@ -53,21 +55,9 @@ class OptionsZeroGameEnv(gym.Env):
         self.bid_ask_spread_pct = self._cfg.bid_ask_spread_pct
         self.pnl_scaling_factor = self._cfg.pnl_scaling_factor
         self.ignore_legal_actions = self._cfg.ignore_legal_actions
-
-        # We are now implementing all actions except the multi-strike ones
-        self.actions_to_indices = {
-            'HOLD': 0,
-            'OPEN_LONG_CALL_ATM': 1,
-            'OPEN_LONG_PUT_ATM': 2,
-            'CLOSE_POSITION_0': 3,
-            'CLOSE_POSITION_1': 4,
-            'CLOSE_POSITION_2': 5,
-            'CLOSE_POSITION_3': 6,
-            'CLOSE_ALL': 7,
-            # <<< NEW: Add short actions to the map
-            'OPEN_SHORT_CALL_ATM': 8,
-            'OPEN_SHORT_PUT_ATM': 9,
-        }
+        
+        # <<< MODIFIED: Full Single-Leg Action Space
+        self.actions_to_indices = self._build_action_space()
         self.indices_to_actions = {v: k for k, v in self.actions_to_indices.items()}
         self.action_space_size = len(self.actions_to_indices)
 
@@ -77,6 +67,26 @@ class OptionsZeroGameEnv(gym.Env):
         
         self.np_random = None
         self._initialize_price_simulator()
+
+    # <<< NEW: Programmatically build the action space
+    def _build_action_space(self):
+        actions = {'HOLD': 0}
+        i = 1
+        
+        # Add OPEN actions for each offset
+        for offset in range(-3, 4):
+            sign = '+' if offset >= 0 else ''
+            actions[f'OPEN_LONG_CALL_ATM{sign}{offset}'] = i; i+=1
+            actions[f'OPEN_SHORT_CALL_ATM{sign}{offset}'] = i; i+=1
+            actions[f'OPEN_LONG_PUT_ATM{sign}{offset}'] = i; i+=1
+            actions[f'OPEN_SHORT_PUT_ATM{sign}{offset}'] = i; i+=1
+        
+        # Add CLOSE actions
+        for j in range(self.max_positions):
+            actions[f'CLOSE_POSITION_{j}'] = i; i+=1
+            
+        actions['CLOSE_ALL'] = i
+        return actions
 
     def _create_observation_space(self):
         obs_shape = (3,)
@@ -100,21 +110,25 @@ class OptionsZeroGameEnv(gym.Env):
         cond_vol = np.sqrt(forecast.variance.iloc[-1, 0]) / 100
         shock = self.np_random.normal(loc=self.trend, scale=cond_vol)
         self.current_price *= (1 + shock)
-
-    def _get_option_price(self, underlying_price, strike_price, days_to_expiry, option_type, is_buy):
+    
+    def _get_option_details(self, underlying_price, strike_price, days_to_expiry, option_type):
         t = days_to_expiry / 365.25
-        if t <= 0:
-            if option_type == 'call': return max(0, underlying_price - strike_price)
-            else: return max(0, strike_price - underlying_price)
+        if t <= 0: return 0, 0
         vol = max(self.volatility, 1e-6)
+        
+        d = delta(option_type[0], underlying_price, strike_price, t, self.risk_free_rate, vol)
         mid_price = black_scholes(option_type[0], underlying_price, strike_price, t, self.risk_free_rate, vol)
+        return mid_price, abs(d)
+
+    def _get_option_price(self, mid_price, is_buy):
         if is_buy: return mid_price * (1 + self.bid_ask_spread_pct)
         else: return mid_price * (1 - self.bid_ask_spread_pct)
 
     def _get_portfolio_value(self):
         unrealized_pnl = 0.0
         for pos in self.portfolio:
-            current_premium = self._get_option_price(self.current_price, pos['strike_price'], pos['days_to_expiry'], pos['type'], is_buy=(pos['direction'] == 'short'))
+            mid_price, _ = self._get_option_details(self.current_price, pos['strike_price'], pos['days_to_expiry'], pos['type'])
+            current_premium = self._get_option_price(mid_price, is_buy=(pos['direction'] == 'short'))
             entry_premium = pos['entry_premium']
             if pos['direction'] == 'long': pnl = (current_premium - entry_premium) * self.lot_size
             else: pnl = (entry_premium - current_premium) * self.lot_size
@@ -133,7 +147,8 @@ class OptionsZeroGameEnv(gym.Env):
     def _close_position(self, position_index):
         if position_index < len(self.portfolio):
             pos_to_close = self.portfolio.pop(position_index)
-            exit_premium = self._get_option_price(self.current_price, pos_to_close['strike_price'], pos_to_close['days_to_expiry'], pos_to_close['type'], is_buy=(pos_to_close['direction'] == 'short'))
+            mid_price, _ = self._get_option_details(self.current_price, pos_to_close['strike_price'], pos_to_close['days_to_expiry'], pos_to_close['type'])
+            exit_premium = self._get_option_price(mid_price, is_buy=(pos_to_close['direction'] == 'short'))
             entry_premium = pos_to_close['entry_premium']
             if pos_to_close['direction'] == 'long': pnl = (exit_premium - entry_premium) * self.lot_size
             else: pnl = (entry_premium - exit_premium) * self.lot_size
@@ -143,42 +158,32 @@ class OptionsZeroGameEnv(gym.Env):
         action_name = self.indices_to_actions.get(action, 'INVALID')
         tpv_before = self._get_portfolio_value()
 
-        if action_name == 'HOLD':
-            pass
-        elif action_name == 'OPEN_LONG_CALL_ATM':
+        # <<< MODIFIED: Handle the expanded action space
+        if action_name.startswith('OPEN_'):
             if len(self.portfolio) < self.max_positions:
-                atm_strike = round(self.current_price / self.strike_distance) * self.strike_distance
+                _, direction, type, strike_str = action_name.split('_')
+                offset = int(strike_str.replace('ATM', ''))
+                
+                atm_price = round(self.current_price / self.strike_distance) * self.strike_distance
+                strike_price = atm_price + (offset * self.strike_distance)
+                
                 days_to_expiry = self.total_steps - self.current_step
-                entry_premium = self._get_option_price(self.current_price, atm_strike, days_to_expiry, 'call', is_buy=True)
-                self.portfolio.append({'type': 'call', 'direction': 'long', 'entry_step': self.current_step, 'strike_price': atm_strike, 'entry_premium': entry_premium, 'days_to_expiry': days_to_expiry})
-        elif action_name == 'OPEN_LONG_PUT_ATM':
-            if len(self.portfolio) < self.max_positions:
-                atm_strike = round(self.current_price / self.strike_distance) * self.strike_distance
-                days_to_expiry = self.total_steps - self.current_step
-                entry_premium = self._get_option_price(self.current_price, atm_strike, days_to_expiry, 'put', is_buy=True)
-                self.portfolio.append({'type': 'put', 'direction': 'long', 'entry_step': self.current_step, 'strike_price': atm_strike, 'entry_premium': entry_premium, 'days_to_expiry': days_to_expiry})
-        # <<< NEW: Implement logic for opening short positions
-        elif action_name == 'OPEN_SHORT_CALL_ATM':
-            if len(self.portfolio) < self.max_positions:
-                atm_strike = round(self.current_price / self.strike_distance) * self.strike_distance
-                days_to_expiry = self.total_steps - self.current_step
-                entry_premium = self._get_option_price(self.current_price, atm_strike, days_to_expiry, 'call', is_buy=False) # Sell to open
-                self.portfolio.append({'type': 'call', 'direction': 'short', 'entry_step': self.current_step, 'strike_price': atm_strike, 'entry_premium': entry_premium, 'days_to_expiry': days_to_expiry})
-        elif action_name == 'OPEN_SHORT_PUT_ATM':
-            if len(self.portfolio) < self.max_positions:
-                atm_strike = round(self.current_price / self.strike_distance) * self.strike_distance
-                days_to_expiry = self.total_steps - self.current_step
-                entry_premium = self._get_option_price(self.current_price, atm_strike, days_to_expiry, 'put', is_buy=False) # Sell to open
-                self.portfolio.append({'type': 'put', 'direction': 'short', 'entry_step': self.current_step, 'strike_price': atm_strike, 'entry_premium': entry_premium, 'days_to_expiry': days_to_expiry})
+                is_buy = (direction == 'LONG')
+
+                mid_price, _ = self._get_option_details(self.current_price, strike_price, days_to_expiry, type.lower())
+                entry_premium = self._get_option_price(mid_price, is_buy)
+
+                self.portfolio.append({
+                    'type': type.lower(), 'direction': direction.lower(), 'entry_step': self.current_step,
+                    'strike_price': strike_price, 'entry_premium': entry_premium, 'days_to_expiry': days_to_expiry,
+                })
         elif action_name.startswith('CLOSE_POSITION_'):
             try:
                 pos_index = int(action_name.split('_')[-1])
                 self._close_position(pos_index)
-            except (ValueError, IndexError):
-                pass # Invalid index, do nothing
+            except (ValueError, IndexError): pass
         elif action_name == 'CLOSE_ALL':
-            while len(self.portfolio) > 0:
-                self._close_position(0)
+            while len(self.portfolio) > 0: self._close_position(0)
         
         self.portfolio.sort(key=lambda p: (p['strike_price'], p['type']))
         
@@ -209,17 +214,47 @@ class OptionsZeroGameEnv(gym.Env):
         norm_pnl = math.tanh(total_pnl / (self.pnl_scaling_factor * 10))
         obs_vec = np.array([norm_price, pos_count, norm_pnl], dtype=np.float32)
 
+        # <<< MODIFIED: Full Rule-Based Dynamic Action Masking
         if self.ignore_legal_actions:
             action_mask = np.ones(self.action_space_size, dtype=np.int8)
         else:
             action_mask = np.zeros(self.action_space_size, dtype=np.int8)
             action_mask[self.actions_to_indices['HOLD']] = 1
-            if len(self.portfolio) < self.max_positions:
-                 action_mask[self.actions_to_indices['OPEN_LONG_CALL_ATM']] = 1
-                 action_mask[self.actions_to_indices['OPEN_LONG_PUT_ATM']] = 1
-                 # <<< NEW: Enable short actions in the mask
-                 action_mask[self.actions_to_indices['OPEN_SHORT_CALL_ATM']] = 1
-                 action_mask[self.actions_to_indices['OPEN_SHORT_PUT_ATM']] = 1
+            
+            # --- Rule 1: Portfolio Limit ---
+            can_open = len(self.portfolio) < self.max_positions
+            if can_open:
+                atm_price = round(self.current_price / self.strike_distance) * self.strike_distance
+                days_to_expiry = self.total_steps - self.current_step
+                
+                for offset in range(-3, 4):
+                    strike_price = atm_price + (offset * self.strike_distance)
+                    
+                    # Check rules for both CALL and PUT at this strike
+                    for option_type in ['call', 'put']:
+                        _, d = self._get_option_details(self.current_price, strike_price, days_to_expiry, option_type)
+                        
+                        # --- Rule 2: OTM/ITM Delta Restrictions ---
+                        is_far_otm = d < 0.15
+                        is_far_itm = d > 0.85
+                        
+                        # Check Long Positions
+                        action_name = f'OPEN_LONG_{option_type.upper()}_ATM{"+" if offset >=0 else ""}{offset}'
+                        is_legal = not (is_far_otm or is_far_itm)
+                        if is_legal:
+                            action_mask[self.actions_to_indices[action_name]] = 1
+                        
+                        # Check Short Positions
+                        action_name = f'OPEN_SHORT_{option_type.upper()}_ATM{"+" if offset >=0 else ""}{offset}'
+                        is_legal = not is_far_itm
+                        if is_legal:
+                            action_mask[self.actions_to_indices[action_name]] = 1
+            
+            # --- Anti-Synthetic Rule (Simplified version for now) ---
+            # This is a complex rule to implement efficiently in the mask.
+            # We will add it in a future iteration.
+
+            # --- Close action rules ---
             if len(self.portfolio) > 0:
                 action_mask[self.actions_to_indices['CLOSE_ALL']] = 1
             for i in range(len(self.portfolio)):
@@ -230,7 +265,7 @@ class OptionsZeroGameEnv(gym.Env):
     def render(self, mode='human'):
         portfolio_val = self._get_portfolio_value()
         print(f"Step: {self.current_step:02d} | Price: ${self.current_price:8.2f} | Positions: {len(self.portfolio):1d} | Total PnL: ${portfolio_val:9.2f}")
-
+    
     # ... (Properties and static methods are unchanged)
     @property
     def observation_space(self) -> gym.spaces.Space: return self._observation_space
