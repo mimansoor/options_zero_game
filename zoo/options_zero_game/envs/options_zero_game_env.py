@@ -126,30 +126,19 @@ class OptionsZeroGameEnv(gym.Env):
         self._final_eval_reward = 0.0
         return self._get_observation()
 
-    # <<< MODIFIED: Added helper function for closing a single position
     def _close_position(self, position_index):
         if position_index < len(self.portfolio):
             pos_to_close = self.portfolio.pop(position_index)
-            
-            # Liquidation price to close the position
-            exit_premium = self._get_option_price(
-                self.current_price, pos_to_close['strike_price'], pos_to_close['days_to_expiry'],
-                pos_to_close['type'], is_buy=(pos_to_close['direction'] == 'short')
-            )
+            exit_premium = self._get_option_price(self.current_price, pos_to_close['strike_price'], pos_to_close['days_to_expiry'], pos_to_close['type'], is_buy=(pos_to_close['direction'] == 'short'))
             entry_premium = pos_to_close['entry_premium']
-            
-            if pos_to_close['direction'] == 'long':
-                pnl = (exit_premium - entry_premium) * self.lot_size
-            else: # short
-                pnl = (entry_premium - exit_premium) * self.lot_size
-                
+            if pos_to_close['direction'] == 'long': pnl = (exit_premium - entry_premium) * self.lot_size
+            else: pnl = (entry_premium - exit_premium) * self.lot_size
             self.realized_pnl += pnl
 
     def step(self, action: int):
         action_name = self.indices_to_actions.get(action, 'INVALID')
         tpv_before = self._get_portfolio_value()
 
-        # <<< MODIFIED: Added logic for all new actions
         if action_name == 'HOLD':
             pass
         elif action_name == 'OPEN_LONG_CALL_ATM':
@@ -159,6 +148,16 @@ class OptionsZeroGameEnv(gym.Env):
                 entry_premium = self._get_option_price(self.current_price, atm_strike, days_to_expiry, 'call', is_buy=True)
                 self.portfolio.append({
                     'type': 'call', 'direction': 'long', 'entry_step': self.current_step,
+                    'strike_price': atm_strike, 'entry_premium': entry_premium, 'days_to_expiry': days_to_expiry,
+                })
+        # <<< NEW: Add logic for opening a long put
+        elif action_name == 'OPEN_LONG_PUT_ATM':
+            if len(self.portfolio) < self.max_positions:
+                atm_strike = round(self.current_price / self.strike_distance) * self.strike_distance
+                days_to_expiry = self.total_steps - self.current_step
+                entry_premium = self._get_option_price(self.current_price, atm_strike, days_to_expiry, 'put', is_buy=True)
+                self.portfolio.append({
+                    'type': 'put', 'direction': 'long', 'entry_step': self.current_step,
                     'strike_price': atm_strike, 'entry_premium': entry_premium, 'days_to_expiry': days_to_expiry,
                 })
         elif action_name == 'CLOSE_POSITION_0':
@@ -171,9 +170,8 @@ class OptionsZeroGameEnv(gym.Env):
             self._close_position(3)
         elif action_name == 'CLOSE_ALL':
             while len(self.portfolio) > 0:
-                self._close_position(0) # Repeatedly close the first position until portfolio is empty
+                self._close_position(0)
         
-        # Sort portfolio canonically after any potential changes
         self.portfolio.sort(key=lambda p: (p['strike_price'], p['type']))
         
         self._simulate_price_step()
@@ -185,12 +183,9 @@ class OptionsZeroGameEnv(gym.Env):
         final_reward = math.tanh(raw_reward / self.pnl_scaling_factor)
 
         done = self.current_step >= self.total_steps
-        
-        # Auto-settle any remaining positions at expiry
         if done:
             while len(self.portfolio) > 0:
                 self._close_position(0)
-            # Recalculate TPV after final settlement for the final reward
             tpv_after = self._get_portfolio_value()
             raw_reward = tpv_after - tpv_before
             final_reward = math.tanh(raw_reward / self.pnl_scaling_factor)
@@ -207,25 +202,19 @@ class OptionsZeroGameEnv(gym.Env):
         norm_pnl = math.tanh(total_pnl / (self.pnl_scaling_factor * 10))
         obs_vec = np.array([norm_price, pos_count, norm_pnl], dtype=np.float32)
 
-        # <<< MODIFIED: Implement real dynamic action masking
         if self.ignore_legal_actions:
             action_mask = np.ones(self.action_space_size, dtype=np.int8)
         else:
             action_mask = np.zeros(self.action_space_size, dtype=np.int8)
-            
-            # Always legal to hold
             action_mask[self.actions_to_indices['HOLD']] = 1
             
-            # Legal to open if portfolio is not full
             if len(self.portfolio) < self.max_positions:
                  action_mask[self.actions_to_indices['OPEN_LONG_CALL_ATM']] = 1
-                 # NOTE: We will enable OPEN_LONG_PUT_ATM in the next cycle
+                 # <<< NEW: Enable the new action in the mask
+                 action_mask[self.actions_to_indices['OPEN_LONG_PUT_ATM']] = 1
             
-            # Legal to close all if portfolio is not empty
             if len(self.portfolio) > 0:
                 action_mask[self.actions_to_indices['CLOSE_ALL']] = 1
-
-            # Legal to close individual positions based on portfolio size
             for i in range(len(self.portfolio)):
                 action_mask[self.actions_to_indices[f'CLOSE_POSITION_{i}']] = 1
         
