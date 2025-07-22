@@ -15,18 +15,25 @@ action_space_size = 8
 # ==============================================================
 #                    Main Config (The Parameters)
 # ==============================================================
-options_zero_game_stochastic_muzero_config = dict(
-    exp_name=f'options_zero_game_stochastic_muzero_ns{num_simulations}_upc{update_per_collect}_bs{batch_size}',
+options_zero_game_muzero_config = dict(
+    exp_name=f'options_zero_game_muzero_baseline_ns{num_simulations}_upc{update_per_collect}_bs{batch_size}',
     env=dict(
         env_id='OptionsZeroGame-v0',
         collector_env_num=collector_env_num,
         evaluator_env_num=evaluator_env_num,
         n_evaluator_episode=evaluator_env_num,
         manager=dict(shared_memory=False, ),
+        # ==============================================================
+        # THE DEFINITIVE FIX (PART 1): Pass the flag to the environment here.
+        # This will be picked up by the env's __init__ method and used to
+        # configure the MCTS correctly.
+        # ==============================================================
+        ignore_legal_actions=True,
     ),
     policy=dict(
+        # NOTE: The 'ignore_legal_actions' flag is NOT in the policy section.
         model=dict(
-            observation_shape=4,
+            observation_shape=3,
             action_space_size=action_space_size,
             model_type='mlp',
             lstm_hidden_size=512,
@@ -39,10 +46,6 @@ options_zero_game_stochastic_muzero_config = dict(
         game_segment_length=30,
         update_per_collect=update_per_collect,
         batch_size=batch_size,
-        # ==============================================================
-        # THE FINAL FIX: Change the optimizer to 'Adam' to match the
-        # assertion in the policy's source code.
-        # ==============================================================
         optim_type='Adam',
         learning_rate=0.0005,
         weight_decay=1e-4,
@@ -55,7 +58,7 @@ options_zero_game_stochastic_muzero_config = dict(
         evaluator_env_num=evaluator_env_num,
     ),
 )
-main_config = EasyDict(options_zero_game_stochastic_muzero_config)
+main_config = EasyDict(options_zero_game_muzero_config)
 
 # ==============================================================
 #                  Create-Config (The Blueprint)
@@ -67,8 +70,8 @@ create_config = dict(
     ),
     env_manager=dict(type='base'),
     policy=dict(
-        type='stochastic_muzero',
-        import_names=['lzero.policy.stochastic_muzero'],
+        type='muzero',
+        import_names=['lzero.policy.muzero'],
     ),
 )
 create_config = EasyDict(create_config)
