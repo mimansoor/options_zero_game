@@ -43,7 +43,6 @@ class OptionsZeroGameEnv(gym.Env):
         if cfg is not None:
             self._cfg.update(cfg)
 
-        # Environment Parameters
         self.start_price = self._cfg.start_price
         self.trend = self._cfg.trend
         self.volatility = self._cfg.volatility
@@ -56,7 +55,6 @@ class OptionsZeroGameEnv(gym.Env):
         self.pnl_scaling_factor = self._cfg.pnl_scaling_factor
         self.ignore_legal_actions = self._cfg.ignore_legal_actions
         
-        # <<< MODIFIED: Full Single-Leg Action Space
         self.actions_to_indices = self._build_action_space()
         self.indices_to_actions = {v: k for k, v in self.actions_to_indices.items()}
         self.action_space_size = len(self.actions_to_indices)
@@ -68,33 +66,23 @@ class OptionsZeroGameEnv(gym.Env):
         self.np_random = None
         self._initialize_price_simulator()
 
-    # <<< NEW: Programmatically build the action space
     def _build_action_space(self):
         actions = {'HOLD': 0}
         i = 1
-        
-        # Add OPEN actions for each offset
         for offset in range(-3, 4):
             sign = '+' if offset >= 0 else ''
             actions[f'OPEN_LONG_CALL_ATM{sign}{offset}'] = i; i+=1
             actions[f'OPEN_SHORT_CALL_ATM{sign}{offset}'] = i; i+=1
             actions[f'OPEN_LONG_PUT_ATM{sign}{offset}'] = i; i+=1
             actions[f'OPEN_SHORT_PUT_ATM{sign}{offset}'] = i; i+=1
-        
-        # Add CLOSE actions
         for j in range(self.max_positions):
             actions[f'CLOSE_POSITION_{j}'] = i; i+=1
-            
         actions['CLOSE_ALL'] = i
         return actions
 
     def _create_observation_space(self):
         obs_shape = (3,)
-        return spaces.Dict({
-            'observation': spaces.Box(low=-np.inf, high=np.inf, shape=obs_shape, dtype=np.float32),
-            'action_mask': spaces.Box(low=0, high=1, shape=(self.action_space_size,), dtype=np.int8),
-            'to_play': spaces.Box(low=-1, high=-1, shape=(1,), dtype=np.int8)
-        })
+        return spaces.Dict({'observation': spaces.Box(low=-np.inf, high=np.inf, shape=obs_shape, dtype=np.float32), 'action_mask': spaces.Box(low=0, high=1, shape=(self.action_space_size,), dtype=np.int8), 'to_play': spaces.Box(low=-1, high=-1, shape=(1,), dtype=np.int8)})
 
     def seed(self, seed: int, dynamic_seed: int = None):
         self.np_random, seed = seeding.np_random(seed)
@@ -115,10 +103,12 @@ class OptionsZeroGameEnv(gym.Env):
         t = days_to_expiry / 365.25
         if t <= 0: return 0, 0
         vol = max(self.volatility, 1e-6)
-        
-        d = delta(option_type[0], underlying_price, strike_price, t, self.risk_free_rate, vol)
-        mid_price = black_scholes(option_type[0], underlying_price, strike_price, t, self.risk_free_rate, vol)
-        return mid_price, abs(d)
+        try:
+            d = delta(option_type[0], underlying_price, strike_price, t, self.risk_free_rate, vol)
+            mid_price = black_scholes(option_type[0], underlying_price, strike_price, t, self.risk_free_rate, vol)
+            return mid_price, abs(d)
+        except Exception:
+            return 0, 0
 
     def _get_option_price(self, mid_price, is_buy):
         if is_buy: return mid_price * (1 + self.bid_ask_spread_pct)
@@ -158,25 +148,17 @@ class OptionsZeroGameEnv(gym.Env):
         action_name = self.indices_to_actions.get(action, 'INVALID')
         tpv_before = self._get_portfolio_value()
 
-        # <<< MODIFIED: Handle the expanded action space
         if action_name.startswith('OPEN_'):
             if len(self.portfolio) < self.max_positions:
                 _, direction, type, strike_str = action_name.split('_')
                 offset = int(strike_str.replace('ATM', ''))
-                
                 atm_price = round(self.current_price / self.strike_distance) * self.strike_distance
                 strike_price = atm_price + (offset * self.strike_distance)
-                
                 days_to_expiry = self.total_steps - self.current_step
                 is_buy = (direction == 'LONG')
-
                 mid_price, _ = self._get_option_details(self.current_price, strike_price, days_to_expiry, type.lower())
                 entry_premium = self._get_option_price(mid_price, is_buy)
-
-                self.portfolio.append({
-                    'type': type.lower(), 'direction': direction.lower(), 'entry_step': self.current_step,
-                    'strike_price': strike_price, 'entry_premium': entry_premium, 'days_to_expiry': days_to_expiry,
-                })
+                self.portfolio.append({'type': type.lower(), 'direction': direction.lower(), 'entry_step': self.current_step, 'strike_price': strike_price, 'entry_premium': entry_premium, 'days_to_expiry': days_to_expiry})
         elif action_name.startswith('CLOSE_POSITION_'):
             try:
                 pos_index = int(action_name.split('_')[-1])
@@ -214,47 +196,59 @@ class OptionsZeroGameEnv(gym.Env):
         norm_pnl = math.tanh(total_pnl / (self.pnl_scaling_factor * 10))
         obs_vec = np.array([norm_price, pos_count, norm_pnl], dtype=np.float32)
 
-        # <<< MODIFIED: Full Rule-Based Dynamic Action Masking
         if self.ignore_legal_actions:
             action_mask = np.ones(self.action_space_size, dtype=np.int8)
         else:
             action_mask = np.zeros(self.action_space_size, dtype=np.int8)
             action_mask[self.actions_to_indices['HOLD']] = 1
             
-            # --- Rule 1: Portfolio Limit ---
             can_open = len(self.portfolio) < self.max_positions
             if can_open:
                 atm_price = round(self.current_price / self.strike_distance) * self.strike_distance
                 days_to_expiry = self.total_steps - self.current_step
                 
+                # <<< NEW: Create a quick lookup of existing positions for the anti-synthetic rule
+                existing_positions = {(p['strike_price'], p['type']): p['direction'] for p in self.portfolio}
+
                 for offset in range(-3, 4):
                     strike_price = atm_price + (offset * self.strike_distance)
                     
-                    # Check rules for both CALL and PUT at this strike
                     for option_type in ['call', 'put']:
                         _, d = self._get_option_details(self.current_price, strike_price, days_to_expiry, option_type)
                         
-                        # --- Rule 2: OTM/ITM Delta Restrictions ---
                         is_far_otm = d < 0.15
                         is_far_itm = d > 0.85
                         
-                        # Check Long Positions
+                        # --- Check LONG actions ---
                         action_name = f'OPEN_LONG_{option_type.upper()}_ATM{"+" if offset >=0 else ""}{offset}'
                         is_legal = not (is_far_otm or is_far_itm)
+                        
+                        # <<< NEW: Anti-Synthetic Rule Check for Long positions
+                        # Synthetic Short Stock = Short Call + Long Put. Check if we are about to create one.
+                        if option_type == 'put' and existing_positions.get((strike_price, 'call')) == 'short':
+                            is_legal = False
+                        # Synthetic Long Stock = Long Call + Short Put. Check if we are about to create one.
+                        if option_type == 'call' and existing_positions.get((strike_price, 'put')) == 'short':
+                            is_legal = False
+
                         if is_legal:
                             action_mask[self.actions_to_indices[action_name]] = 1
                         
-                        # Check Short Positions
+                        # --- Check SHORT actions ---
                         action_name = f'OPEN_SHORT_{option_type.upper()}_ATM{"+" if offset >=0 else ""}{offset}'
                         is_legal = not is_far_itm
+
+                        # <<< NEW: Anti-Synthetic Rule Check for Short positions
+                        # Synthetic Long Stock = Long Call + Short Put. Check if we are about to create one.
+                        if option_type == 'put' and existing_positions.get((strike_price, 'call')) == 'long':
+                            is_legal = False
+                        # Synthetic Short Stock = Short Call + Long Put. Check if we are about to create one.
+                        if option_type == 'call' and existing_positions.get((strike_price, 'put')) == 'long':
+                            is_legal = False
+
                         if is_legal:
                             action_mask[self.actions_to_indices[action_name]] = 1
             
-            # --- Anti-Synthetic Rule (Simplified version for now) ---
-            # This is a complex rule to implement efficiently in the mask.
-            # We will add it in a future iteration.
-
-            # --- Close action rules ---
             if len(self.portfolio) > 0:
                 action_mask[self.actions_to_indices['CLOSE_ALL']] = 1
             for i in range(len(self.portfolio)):
@@ -266,7 +260,6 @@ class OptionsZeroGameEnv(gym.Env):
         portfolio_val = self._get_portfolio_value()
         print(f"Step: {self.current_step:02d} | Price: ${self.current_price:8.2f} | Positions: {len(self.portfolio):1d} | Total PnL: ${portfolio_val:9.2f}")
     
-    # ... (Properties and static methods are unchanged)
     @property
     def observation_space(self) -> gym.spaces.Space: return self._observation_space
     @property
