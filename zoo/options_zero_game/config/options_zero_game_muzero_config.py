@@ -10,15 +10,13 @@ num_simulations = 50
 update_per_collect = 1000
 max_env_step = 100000
 reanalyze_ratio = 0.
-# <<< MODIFIED: Update the action space size
-# 34 (from before) + 2 (straddles) = 36
-action_space_size = 36
+action_space_size = 36 # Unchanged from last step
 
 # ==============================================================
 #                    Main Config (The Parameters)
 # ==============================================================
 options_zero_game_muzero_config = dict(
-    exp_name=f'options_zero_game_muzero_with_straddles_ns{num_simulations}_upc{update_per_collect}_bs{batch_size}',
+    exp_name=f'options_zero_game_muzero_rich_state_ns{num_simulations}_upc{update_per_collect}_bs{batch_size}',
     env=dict(
         env_id='OptionsZeroGame-v0',
         collector_env_num=collector_env_num,
@@ -29,8 +27,9 @@ options_zero_game_muzero_config = dict(
     ),
     policy=dict(
         model=dict(
-            observation_shape=3,
-            action_space_size=action_space_size, # This will now be 36
+            # <<< MODIFIED: Update the observation shape to 35
+            observation_shape=35,
+            action_space_size=action_space_size,
             model_type='mlp',
             lstm_hidden_size=512,
             latent_state_dim=512,
