@@ -10,14 +10,15 @@ num_simulations = 50
 update_per_collect = 1000
 max_env_step = 100000
 reanalyze_ratio = 0.
-# 1 HOLD + (7 strikes * 4 types) + 2 Straddles + 4 CLOSE_i + 1 CLOSE_ALL = 1 + 28 + 2 + 4 + 1 = 36
-action_space_size = 36
+# <<< MODIFIED: Update the action space size
+# 36 (from before) + 2 (strangles) = 38
+action_space_size = 38
 
 # ==============================================================
 #                    Main Config (The Parameters)
 # ==============================================================
 options_zero_game_muzero_config = dict(
-    exp_name=f'options_zero_game_muzero_drawdown_penalty_ns{num_simulations}_upc{update_per_collect}_bs{batch_size}',
+    exp_name=f'options_zero_game_muzero_with_strangles_ns{num_simulations}_upc{update_per_collect}_bs{batch_size}',
     env=dict(
         env_id='OptionsZeroGame-v0',
         collector_env_num=collector_env_num,
@@ -25,13 +26,12 @@ options_zero_game_muzero_config = dict(
         n_evaluator_episode=evaluator_env_num,
         manager=dict(shared_memory=False, ),
         ignore_legal_actions=True,
-        # <<< NEW: Pass our new hyperparameter to the environment
         drawdown_penalty_weight=0.1,
     ),
     policy=dict(
         model=dict(
             observation_shape=35,
-            action_space_size=action_space_size,
+            action_space_size=action_space_size, # This will now be 38
             model_type='mlp',
             lstm_hidden_size=512,
             latent_state_dim=512,
