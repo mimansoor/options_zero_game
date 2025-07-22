@@ -28,9 +28,6 @@ class OptionsZeroGameEnv(gym.Env):
         bid_ask_spread_pct=0.01,
         risk_free_rate=0.05,
         pnl_scaling_factor=1000,
-        # ==============================================================
-        # THE DEFINITIVE FIX (PART 2): Add flag to the env's default config.
-        # ==============================================================
         ignore_legal_actions=True,
     )
 
@@ -58,9 +55,14 @@ class OptionsZeroGameEnv(gym.Env):
         self.ignore_legal_actions = self._cfg.ignore_legal_actions
 
         self.actions_to_indices = {
-            'HOLD': 0, 'OPEN_LONG_CALL_ATM': 1, 'OPEN_LONG_PUT_ATM': 2,
-            'CLOSE_POSITION_0': 3, 'CLOSE_POSITION_1': 4, 'CLOSE_POSITION_2': 5,
-            'CLOSE_POSITION_3': 6, 'CLOSE_ALL': 7,
+            'HOLD': 0,
+            'OPEN_LONG_CALL_ATM': 1,
+            'OPEN_LONG_PUT_ATM': 2,
+            'CLOSE_POSITION_0': 3,
+            'CLOSE_POSITION_1': 4,
+            'CLOSE_POSITION_2': 5,
+            'CLOSE_POSITION_3': 6,
+            'CLOSE_ALL': 7,
         }
         self.indices_to_actions = {v: k for k, v in self.actions_to_indices.items()}
         self.action_space_size = len(self.actions_to_indices)
@@ -124,11 +126,33 @@ class OptionsZeroGameEnv(gym.Env):
         self._final_eval_reward = 0.0
         return self._get_observation()
 
+    # <<< MODIFIED: Added helper function for closing a single position
+    def _close_position(self, position_index):
+        if position_index < len(self.portfolio):
+            pos_to_close = self.portfolio.pop(position_index)
+            
+            # Liquidation price to close the position
+            exit_premium = self._get_option_price(
+                self.current_price, pos_to_close['strike_price'], pos_to_close['days_to_expiry'],
+                pos_to_close['type'], is_buy=(pos_to_close['direction'] == 'short')
+            )
+            entry_premium = pos_to_close['entry_premium']
+            
+            if pos_to_close['direction'] == 'long':
+                pnl = (exit_premium - entry_premium) * self.lot_size
+            else: # short
+                pnl = (entry_premium - exit_premium) * self.lot_size
+                
+            self.realized_pnl += pnl
+
     def step(self, action: int):
         action_name = self.indices_to_actions.get(action, 'INVALID')
         tpv_before = self._get_portfolio_value()
 
-        if action_name == 'OPEN_LONG_CALL_ATM':
+        # <<< MODIFIED: Added logic for all new actions
+        if action_name == 'HOLD':
+            pass
+        elif action_name == 'OPEN_LONG_CALL_ATM':
             if len(self.portfolio) < self.max_positions:
                 atm_strike = round(self.current_price / self.strike_distance) * self.strike_distance
                 days_to_expiry = self.total_steps - self.current_step
@@ -137,6 +161,20 @@ class OptionsZeroGameEnv(gym.Env):
                     'type': 'call', 'direction': 'long', 'entry_step': self.current_step,
                     'strike_price': atm_strike, 'entry_premium': entry_premium, 'days_to_expiry': days_to_expiry,
                 })
+        elif action_name == 'CLOSE_POSITION_0':
+            self._close_position(0)
+        elif action_name == 'CLOSE_POSITION_1':
+            self._close_position(1)
+        elif action_name == 'CLOSE_POSITION_2':
+            self._close_position(2)
+        elif action_name == 'CLOSE_POSITION_3':
+            self._close_position(3)
+        elif action_name == 'CLOSE_ALL':
+            while len(self.portfolio) > 0:
+                self._close_position(0) # Repeatedly close the first position until portfolio is empty
+        
+        # Sort portfolio canonically after any potential changes
+        self.portfolio.sort(key=lambda p: (p['strike_price'], p['type']))
         
         self._simulate_price_step()
         self.current_step += 1
@@ -147,6 +185,16 @@ class OptionsZeroGameEnv(gym.Env):
         final_reward = math.tanh(raw_reward / self.pnl_scaling_factor)
 
         done = self.current_step >= self.total_steps
+        
+        # Auto-settle any remaining positions at expiry
+        if done:
+            while len(self.portfolio) > 0:
+                self._close_position(0)
+            # Recalculate TPV after final settlement for the final reward
+            tpv_after = self._get_portfolio_value()
+            raw_reward = tpv_after - tpv_before
+            final_reward = math.tanh(raw_reward / self.pnl_scaling_factor)
+        
         obs = self._get_observation()
         self._final_eval_reward += raw_reward
         info = {'price': self.current_price, 'eval_episode_return': self._final_eval_reward}
@@ -159,16 +207,27 @@ class OptionsZeroGameEnv(gym.Env):
         norm_pnl = math.tanh(total_pnl / (self.pnl_scaling_factor * 10))
         obs_vec = np.array([norm_price, pos_count, norm_pnl], dtype=np.float32)
 
-        # ==============================================================
-        # THE DEFINITIVE FIX (PART 3): The env code must obey the flag.
-        # ==============================================================
+        # <<< MODIFIED: Implement real dynamic action masking
         if self.ignore_legal_actions:
             action_mask = np.ones(self.action_space_size, dtype=np.int8)
         else:
             action_mask = np.zeros(self.action_space_size, dtype=np.int8)
+            
+            # Always legal to hold
             action_mask[self.actions_to_indices['HOLD']] = 1
+            
+            # Legal to open if portfolio is not full
             if len(self.portfolio) < self.max_positions:
                  action_mask[self.actions_to_indices['OPEN_LONG_CALL_ATM']] = 1
+                 # NOTE: We will enable OPEN_LONG_PUT_ATM in the next cycle
+            
+            # Legal to close all if portfolio is not empty
+            if len(self.portfolio) > 0:
+                action_mask[self.actions_to_indices['CLOSE_ALL']] = 1
+
+            # Legal to close individual positions based on portfolio size
+            for i in range(len(self.portfolio)):
+                action_mask[self.actions_to_indices[f'CLOSE_POSITION_{i}']] = 1
         
         return {'observation': obs_vec, 'action_mask': action_mask, 'to_play': np.array([-1], dtype=np.int8)}
 
