@@ -79,10 +79,17 @@ class OptionsZeroGameEnv(gym.Env):
             actions[f'OPEN_SHORT_CALL_ATM{sign}{offset}'] = i; i+=1
             actions[f'OPEN_LONG_PUT_ATM{sign}{offset}'] = i; i+=1
             actions[f'OPEN_SHORT_PUT_ATM{sign}{offset}'] = i; i+=1
+        
         actions['OPEN_LONG_STRADDLE_ATM'] = i; i+=1
         actions['OPEN_SHORT_STRADDLE_ATM'] = i; i+=1
         actions['OPEN_LONG_STRANGLE_ATM_1'] = i; i+=1
         actions['OPEN_SHORT_STRANGLE_ATM_1'] = i; i+=1
+        
+        actions['OPEN_LONG_IRON_FLY'] = i; i+=1
+        actions['OPEN_SHORT_IRON_FLY'] = i; i+=1
+        actions['OPEN_LONG_IRON_CONDOR'] = i; i+=1
+        actions['OPEN_SHORT_IRON_CONDOR'] = i; i+=1
+        
         for j in range(self.max_positions):
             actions[f'CLOSE_POSITION_{j}'] = i; i+=1
         actions['CLOSE_ALL'] = i
@@ -223,6 +230,48 @@ class OptionsZeroGameEnv(gym.Env):
             mid_price_put, _, _ = self._get_option_details(self.current_price, put_strike, days_to_expiry, 'put')
             trades_to_execute.append({'type': 'put', 'direction': direction, 'strike_price': put_strike, 'entry_premium': self._get_option_price(mid_price_put, is_buy)})
 
+        elif 'IRON_FLY' in action_name:
+            if len(self.portfolio) > self.max_positions - 4: return
+            direction = 'long' if 'LONG' in action_name else 'short'
+            straddle_dir = 'long' if direction == 'long' else 'short'
+            strangle_dir = 'short' if direction == 'long' else 'long'
+            
+            # Straddle legs (ATM)
+            mid_price_call_atm, _, _ = self._get_option_details(self.current_price, atm_price, days_to_expiry, 'call')
+            trades_to_execute.append({'type': 'call', 'direction': straddle_dir, 'strike_price': atm_price, 'entry_premium': self._get_option_price(mid_price_call_atm, straddle_dir == 'long')})
+            mid_price_put_atm, _, _ = self._get_option_details(self.current_price, atm_price, days_to_expiry, 'put')
+            trades_to_execute.append({'type': 'put', 'direction': straddle_dir, 'strike_price': atm_price, 'entry_premium': self._get_option_price(mid_price_put_atm, straddle_dir == 'long')})
+            
+            # Strangle legs (ATM+/-2)
+            call_strike_otm = atm_price + (2 * self.strike_distance)
+            put_strike_otm = atm_price - (2 * self.strike_distance)
+            mid_price_call_otm, _, _ = self._get_option_details(self.current_price, call_strike_otm, days_to_expiry, 'call')
+            trades_to_execute.append({'type': 'call', 'direction': strangle_dir, 'strike_price': call_strike_otm, 'entry_premium': self._get_option_price(mid_price_call_otm, strangle_dir == 'long')})
+            mid_price_put_otm, _, _ = self._get_option_details(self.current_price, put_strike_otm, days_to_expiry, 'put')
+            trades_to_execute.append({'type': 'put', 'direction': strangle_dir, 'strike_price': put_strike_otm, 'entry_premium': self._get_option_price(mid_price_put_otm, strangle_dir == 'long')})
+
+        elif 'IRON_CONDOR' in action_name:
+            if len(self.portfolio) > self.max_positions - 4: return
+            direction = 'long' if 'LONG' in action_name else 'short'
+            inner_dir = 'long' if direction == 'long' else 'short'
+            outer_dir = 'short' if direction == 'long' else 'long'
+
+            # Inner Strangle legs (ATM+/-2)
+            call_strike_inner = atm_price + (2 * self.strike_distance)
+            put_strike_inner = atm_price - (2 * self.strike_distance)
+            mid_price_call_inner, _, _ = self._get_option_details(self.current_price, call_strike_inner, days_to_expiry, 'call')
+            trades_to_execute.append({'type': 'call', 'direction': inner_dir, 'strike_price': call_strike_inner, 'entry_premium': self._get_option_price(mid_price_call_inner, inner_dir == 'long')})
+            mid_price_put_inner, _, _ = self._get_option_details(self.current_price, put_strike_inner, days_to_expiry, 'put')
+            trades_to_execute.append({'type': 'put', 'direction': inner_dir, 'strike_price': put_strike_inner, 'entry_premium': self._get_option_price(mid_price_put_inner, inner_dir == 'long')})
+
+            # Outer Strangle legs (ATM+/-3)
+            call_strike_outer = atm_price + (3 * self.strike_distance)
+            put_strike_outer = atm_price - (3 * self.strike_distance)
+            mid_price_call_outer, _, _ = self._get_option_details(self.current_price, call_strike_outer, days_to_expiry, 'call')
+            trades_to_execute.append({'type': 'call', 'direction': outer_dir, 'strike_price': call_strike_outer, 'entry_premium': self._get_option_price(mid_price_call_outer, outer_dir == 'long')})
+            mid_price_put_outer, _, _ = self._get_option_details(self.current_price, put_strike_outer, days_to_expiry, 'put')
+            trades_to_execute.append({'type': 'put', 'direction': outer_dir, 'strike_price': put_strike_outer, 'entry_premium': self._get_option_price(mid_price_put_outer, outer_dir == 'long')})
+
         elif 'ATM' in action_name:
             if len(self.portfolio) >= self.max_positions: return
             _, direction, type, strike_str = action_name.split('_')
@@ -266,23 +315,25 @@ class OptionsZeroGameEnv(gym.Env):
         else:
             action_mask = np.zeros(self.action_space_size, dtype=np.int8)
             action_mask[self.actions_to_indices['HOLD']] = 1
-            
-            # <<< MODIFIED: Add position counters for the new rule
             num_long_calls = sum(1 for p in self.portfolio if p['type'] == 'call' and p['direction'] == 'long')
             num_short_calls = sum(1 for p in self.portfolio if p['type'] == 'call' and p['direction'] == 'short')
             num_long_puts = sum(1 for p in self.portfolio if p['type'] == 'put' and p['direction'] == 'long')
             num_short_puts = sum(1 for p in self.portfolio if p['type'] == 'put' and p['direction'] == 'short')
-            
             existing_positions = {(p['strike_price'], p['type']): p['direction'] for p in self.portfolio}
             
-            # Multi-leg combo actions are exempt from the "No Naked Aggression" rule
+            # <<< MODIFIED: Add mask logic for 4-legged combos
+            if len(self.portfolio) <= self.max_positions - 4:
+                action_mask[self.actions_to_indices['OPEN_LONG_IRON_FLY']] = 1
+                action_mask[self.actions_to_indices['OPEN_SHORT_IRON_FLY']] = 1
+                action_mask[self.actions_to_indices['OPEN_LONG_IRON_CONDOR']] = 1
+                action_mask[self.actions_to_indices['OPEN_SHORT_IRON_CONDOR']] = 1
+
             if len(self.portfolio) <= self.max_positions - 2:
                 action_mask[self.actions_to_indices['OPEN_LONG_STRADDLE_ATM']] = 1
                 action_mask[self.actions_to_indices['OPEN_SHORT_STRADDLE_ATM']] = 1
                 action_mask[self.actions_to_indices['OPEN_LONG_STRANGLE_ATM_1']] = 1
                 action_mask[self.actions_to_indices['OPEN_SHORT_STRANGLE_ATM_1']] = 1
 
-            # Single-leg actions
             if len(self.portfolio) < self.max_positions:
                 atm_price = round(self.current_price / self.strike_distance) * self.strike_distance
                 days_to_expiry = self.total_steps - self.current_step
@@ -292,28 +343,21 @@ class OptionsZeroGameEnv(gym.Env):
                         _, d = self._get_option_details(self.current_price, strike_price, days_to_expiry, option_type)
                         is_far_otm = d < 0.15
                         is_far_itm = d > 0.85
-                        
-                        # --- Check LONG actions ---
                         action_name_long = f'OPEN_LONG_{option_type.upper()}_ATM{"+" if offset >=0 else ""}{offset}'
                         is_legal_long = not (is_far_otm or is_far_itm)
                         if option_type == 'put' and existing_positions.get((strike_price, 'call')) == 'short': is_legal_long = False
                         if option_type == 'call' and existing_positions.get((strike_price, 'put')) == 'short': is_legal_long = False
-                        # <<< NEW: "No Naked Aggression" Rule for Longs
                         if option_type == 'call' and num_long_calls > 0: is_legal_long = False
                         if option_type == 'put' and num_long_puts > 0: is_legal_long = False
                         if is_legal_long: action_mask[self.actions_to_indices[action_name_long]] = 1
-                        
-                        # --- Check SHORT actions ---
                         action_name_short = f'OPEN_SHORT_{option_type.upper()}_ATM{"+" if offset >=0 else ""}{offset}'
                         is_legal_short = not is_far_itm
                         if option_type == 'put' and existing_positions.get((strike_price, 'call')) == 'long': is_legal_short = False
                         if option_type == 'call' and existing_positions.get((strike_price, 'put')) == 'long': is_legal_short = False
-                        # <<< NEW: "No Naked Aggression" Rule for Shorts
                         if option_type == 'call' and num_short_calls > 0: is_legal_short = False
                         if option_type == 'put' and num_short_puts > 0: is_legal_short = False
                         if is_legal_short: action_mask[self.actions_to_indices[action_name_short]] = 1
             
-            # Close actions
             if len(self.portfolio) > 0:
                 action_mask[self.actions_to_indices['CLOSE_ALL']] = 1
             for i in range(len(self.portfolio)):
