@@ -7,12 +7,13 @@ import numpy as np
 from arch import arch_model
 from easydict import EasyDict
 from gym import spaces
-from gymnasium.utils import seeding
+from gym.utils import seeding
 from py_vollib.black_scholes import black_scholes
 from py_vollib.black_scholes.greeks.analytical import delta
 from scipy.stats import norm
+from collections import namedtuple
 
-from ding.envs import BaseEnvTimestep
+from ding.envs.env.base_env import BaseEnvTimestep
 from ding.utils import ENV_REGISTRY
 
 
@@ -99,6 +100,7 @@ class OptionsZeroGameEnv(gym.Env):
         self.obs_vector_size = 3 + self.max_positions * 8
         return spaces.Dict({'observation': spaces.Box(low=-np.inf, high=np.inf, shape=(self.obs_vector_size,), dtype=np.float32),'action_mask': spaces.Box(low=0, high=1, shape=(self.action_space_size,), dtype=np.int8),'to_play': spaces.Box(low=-1, high=-1, shape=(1,), dtype=np.int8)})
 
+    # <<< THE FIX: Update the seed signature to match the framework's call.
     def seed(self, seed: int, dynamic_seed: int = None):
         self.np_random, seed = seeding.np_random(seed)
         random.seed(seed)
@@ -287,7 +289,6 @@ class OptionsZeroGameEnv(gym.Env):
             mid_price_put_outer, _, _ = self._get_option_details(self.current_price, put_strike_outer, days_to_expiry, 'put')
             trades_to_execute.append({'type': 'put', 'direction': outer_dir, 'strike_price': put_strike_outer, 'entry_premium': self._get_option_price(mid_price_put_outer, outer_dir == 'long')})
 
-        # <<< THE FIX: This is the fallback for all single-leg actions
         else:
             if len(self.portfolio) >= self.max_positions: return
             _, direction, type, strike_str = action_name.split('_')
