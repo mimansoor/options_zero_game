@@ -1,5 +1,3 @@
-import random
-import copy  # <<< THIS IS THE FIX
 from easydict import EasyDict
 
 # ==============================================================
@@ -14,21 +12,27 @@ max_env_step = 100000
 reanalyze_ratio = 0.
 action_space_size = 42
 
-# Define our curriculum of market regimes
+# <<< MODIFIED: The new, comprehensive "Global Markets" curriculum
 market_regimes = [
-    {'trend': 0.0, 'volatility': 0.20, 'name': 'Sideways_NormalVol'},
-    {'trend': 0.0005, 'volatility': 0.20, 'name': 'Bullish_NormalVol'},
-    {'trend': -0.0005, 'volatility': 0.20, 'name': 'Bearish_NormalVol'},
-    {'trend': 0.0005, 'volatility': 0.40, 'name': 'Bullish_HighVol'},
-    {'trend': -0.0005, 'volatility': 0.40, 'name': 'Bearish_HighVol'},
-    {'trend': 0.0, 'volatility': 0.10, 'name': 'Sideways_LowVol'},
+    # Name, mu (trend), omega, alpha, beta
+    {'name': 'Developed_Markets', 'mu': 0.00006, 'omega': 0.000005, 'alpha': 0.08, 'beta': 0.90},
+    {'name': 'Emerging_Markets', 'mu': 0.0001, 'omega': 0.00005, 'alpha': 0.12, 'beta': 0.86},
+    {'name': 'Individual_Stocks', 'mu': 0.00008, 'omega': 0.00007, 'alpha': 0.10, 'beta': 0.88},
+    {'name': 'Commodities_Oil', 'mu': 0.0000, 'omega': 0.0002, 'alpha': 0.28, 'beta': 0.70},
+    {'name': 'Foreign_Exchange_FX', 'mu': 0.0000, 'omega': 0.000003, 'alpha': 0.08, 'beta': 0.91},
+    {'name': 'Cryptocurrencies', 'mu': 0.001, 'omega': 0.001, 'alpha': 0.20, 'beta': 0.75},
+    {'name': 'Bond_Markets', 'mu': 0.00001, 'omega': 0.000002, 'alpha': 0.05, 'beta': 0.92},
+    {'name': 'Volatility_VIX', 'mu': 0.0, 'omega': 0.0005, 'alpha': 0.25, 'beta': 0.65},
+    {'name': 'Frontier_Markets', 'mu': 0.0002, 'omega': 0.0001, 'alpha': 0.20, 'beta': 0.70},
+    {'name': 'Tech_Sector', 'mu': 0.0001, 'omega': 0.00004, 'alpha': 0.11, 'beta': 0.87},
+    {'name': 'Utilities_Sector', 'mu': 0.00004, 'omega': 0.00001, 'alpha': 0.08, 'beta': 0.90},
 ]
 
 # ==============================================================
 #                    Main Config (The Parameters)
 # ==============================================================
 options_zero_game_muzero_config = dict(
-    exp_name=f'options_zero_game_muzero_multi_regime_ns{num_simulations}_upc{update_per_collect}_bs{batch_size}',
+    exp_name=f'options_zero_game_muzero_global_markets_ns{num_simulations}_upc{update_per_collect}_bs{batch_size}',
     env=dict(
         env_id='OptionsZeroGame-v0',
         collector_env_num=collector_env_num,
@@ -37,6 +41,8 @@ options_zero_game_muzero_config = dict(
         manager=dict(shared_memory=False, ),
         ignore_legal_actions=True,
         drawdown_penalty_weight=0.1,
+        # Pass the entire new curriculum to the environment
+        market_regimes=market_regimes,
     ),
     policy=dict(
         model=dict(
@@ -83,19 +89,6 @@ create_config = dict(
 )
 create_config = EasyDict(create_config)
 
-def main_multi_regime(main_cfg, create_cfg, seed, max_env_step):
-    from lzero.entry import train_muzero
-    
-    print("Starting training for a specific regime. To train on all, a custom pipeline is needed.")
-    
-    # Let's train on a single, interesting regime for this run: Bullish High Vol
-    chosen_regime = market_regimes[3] 
-    main_cfg.env.trend = chosen_regime['trend']
-    main_cfg.env.volatility = chosen_regime['volatility']
-    main_cfg.exp_name = f'options_zero_game_muzero_{chosen_regime["name"]}_ns{num_simulations}'
-
-    train_muzero([main_cfg, create_cfg], seed=seed, max_env_step=max_env_step)
-
-
 if __name__ == "__main__":
-    main_multi_regime(main_config, create_config, seed=0, max_env_step=max_env_step)
+    from lzero.entry import train_muzero
+    train_muzero([main_config, create_config], seed=0, max_env_step=max_env_step)

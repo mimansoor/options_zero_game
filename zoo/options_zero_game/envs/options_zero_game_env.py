@@ -1,5 +1,6 @@
 import copy
 import math
+import random
 
 import gym
 import numpy as np
@@ -22,8 +23,9 @@ class OptionsZeroGameEnv(gym.Env):
     config = dict(
         start_price=100.0,
         initial_cash=100000.0,
-        trend=0.0,
-        volatility=0.20,
+        market_regimes = [
+            {'name': 'Developed_Market', 'mu': 0.00005, 'omega': 0.000005, 'alpha': 0.09, 'beta': 0.90},
+        ],
         time_to_expiry=30,
         strike_distance=1.0,
         lot_size=100,
@@ -48,8 +50,10 @@ class OptionsZeroGameEnv(gym.Env):
 
         self.start_price = self._cfg.start_price
         self.initial_cash = self._cfg.initial_cash
-        self.trend = self._cfg.trend
-        self.volatility = self._cfg.volatility
+        self.market_regimes = self._cfg.market_regimes
+        self.trend = 0.0
+        self.volatility = 0.20
+        
         self.total_steps = self._cfg.time_to_expiry
         self.risk_free_rate = self._cfg.risk_free_rate
         self.lot_size = self._cfg.lot_size
@@ -69,7 +73,6 @@ class OptionsZeroGameEnv(gym.Env):
         self._reward_range = spaces.Box(low=-1.0, high=1.0, shape=(1,), dtype=np.float32)
         
         self.np_random = None
-        # Note: We no longer initialize the GARCH model here. It will be done in reset().
 
     def _build_action_space(self):
         actions = {'HOLD': 0}; i = 1
@@ -98,19 +101,21 @@ class OptionsZeroGameEnv(gym.Env):
 
     def seed(self, seed: int, dynamic_seed: int = None):
         self.np_random, seed = seeding.np_random(seed)
+        random.seed(seed)
         return [seed]
 
-    def _initialize_price_simulator(self):
-        # Use the environment's current trend and volatility
-        init_returns = np.random.RandomState(0).normal(loc=self.trend, scale=self.volatility / np.sqrt(252), size=1000)
-        self.garch_model = arch_model(init_returns * 100, vol='Garch', p=1, q=1, mean='Constant', dist='Normal')
-        self.garch_fit = self.garch_model.fit(disp='off', show_warning=False)
+    def _generate_price_path(self):
+        garch_spec = arch_model(None, p=1, q=1)
+        params = np.array([self.trend, self.omega, self.alpha, self.beta])
+        sim_returns = garch_spec.simulate(params, self.total_steps + 1)
+        price_path = np.zeros(self.total_steps + 1)
+        price_path[0] = self.start_price
+        for i in range(1, self.total_steps + 1):
+            price_path[i] = price_path[i-1] * (1 + sim_returns['data'][i-1] / 100)
+        self.price_path = price_path
 
     def _simulate_price_step(self):
-        forecast = self.garch_fit.forecast(horizon=1, reindex=False)
-        cond_vol = np.sqrt(forecast.variance.iloc[-1, 0]) / 100
-        shock = self.np_random.normal(loc=self.trend, scale=cond_vol)
-        self.current_price *= (1 + shock)
+        self.current_price = self.price_path[self.current_step]
     
     def _get_option_details(self, underlying_price, strike_price, days_to_expiry, option_type):
         t = days_to_expiry / 365.25
@@ -122,7 +127,8 @@ class OptionsZeroGameEnv(gym.Env):
             d = delta(option_type[0], underlying_price, strike_price, t, self.risk_free_rate, vol)
             mid_price = black_scholes(option_type[0], underlying_price, strike_price, t, self.risk_free_rate, vol)
             return mid_price, abs(d), d2
-        except Exception: return 0, 0, 0
+        except (ValueError, ZeroDivisionError):
+            return 0, 0, 0
 
     def _get_option_price(self, mid_price, is_buy):
         if is_buy: return mid_price * (1 + self.bid_ask_spread_pct)
@@ -142,9 +148,21 @@ class OptionsZeroGameEnv(gym.Env):
     def reset(self, seed: int = None, **kwargs):
         if seed is not None: self.seed(seed)
         
-        # <<< MODIFIED: Re-initialize the simulator at the start of each episode
-        # This ensures the new trend/volatility parameters are used.
-        self._initialize_price_simulator()
+        chosen_regime = random.choice(self.market_regimes)
+        self.trend = chosen_regime['mu']
+        self.omega = chosen_regime['omega']
+        self.alpha = chosen_regime['alpha']
+        self.beta = chosen_regime['beta']
+        
+        if self.alpha + self.beta >= 1.0:
+            total = self.alpha + self.beta
+            self.alpha = self.alpha / (total + 0.01)
+            self.beta = self.beta / (total + 0.01)
+
+        unconditional_variance = self.omega / (1 - self.alpha - self.beta)
+        self.volatility = math.sqrt(unconditional_variance * 252)
+        
+        self._generate_price_path()
         
         self.current_step = 0
         self.current_price = self.start_price
@@ -178,8 +196,10 @@ class OptionsZeroGameEnv(gym.Env):
             while len(self.portfolio) > 0: self._close_position(0)
         
         self.portfolio.sort(key=lambda p: (p['strike_price'], p['type']))
-        self._simulate_price_step()
+        
         self.current_step += 1
+        self._simulate_price_step()
+
         for pos in self.portfolio: pos['days_to_expiry'] -= 1
 
         tpv_after = self._get_portfolio_value()
@@ -267,7 +287,8 @@ class OptionsZeroGameEnv(gym.Env):
             mid_price_put_outer, _, _ = self._get_option_details(self.current_price, put_strike_outer, days_to_expiry, 'put')
             trades_to_execute.append({'type': 'put', 'direction': outer_dir, 'strike_price': put_strike_outer, 'entry_premium': self._get_option_price(mid_price_put_outer, outer_dir == 'long')})
 
-        elif 'ATM' in action_name:
+        # <<< THE FIX: This is the fallback for all single-leg actions
+        else:
             if len(self.portfolio) >= self.max_positions: return
             _, direction, type, strike_str = action_name.split('_')
             offset = int(strike_str.replace('ATM', ''))
