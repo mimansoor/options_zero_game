@@ -71,7 +71,6 @@ class OptionsZeroGameEnv(gym.Env):
         self.np_random = None
         self._initialize_price_simulator()
 
-    # <<< MODIFIED: Added Strangle actions
     def _build_action_space(self):
         actions = {'HOLD': 0}; i = 1
         for offset in range(-3, 4):
@@ -80,13 +79,10 @@ class OptionsZeroGameEnv(gym.Env):
             actions[f'OPEN_SHORT_CALL_ATM{sign}{offset}'] = i; i+=1
             actions[f'OPEN_LONG_PUT_ATM{sign}{offset}'] = i; i+=1
             actions[f'OPEN_SHORT_PUT_ATM{sign}{offset}'] = i; i+=1
-        
         actions['OPEN_LONG_STRADDLE_ATM'] = i; i+=1
         actions['OPEN_SHORT_STRADDLE_ATM'] = i; i+=1
-        # <<< NEW: Add Strangle actions
         actions['OPEN_LONG_STRANGLE_ATM_1'] = i; i+=1
         actions['OPEN_SHORT_STRANGLE_ATM_1'] = i; i+=1
-        
         for j in range(self.max_positions):
             actions[f'CLOSE_POSITION_{j}'] = i; i+=1
         actions['CLOSE_ALL'] = i
@@ -216,18 +212,13 @@ class OptionsZeroGameEnv(gym.Env):
             mid_price_put, _, _ = self._get_option_details(self.current_price, atm_price, days_to_expiry, 'put')
             trades_to_execute.append({'type': 'put', 'direction': direction, 'strike_price': atm_price, 'entry_premium': self._get_option_price(mid_price_put, is_buy)})
         
-        # <<< NEW: Handle Strangle logic
         elif 'STRANGLE' in action_name:
             if len(self.portfolio) > self.max_positions - 2: return
             direction = 'long' if 'LONG' in action_name else 'short'
             is_buy = (direction == 'long')
-            
-            # Leg 1: OTM Call at ATM+1
             call_strike = atm_price + (1 * self.strike_distance)
             mid_price_call, _, _ = self._get_option_details(self.current_price, call_strike, days_to_expiry, 'call')
             trades_to_execute.append({'type': 'call', 'direction': direction, 'strike_price': call_strike, 'entry_premium': self._get_option_price(mid_price_call, is_buy)})
-            
-            # Leg 2: OTM Put at ATM-1
             put_strike = atm_price - (1 * self.strike_distance)
             mid_price_put, _, _ = self._get_option_details(self.current_price, put_strike, days_to_expiry, 'put')
             trades_to_execute.append({'type': 'put', 'direction': direction, 'strike_price': put_strike, 'entry_premium': self._get_option_price(mid_price_put, is_buy)})
@@ -275,15 +266,23 @@ class OptionsZeroGameEnv(gym.Env):
         else:
             action_mask = np.zeros(self.action_space_size, dtype=np.int8)
             action_mask[self.actions_to_indices['HOLD']] = 1
+            
+            # <<< MODIFIED: Add position counters for the new rule
+            num_long_calls = sum(1 for p in self.portfolio if p['type'] == 'call' and p['direction'] == 'long')
+            num_short_calls = sum(1 for p in self.portfolio if p['type'] == 'call' and p['direction'] == 'short')
+            num_long_puts = sum(1 for p in self.portfolio if p['type'] == 'put' and p['direction'] == 'long')
+            num_short_puts = sum(1 for p in self.portfolio if p['type'] == 'put' and p['direction'] == 'short')
+            
             existing_positions = {(p['strike_price'], p['type']): p['direction'] for p in self.portfolio}
             
-            # <<< MODIFIED: Add mask logic for strangles
+            # Multi-leg combo actions are exempt from the "No Naked Aggression" rule
             if len(self.portfolio) <= self.max_positions - 2:
                 action_mask[self.actions_to_indices['OPEN_LONG_STRADDLE_ATM']] = 1
                 action_mask[self.actions_to_indices['OPEN_SHORT_STRADDLE_ATM']] = 1
                 action_mask[self.actions_to_indices['OPEN_LONG_STRANGLE_ATM_1']] = 1
                 action_mask[self.actions_to_indices['OPEN_SHORT_STRANGLE_ATM_1']] = 1
 
+            # Single-leg actions
             if len(self.portfolio) < self.max_positions:
                 atm_price = round(self.current_price / self.strike_distance) * self.strike_distance
                 days_to_expiry = self.total_steps - self.current_step
@@ -293,17 +292,28 @@ class OptionsZeroGameEnv(gym.Env):
                         _, d = self._get_option_details(self.current_price, strike_price, days_to_expiry, option_type)
                         is_far_otm = d < 0.15
                         is_far_itm = d > 0.85
+                        
+                        # --- Check LONG actions ---
                         action_name_long = f'OPEN_LONG_{option_type.upper()}_ATM{"+" if offset >=0 else ""}{offset}'
                         is_legal_long = not (is_far_otm or is_far_itm)
                         if option_type == 'put' and existing_positions.get((strike_price, 'call')) == 'short': is_legal_long = False
                         if option_type == 'call' and existing_positions.get((strike_price, 'put')) == 'short': is_legal_long = False
+                        # <<< NEW: "No Naked Aggression" Rule for Longs
+                        if option_type == 'call' and num_long_calls > 0: is_legal_long = False
+                        if option_type == 'put' and num_long_puts > 0: is_legal_long = False
                         if is_legal_long: action_mask[self.actions_to_indices[action_name_long]] = 1
+                        
+                        # --- Check SHORT actions ---
                         action_name_short = f'OPEN_SHORT_{option_type.upper()}_ATM{"+" if offset >=0 else ""}{offset}'
                         is_legal_short = not is_far_itm
                         if option_type == 'put' and existing_positions.get((strike_price, 'call')) == 'long': is_legal_short = False
                         if option_type == 'call' and existing_positions.get((strike_price, 'put')) == 'long': is_legal_short = False
+                        # <<< NEW: "No Naked Aggression" Rule for Shorts
+                        if option_type == 'call' and num_short_calls > 0: is_legal_short = False
+                        if option_type == 'put' and num_short_puts > 0: is_legal_short = False
                         if is_legal_short: action_mask[self.actions_to_indices[action_name_short]] = 1
             
+            # Close actions
             if len(self.portfolio) > 0:
                 action_mask[self.actions_to_indices['CLOSE_ALL']] = 1
             for i in range(len(self.portfolio)):
