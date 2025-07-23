@@ -24,7 +24,7 @@ if __name__ == "__main__":
     create_config.env.type = 'log_replay'
     
     # Set the path for the output log file
-    main_config.env.log_file_path = 'visualizer-ui/src/replay_log.json'
+    main_config.env.log_file_path = 'visualizer-ui/public/replay_log.json'
 
     # We can choose a specific market regime to evaluate for consistency
     main_config.env.market_regimes = [
@@ -50,4 +50,4 @@ if __name__ == "__main__":
     )
     
     print(f"\nEvaluation run complete. Final Episode PnL: {returns[0][0]:.2f}")
-    print(f"The replay_log.json should now be in the visualizer-ui/src/ directory.")
+    print(f"The replay_log.json should now be in the visualizer-ui/public/ directory.")
