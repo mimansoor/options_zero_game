@@ -69,7 +69,7 @@ class OptionsZeroGameEnv(gym.Env):
         self._reward_range = spaces.Box(low=-1.0, high=1.0, shape=(1,), dtype=np.float32)
         
         self.np_random = None
-        self._initialize_price_simulator()
+        # Note: We no longer initialize the GARCH model here. It will be done in reset().
 
     def _build_action_space(self):
         actions = {'HOLD': 0}; i = 1
@@ -79,17 +79,14 @@ class OptionsZeroGameEnv(gym.Env):
             actions[f'OPEN_SHORT_CALL_ATM{sign}{offset}'] = i; i+=1
             actions[f'OPEN_LONG_PUT_ATM{sign}{offset}'] = i; i+=1
             actions[f'OPEN_SHORT_PUT_ATM{sign}{offset}'] = i; i+=1
-        
         actions['OPEN_LONG_STRADDLE_ATM'] = i; i+=1
         actions['OPEN_SHORT_STRADDLE_ATM'] = i; i+=1
         actions['OPEN_LONG_STRANGLE_ATM_1'] = i; i+=1
         actions['OPEN_SHORT_STRANGLE_ATM_1'] = i; i+=1
-        
         actions['OPEN_LONG_IRON_FLY'] = i; i+=1
         actions['OPEN_SHORT_IRON_FLY'] = i; i+=1
         actions['OPEN_LONG_IRON_CONDOR'] = i; i+=1
         actions['OPEN_SHORT_IRON_CONDOR'] = i; i+=1
-        
         for j in range(self.max_positions):
             actions[f'CLOSE_POSITION_{j}'] = i; i+=1
         actions['CLOSE_ALL'] = i
@@ -104,6 +101,7 @@ class OptionsZeroGameEnv(gym.Env):
         return [seed]
 
     def _initialize_price_simulator(self):
+        # Use the environment's current trend and volatility
         init_returns = np.random.RandomState(0).normal(loc=self.trend, scale=self.volatility / np.sqrt(252), size=1000)
         self.garch_model = arch_model(init_returns * 100, vol='Garch', p=1, q=1, mean='Constant', dist='Normal')
         self.garch_fit = self.garch_model.fit(disp='off', show_warning=False)
@@ -143,6 +141,11 @@ class OptionsZeroGameEnv(gym.Env):
 
     def reset(self, seed: int = None, **kwargs):
         if seed is not None: self.seed(seed)
+        
+        # <<< MODIFIED: Re-initialize the simulator at the start of each episode
+        # This ensures the new trend/volatility parameters are used.
+        self._initialize_price_simulator()
+        
         self.current_step = 0
         self.current_price = self.start_price
         self.portfolio = []
@@ -235,14 +238,10 @@ class OptionsZeroGameEnv(gym.Env):
             direction = 'long' if 'LONG' in action_name else 'short'
             straddle_dir = 'long' if direction == 'long' else 'short'
             strangle_dir = 'short' if direction == 'long' else 'long'
-            
-            # Straddle legs (ATM)
             mid_price_call_atm, _, _ = self._get_option_details(self.current_price, atm_price, days_to_expiry, 'call')
             trades_to_execute.append({'type': 'call', 'direction': straddle_dir, 'strike_price': atm_price, 'entry_premium': self._get_option_price(mid_price_call_atm, straddle_dir == 'long')})
             mid_price_put_atm, _, _ = self._get_option_details(self.current_price, atm_price, days_to_expiry, 'put')
             trades_to_execute.append({'type': 'put', 'direction': straddle_dir, 'strike_price': atm_price, 'entry_premium': self._get_option_price(mid_price_put_atm, straddle_dir == 'long')})
-            
-            # Strangle legs (ATM+/-2)
             call_strike_otm = atm_price + (2 * self.strike_distance)
             put_strike_otm = atm_price - (2 * self.strike_distance)
             mid_price_call_otm, _, _ = self._get_option_details(self.current_price, call_strike_otm, days_to_expiry, 'call')
@@ -255,16 +254,12 @@ class OptionsZeroGameEnv(gym.Env):
             direction = 'long' if 'LONG' in action_name else 'short'
             inner_dir = 'long' if direction == 'long' else 'short'
             outer_dir = 'short' if direction == 'long' else 'long'
-
-            # Inner Strangle legs (ATM+/-2)
             call_strike_inner = atm_price + (2 * self.strike_distance)
             put_strike_inner = atm_price - (2 * self.strike_distance)
             mid_price_call_inner, _, _ = self._get_option_details(self.current_price, call_strike_inner, days_to_expiry, 'call')
             trades_to_execute.append({'type': 'call', 'direction': inner_dir, 'strike_price': call_strike_inner, 'entry_premium': self._get_option_price(mid_price_call_inner, inner_dir == 'long')})
             mid_price_put_inner, _, _ = self._get_option_details(self.current_price, put_strike_inner, days_to_expiry, 'put')
             trades_to_execute.append({'type': 'put', 'direction': inner_dir, 'strike_price': put_strike_inner, 'entry_premium': self._get_option_price(mid_price_put_inner, inner_dir == 'long')})
-
-            # Outer Strangle legs (ATM+/-3)
             call_strike_outer = atm_price + (3 * self.strike_distance)
             put_strike_outer = atm_price - (3 * self.strike_distance)
             mid_price_call_outer, _, _ = self._get_option_details(self.current_price, call_strike_outer, days_to_expiry, 'call')
@@ -321,7 +316,6 @@ class OptionsZeroGameEnv(gym.Env):
             num_short_puts = sum(1 for p in self.portfolio if p['type'] == 'put' and p['direction'] == 'short')
             existing_positions = {(p['strike_price'], p['type']): p['direction'] for p in self.portfolio}
             
-            # <<< MODIFIED: Add mask logic for 4-legged combos
             if len(self.portfolio) <= self.max_positions - 4:
                 action_mask[self.actions_to_indices['OPEN_LONG_IRON_FLY']] = 1
                 action_mask[self.actions_to_indices['OPEN_SHORT_IRON_FLY']] = 1

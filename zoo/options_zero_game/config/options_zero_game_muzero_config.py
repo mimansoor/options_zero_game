@@ -1,3 +1,5 @@
+import random
+import copy  # <<< THIS IS THE FIX
 from easydict import EasyDict
 
 # ==============================================================
@@ -10,15 +12,23 @@ num_simulations = 50
 update_per_collect = 1000
 max_env_step = 100000
 reanalyze_ratio = 0.
-# <<< MODIFIED: Update the action space size
-# 38 (from before) + 4 (Iron Fly/Condor) = 42
 action_space_size = 42
+
+# Define our curriculum of market regimes
+market_regimes = [
+    {'trend': 0.0, 'volatility': 0.20, 'name': 'Sideways_NormalVol'},
+    {'trend': 0.0005, 'volatility': 0.20, 'name': 'Bullish_NormalVol'},
+    {'trend': -0.0005, 'volatility': 0.20, 'name': 'Bearish_NormalVol'},
+    {'trend': 0.0005, 'volatility': 0.40, 'name': 'Bullish_HighVol'},
+    {'trend': -0.0005, 'volatility': 0.40, 'name': 'Bearish_HighVol'},
+    {'trend': 0.0, 'volatility': 0.10, 'name': 'Sideways_LowVol'},
+]
 
 # ==============================================================
 #                    Main Config (The Parameters)
 # ==============================================================
 options_zero_game_muzero_config = dict(
-    exp_name=f'options_zero_game_muzero_defined_risk_ns{num_simulations}_upc{update_per_collect}_bs{batch_size}',
+    exp_name=f'options_zero_game_muzero_multi_regime_ns{num_simulations}_upc{update_per_collect}_bs{batch_size}',
     env=dict(
         env_id='OptionsZeroGame-v0',
         collector_env_num=collector_env_num,
@@ -31,7 +41,7 @@ options_zero_game_muzero_config = dict(
     policy=dict(
         model=dict(
             observation_shape=35,
-            action_space_size=action_space_size, # This will now be 42
+            action_space_size=action_space_size,
             model_type='mlp',
             lstm_hidden_size=512,
             latent_state_dim=512,
@@ -73,6 +83,19 @@ create_config = dict(
 )
 create_config = EasyDict(create_config)
 
-if __name__ == "__main__":
+def main_multi_regime(main_cfg, create_cfg, seed, max_env_step):
     from lzero.entry import train_muzero
-    train_muzero([main_config, create_config], seed=0, max_env_step=max_env_step)
+    
+    print("Starting training for a specific regime. To train on all, a custom pipeline is needed.")
+    
+    # Let's train on a single, interesting regime for this run: Bullish High Vol
+    chosen_regime = market_regimes[3] 
+    main_cfg.env.trend = chosen_regime['trend']
+    main_cfg.env.volatility = chosen_regime['volatility']
+    main_cfg.exp_name = f'options_zero_game_muzero_{chosen_regime["name"]}_ns{num_simulations}'
+
+    train_muzero([main_cfg, create_cfg], seed=seed, max_env_step=max_env_step)
+
+
+if __name__ == "__main__":
+    main_multi_regime(main_config, create_config, seed=0, max_env_step=max_env_step)
