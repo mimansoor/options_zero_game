@@ -44,7 +44,6 @@ class OptionsZeroGameEnv(gym.Env):
         risk_free_rate=0.05,
         pnl_scaling_factor=1000,
         drawdown_penalty_weight=0.1,
-        ignore_legal_actions=True,
     )
 
     @classmethod
@@ -72,7 +71,6 @@ class OptionsZeroGameEnv(gym.Env):
         self.bid_ask_spread_pct = self._cfg.bid_ask_spread_pct
         self.pnl_scaling_factor = self._cfg.pnl_scaling_factor
         self.drawdown_penalty_weight = self._cfg.drawdown_penalty_weight
-        self.ignore_legal_actions = self._cfg.ignore_legal_actions
         
         self.actions_to_indices = self._build_action_space()
         self.indices_to_actions = {v: k for k, v in self.actions_to_indices.items()}
@@ -107,7 +105,7 @@ class OptionsZeroGameEnv(gym.Env):
 
     def _create_observation_space(self):
         self.obs_vector_size = 3 + self.max_positions * 8
-        return spaces.Dict({'observation': spaces.Box(low=-np.inf, high=np.inf, shape=(self.obs_vector_size,), dtype=np.float32),'action_mask': spaces.Box(low=0, high=1, shape=(self.action_space_size,), dtype=np.int8),'to_play': spaces.Box(low=-1, high=-1, shape=(1,), dtype=np.int8)})
+        return spaces.Box(low=-np.inf, high=np.inf, shape=(self.obs_vector_size,), dtype=np.float32)
 
     def seed(self, seed: int, dynamic_seed: int = None):
         self.np_random, seed = seeding.np_random(seed)
@@ -408,9 +406,10 @@ class OptionsZeroGameEnv(gym.Env):
                 obs_vec[current_idx + 7] = math.tanh(max_loss / self.initial_cash)
             current_idx += 8
         
-        action_mask = np.ones(self.action_space_size, dtype=np.int8)
+        action_mask = self._get_true_action_mask()
+        #action_mask = np.ones(self.action_space_size, dtype=np.int8)
         
-        return {'observation': obs_vec, 'action_mask': action_mask, 'to_play': np.array([-1], dtype=np.int8)}
+        return {'observation': obs_vec, 'action_mask': action_mask, 'to_play': -1}
 
     def _calculate_max_profit_loss(self, position):
         entry_premium = position['entry_premium'] * self.lot_size
@@ -425,22 +424,25 @@ class OptionsZeroGameEnv(gym.Env):
     def render(self, mode='human'):
         portfolio_val = self._get_portfolio_value()
         print(f"Step: {self.current_step:02d} | Price: ${self.current_price:8.2f} | Positions: {len(self.portfolio):1d} | Total PnL: ${portfolio_val:9.2f}")
-    
+
     @property
     def observation_space(self) -> gym.spaces.Space:
         return self._observation_space
+
     @property
     def action_space(self) -> gym.spaces.Space:
         return self._action_space
+
     @property
     def reward_space(self) -> gym.spaces.Space:
         return self._reward_range
-
+    
     @staticmethod
     def create_collector_env_cfg(cfg: dict) -> list:
         collector_env_num = cfg.pop('collector_env_num')
         cfg = copy.deepcopy(cfg)
         return [cfg for _ in range(collector_env_num)]
+
     @staticmethod
     def create_evaluator_env_cfg(cfg: dict) -> list:
         evaluator_env_num = cfg.pop('evaluator_env_num')

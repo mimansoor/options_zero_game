@@ -41,7 +41,6 @@ options_zero_game_muzero_config = dict(
         evaluator_env_num=evaluator_env_num,
         n_evaluator_episode=evaluator_env_num,
         manager=dict(shared_memory=False, ),
-        ignore_legal_actions=True,
         drawdown_penalty_weight=0.1,
         # Pass the entire new curriculum to the environment
         market_regimes=market_regimes,
