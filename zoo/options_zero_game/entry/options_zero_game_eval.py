@@ -14,7 +14,8 @@ if __name__ == "__main__":
     # ==============================================================
     # 1. Set the path to your best trained model checkpoint
     # ==============================================================
-    model_path = './options_zero_game_muzero_global_markets_ns50_upc1000_bs128/ckpt/ckpt_best.pth.tar' # UPDATE THIS PATH
+    #model_path = './options_zero_game_muzero_global_markets_ns50_upc1000_bs128/ckpt/ckpt_best.pth.tar' # UPDATE THIS PATH
+    model_path = './options_zero_game_muzero_global_markets_ns50_upc1000_bs128/ckpt/iteration_10000.pth.tar' # UPDATE THIS PATH
 
     # ==============================================================
     # 2. Configure the environment for logging
@@ -33,12 +34,12 @@ if __name__ == "__main__":
         #{'name': 'Emerging_Markets', 'mu': 0.0001, 'omega': 0.00005, 'alpha': 0.12, 'beta': 0.86},
         #{'name': 'Individual_Stocks', 'mu': 0.00008, 'omega': 0.00007, 'alpha': 0.10, 'beta': 0.88},
         #{'name': 'Commodities_Oil', 'mu': 0.0000, 'omega': 0.0002, 'alpha': 0.28, 'beta': 0.70},
-        #{'name': 'Foreign_Exchange_FX', 'mu': 0.0000, 'omega': 0.000003, 'alpha': 0.08, 'beta': 0.91},
+        {'name': 'Foreign_Exchange_FX', 'mu': 0.0000, 'omega': 0.000003, 'alpha': 0.08, 'beta': 0.91},
         #{'name': 'Cryptocurrencies', 'mu': 0.001, 'omega': 0.001, 'alpha': 0.20, 'beta': 0.75},
         #{'name': 'Bond_Markets', 'mu': 0.00001, 'omega': 0.000002, 'alpha': 0.05, 'beta': 0.92},
         #{'name': 'Volatility_VIX', 'mu': 0.0, 'omega': 0.0005, 'alpha': 0.25, 'beta': 0.65},
         #{'name': 'Frontier_Markets', 'mu': 0.0002, 'omega': 0.0001, 'alpha': 0.20, 'beta': 0.70},
-        {'name': 'Tech_Sector', 'mu': 0.0001, 'omega': 0.00004, 'alpha': 0.11, 'beta': 0.87},
+        #{'name': 'Tech_Sector', 'mu': 0.0001, 'omega': 0.00004, 'alpha': 0.11, 'beta': 0.87},
         #{'name': 'Utilities_Sector', 'mu': 0.00004, 'omega': 0.00001, 'alpha': 0.08, 'beta': 0.90},
 
     ]
