@@ -13,8 +13,17 @@ from py_vollib.black_scholes.greeks.analytical import delta
 from scipy.stats import norm
 from collections import namedtuple
 
-from ding.envs.env.base_env import BaseEnvTimestep
-from ding.utils import ENV_REGISTRY
+try:
+    from ding.envs.env.base_env import BaseEnvTimestep
+    from ding.utils import ENV_REGISTRY
+except ImportError:
+    BaseEnvTimestep = namedtuple('BaseEnvTimestep', ['obs', 'reward', 'done', 'info'])
+    class DummyRegistry:
+        def register(self, name):
+            def decorator(cls):
+                return cls
+            return decorator
+    ENV_REGISTRY = DummyRegistry()
 
 
 @ENV_REGISTRY.register('options_zero_game')
@@ -35,7 +44,7 @@ class OptionsZeroGameEnv(gym.Env):
         risk_free_rate=0.05,
         pnl_scaling_factor=1000,
         drawdown_penalty_weight=0.1,
-        ignore_legal_actions=True,
+        ignore_legal_actions=True, # This is the default
     )
 
     @classmethod
@@ -183,22 +192,15 @@ class OptionsZeroGameEnv(gym.Env):
             else: pnl = (entry_premium - exit_premium) * self.lot_size
             self.realized_pnl += pnl
 
-    # <<< MODIFIED: The new, causally-correct step logic
     def step(self, action: int):
-        # 1. Market Evolves
-        self.current_step += 1
-        self._simulate_price_step()
-        for pos in self.portfolio: pos['days_to_expiry'] -= 1
-        
-        # 2. Calculate pre-action portfolio value at the new price
-        tpv_before = self._get_portfolio_value()
-
-        # 3. Agent Acts based on the new state
         true_legal_actions_mask = self._get_true_action_mask()
         legal_action_indices = np.where(true_legal_actions_mask == 1)[0]
+
         if action not in legal_action_indices:
             action = self.actions_to_indices['HOLD']
+
         action_name = self.indices_to_actions.get(action, 'INVALID')
+        tpv_before = self._get_portfolio_value()
 
         if action_name.startswith('OPEN_'): self._handle_open_action(action_name)
         elif action_name.startswith('CLOSE_POSITION_'):
@@ -211,10 +213,12 @@ class OptionsZeroGameEnv(gym.Env):
         
         self.portfolio.sort(key=lambda p: (p['strike_price'], p['type']))
         
-        # 4. Calculate post-action portfolio value (at the same new price)
+        self.current_step += 1
+        self._simulate_price_step()
+
+        for pos in self.portfolio: pos['days_to_expiry'] -= 1
+
         tpv_after = self._get_portfolio_value()
-        
-        # 5. Calculate Reward
         raw_reward = tpv_after - tpv_before
         pnl_component = math.tanh(raw_reward / self.pnl_scaling_factor)
         self.high_water_mark = max(self.high_water_mark, tpv_after)
@@ -223,7 +227,6 @@ class OptionsZeroGameEnv(gym.Env):
         drawdown_penalty = self.drawdown_penalty_weight * normalized_drawdown
         final_reward = pnl_component - drawdown_penalty
 
-        # 6. Check for episode end and prepare next observation
         done = self.current_step >= self.total_steps
         if done:
             while len(self.portfolio) > 0: self._close_position(0)
@@ -242,7 +245,6 @@ class OptionsZeroGameEnv(gym.Env):
         return BaseEnvTimestep(obs, final_reward, done, info)
 
     def _handle_open_action(self, action_name):
-        # <<< MODIFIED: DTE is now based on the current step
         days_to_expiry = self.total_steps - self.current_step
         atm_price = round(self.current_price / self.strike_distance) * self.strike_distance
         trades_to_execute = []
@@ -392,7 +394,11 @@ class OptionsZeroGameEnv(gym.Env):
                 obs_vec[current_idx + 7] = math.tanh(max_loss / self.initial_cash)
             current_idx += 8
         
-        action_mask = self._get_true_action_mask()
+        # <<< THE FIX: The observation dictionary must obey the ignore_legal_actions flag.
+        if hasattr(self, 'ignore_legal_actions') and self.ignore_legal_actions:
+            action_mask = np.ones(self.action_space_size, dtype=np.int8)
+        else:
+            action_mask = self._get_true_action_mask()
         
         return {'observation': obs_vec, 'action_mask': action_mask, 'to_play': np.array([-1], dtype=np.int8)}
 
