@@ -38,36 +38,51 @@ class LogReplayEnv(gym.Wrapper):
         return timestep
 
     def _log_step(self, obs, action=None, reward=None, done=False, info=None, is_initial_state=False):
-        """Logs a single timestep of data, including the portfolio."""
-        
         serializable_obs = {
             'observation': obs['observation'].tolist(),
             'action_mask': obs['action_mask'].tolist(),
             'to_play': obs['to_play'].tolist(),
         }
 
-        # <<< THE FIX: Create a clean, serializable version of the portfolio
+        # <<< THE FIX: Calculate and log the ground truth from the Python environment
         serializable_portfolio = []
-        # self.env is the wrapped OptionsZeroGameEnv
+        lot_size = self.env.lot_size
         for pos in self.env.portfolio:
+            # Get the live, mark-to-liquidation price from the environment
+            mid_price, _, _ = self.env._get_option_details(self.env.current_price, pos['strike_price'], pos['days_to_expiry'], pos['type'])
+            current_premium = self.env._get_option_price(mid_price, is_buy=(pos['direction'] == 'short'))
+
+            # Calculate the live PnL for this leg
+            if pos['direction'] == 'long':
+                pnl = (current_premium - pos['entry_premium']) * lot_size
+            else:
+                pnl = (pos['entry_premium'] - current_premium) * lot_size
+
             serializable_portfolio.append({
                 'type': pos['type'],
                 'direction': pos['direction'],
                 'strike_price': round(pos['strike_price'], 2),
                 'entry_premium': round(pos['entry_premium'], 2),
                 'days_to_expiry': pos['days_to_expiry'],
+                # <<< NEW: Add the ground truth data to the log
+                'current_premium': round(current_premium, 2),
+                'live_pnl': round(pnl, 2),
             })
+
+        if info is None: info = {}
+        info['volatility'] = self.env.volatility
+        info['risk_free_rate'] = self.env.risk_free_rate
+        info['start_price'] = self.env.start_price
 
         log_entry = {
             'obs': serializable_obs,
-            # <<< NEW: Add the portfolio directly to the log entry
             'portfolio': serializable_portfolio,
             'action': int(action) if action is not None else None,
             'reward': float(reward) if reward is not None else None,
             'done': done,
-            'info': info if info is not None else {},
+            'info': info,
         }
-        
+
         if info and 'eval_episode_return' in info:
             log_entry['info']['eval_episode_return'] = float(info['eval_episode_return'])
 

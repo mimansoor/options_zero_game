@@ -1451,3 +1451,4 @@ events.*
 lzero/mcts/ctree/ctree_alphazero/pybind11
 
 zoo/jericho/envs/z-machine-games-master
+options_zero_game_*
