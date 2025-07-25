@@ -111,7 +111,7 @@ class OptionsZeroGameEnv(gym.Env):
         price_path = np.zeros(self.total_steps + 1)
         price_path[0] = self.start_price
         for i in range(1, self.total_steps + 1):
-            price_path[i] = price_path[i-1] * (1 + sim_returns['data'][i-1] / 100)
+            price_path[i] = price_path[i-1] * (1 + sim_returns['data'][i-1])
         self.price_path = price_path
 
     def _simulate_price_step(self):
