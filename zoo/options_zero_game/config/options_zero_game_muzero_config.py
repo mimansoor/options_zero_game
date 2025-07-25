@@ -61,6 +61,7 @@ options_zero_game_muzero_config = dict(
             discrete_action_encoding_type='one_hot',
             norm_type='BN',
         ),
+        model_path = './options_zero_game_muzero_global_markets_ns100_upc200_bs256/ckpt/ckpt_best.pth.tar', # UPDATE THIS PATH
         cuda=True,
         game_segment_length=30,
         update_per_collect=update_per_collect,
@@ -92,7 +93,7 @@ create_config = dict(
         type='options_zero_game',
         import_names=['zoo.options_zero_game.envs'],
     ),
-    env_manager=dict(type='base'),
+    env_manager=dict(type='subprocess'),
     policy=dict(
         type='muzero',
         import_names=['lzero.policy.muzero'],
