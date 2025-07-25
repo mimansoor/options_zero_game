@@ -2,7 +2,7 @@ import copy
 import math
 import random
 
-import gym
+import gymnasium as gym
 import numpy as np
 from arch import arch_model
 from easydict import EasyDict
@@ -13,37 +13,28 @@ from py_vollib.black_scholes.greeks.analytical import delta
 from scipy.stats import norm
 from collections import namedtuple
 
-try:
-    from ding.envs.env.base_env import BaseEnvTimestep
-    from ding.utils import ENV_REGISTRY
-except ImportError:
-    BaseEnvTimestep = namedtuple('BaseEnvTimestep', ['obs', 'reward', 'done', 'info'])
-    class DummyRegistry:
-        def register(self, name):
-            def decorator(cls):
-                return cls
-            return decorator
-    ENV_REGISTRY = DummyRegistry()
-
+from ding.envs import BaseEnvTimestep
+from ding.utils import ENV_REGISTRY
 
 @ENV_REGISTRY.register('options_zero_game')
 class OptionsZeroGameEnv(gym.Env):
     metadata = {'render.modes': ['human']}
 
     config = dict(
-        start_price=100.0,
+        start_price=20000.0,
         initial_cash=100000.0,
         market_regimes = [
             {'name': 'Developed_Market', 'mu': 0.00005, 'omega': 0.000005, 'alpha': 0.09, 'beta': 0.90},
         ],
         time_to_expiry=30,
-        strike_distance=1.0,
-        lot_size=100,
+        strike_distance=50.0,
+        lot_size=75,
         max_positions=4,
-        bid_ask_spread_pct=0.01,
-        risk_free_rate=0.05,
+        bid_ask_spread_pct=0.002,
+        risk_free_rate=0.10,
         pnl_scaling_factor=1000,
         drawdown_penalty_weight=0.1,
+        ignore_legal_actions=True,
     )
 
     @classmethod
@@ -71,6 +62,7 @@ class OptionsZeroGameEnv(gym.Env):
         self.bid_ask_spread_pct = self._cfg.bid_ask_spread_pct
         self.pnl_scaling_factor = self._cfg.pnl_scaling_factor
         self.drawdown_penalty_weight = self._cfg.drawdown_penalty_weight
+        self.ignore_legal_actions = self._cfg.ignore_legal_actions
         
         self.actions_to_indices = self._build_action_space()
         self.indices_to_actions = {v: k for k, v in self.actions_to_indices.items()}
@@ -129,7 +121,6 @@ class OptionsZeroGameEnv(gym.Env):
         t = days_to_expiry / 365.25
         
         if t <= 0:
-            intrinsic_value = 0.0
             if option_type == 'call':
                 intrinsic_value = max(0, underlying_price - strike_price)
             else: # put
@@ -137,11 +128,12 @@ class OptionsZeroGameEnv(gym.Env):
             
             # At expiry, delta is either 0 or 1 (or -1 for puts), and d2 is effectively +/- infinity.
             # We return simplified, representative values.
-            delta_at_expiry = 0.0
-            if intrinsic_value > 0:
-                delta_at_expiry = 1.0 if option_type == 'call' else -1.0
+            # <<< OPTIMIZED LOGIC >>>
+            # If the option is in-the-money, its absolute delta at expiry is 1. Otherwise, it's 0.
+            abs_delta_at_expiry = 1.0 if intrinsic_value > 0 else 0.0
 
-            return intrinsic_value, abs(delta_at_expiry), 0 # d2 is not well-defined, return 0
+            # d2 is not well-defined at expiry, so we return a neutral 0.
+            return intrinsic_value, abs_delta_at_expiry, 0
 
         # If not expired, proceed with Black-Scholes
         vol = max(self.volatility, 1e-6)
@@ -204,16 +196,37 @@ class OptionsZeroGameEnv(gym.Env):
             else: pnl = (entry_premium - exit_premium) * self.lot_size
             self.realized_pnl += pnl
 
+    def _calculate_shaped_reward(self, tpv_before, tpv_after):
+        """
+        Calculates the final shaped reward for the agent, including the drawdown penalty.
+        """
+        raw_reward = tpv_after - tpv_before
+        
+        # 1. PnL Component (shaped with tanh)
+        pnl_component = math.tanh(raw_reward / self.pnl_scaling_factor)
+        
+        # 2. Drawdown Component
+        self.high_water_mark = max(self.high_water_mark, tpv_after)
+        drawdown = self.high_water_mark - tpv_after
+        normalized_drawdown = drawdown / self.initial_cash
+        drawdown_penalty = self.drawdown_penalty_weight * normalized_drawdown
+        
+        # 3. Final Shaped Reward
+        final_reward = pnl_component - drawdown_penalty
+        
+        return final_reward, raw_reward
+
     def step(self, action: int):
+        # --- 0. Check if the action is legal, otherwise choose a HOLD action
         true_legal_actions_mask = self._get_true_action_mask()
         legal_action_indices = np.where(true_legal_actions_mask == 1)[0]
-
         if action not in legal_action_indices:
             action = self.actions_to_indices['HOLD']
 
         action_name = self.indices_to_actions.get(action, 'INVALID')
         tpv_before = self._get_portfolio_value()
 
+        # --- 1. Handle Agent's Action ---
         if action_name.startswith('OPEN_'): self._handle_open_action(action_name)
         elif action_name.startswith('CLOSE_POSITION_'):
             try:
@@ -225,31 +238,19 @@ class OptionsZeroGameEnv(gym.Env):
         
         self.portfolio.sort(key=lambda p: (p['strike_price'], p['type']))
         
+        # --- 2. Advance Time and Market ---
         self.current_step += 1
         self._simulate_price_step()
-
         for pos in self.portfolio: pos['days_to_expiry'] -= 1
 
-        tpv_after = self._get_portfolio_value()
-        raw_reward = tpv_after - tpv_before
-        pnl_component = math.tanh(raw_reward / self.pnl_scaling_factor)
-        self.high_water_mark = max(self.high_water_mark, tpv_after)
-        drawdown = self.high_water_mark - tpv_after
-        normalized_drawdown = drawdown / self.initial_cash
-        drawdown_penalty = self.drawdown_penalty_weight * normalized_drawdown
-        final_reward = pnl_component - drawdown_penalty
-
+        # --- 3. Check for Episode End and Auto-Settle ---
         done = self.current_step >= self.total_steps
         if done:
             while len(self.portfolio) > 0: self._close_position(0)
-            tpv_after = self._get_portfolio_value()
-            raw_reward = tpv_after - tpv_before
-            pnl_component = math.tanh(raw_reward / self.pnl_scaling_factor)
-            self.high_water_mark = max(self.high_water_mark, tpv_after)
-            drawdown = self.high_water_mark - tpv_after
-            normalized_drawdown = drawdown / self.initial_cash
-            drawdown_penalty = self.drawdown_penalty_weight * normalized_drawdown
-            final_reward = pnl_component - drawdown_penalty
+
+        # --- 4. Calculate Final PnL and Reward ---
+        tpv_after = self._get_portfolio_value()
+        final_reward, raw_reward = self._calculate_shaped_reward(tpv_before, tpv_after)
         
         obs = self._get_observation()
         self._final_eval_reward += raw_reward
@@ -258,7 +259,7 @@ class OptionsZeroGameEnv(gym.Env):
 
     def _handle_open_action(self, action_name):
         days_to_expiry = self.total_steps - self.current_step
-        atm_price = round(self.current_price / self.strike_distance) * self.strike_distance
+        atm_price = int(self.current_price / self.strike_distance + 0.5) * self.strike_distance
         trades_to_execute = []
         
         if 'STRADDLE' in action_name:
@@ -387,7 +388,7 @@ class OptionsZeroGameEnv(gym.Env):
         total_pnl = self._get_portfolio_value()
         obs_vec[2] = math.tanh(total_pnl / self.initial_cash)
         current_idx = 3
-        atm_price = round(self.current_price / self.strike_distance) * self.strike_distance
+        atm_price = int(self.current_price / self.strike_distance + 0.5) * self.strike_distance
         for i in range(self.max_positions):
             if i < len(self.portfolio):
                 pos = self.portfolio[i]
@@ -406,8 +407,10 @@ class OptionsZeroGameEnv(gym.Env):
                 obs_vec[current_idx + 7] = math.tanh(max_loss / self.initial_cash)
             current_idx += 8
         
-        action_mask = self._get_true_action_mask()
-        #action_mask = np.ones(self.action_space_size, dtype=np.int8)
+
+        action_mask = np.ones(self.action_space_size, dtype=np.int8)
+        if not self.ignore_legal_actions:
+            action_mask = self._get_true_action_mask()
         
         return {'observation': obs_vec, 'action_mask': action_mask, 'to_play': -1}
 
@@ -448,4 +451,7 @@ class OptionsZeroGameEnv(gym.Env):
         evaluator_env_num = cfg.pop('evaluator_env_num')
         cfg = copy.deepcopy(cfg)
         return [cfg for _ in range(evaluator_env_num)]
-    def __repr__(self): return "LightZero Options-Zero-Game Env"
+
+    def __repr__(self) -> str:
+        return "LightZero Options-Zero-Game Env."
+

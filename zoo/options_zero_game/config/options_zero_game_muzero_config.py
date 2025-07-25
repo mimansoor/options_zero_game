@@ -3,16 +3,17 @@ from easydict import EasyDict
 # ==============================================================
 #                 Options-Zero-Game Config
 # ==============================================================
-collector_env_num = 4
+env_id='OptionsZeroGame-v0',
 evaluator_env_num = 2
-batch_size = 128
-num_simulations = 50
-update_per_collect = 1000
-max_env_step = 100000
-reanalyze_ratio = 0.
+collector_env_num = 4
 action_space_size = 42
+n_episode = 8
+num_simulations = 100
+update_per_collect = 200
+batch_size = 256
+max_env_step = int(5e6)
+reanalyze_ratio = 0.
 
-# <<< MODIFIED: The new, comprehensive "Global Markets" curriculum
 market_regimes = [
     # Name, mu (trend), omega, alpha, beta
     {'name': 'Developed_Markets', 'mu': 0.00006, 'omega': 0.000005, 'alpha': 0.08, 'beta': 0.90},
@@ -31,12 +32,16 @@ market_regimes = [
 ]
 
 # ==============================================================
+# end of the most frequently changed config specified by the user
+# ==============================================================
+
+# ==============================================================
 #                    Main Config (The Parameters)
 # ==============================================================
 options_zero_game_muzero_config = dict(
     exp_name=f'options_zero_game_muzero_global_markets_ns{num_simulations}_upc{update_per_collect}_bs{batch_size}',
     env=dict(
-        env_id='OptionsZeroGame-v0',
+        env_id=env_id,
         collector_env_num=collector_env_num,
         evaluator_env_num=evaluator_env_num,
         n_evaluator_episode=evaluator_env_num,
@@ -60,13 +65,18 @@ options_zero_game_muzero_config = dict(
         game_segment_length=30,
         update_per_collect=update_per_collect,
         batch_size=batch_size,
+        td_steps=10,
+        discount_factor=0.999,
+        manual_temperature_decay=True,
+        threshold_training_steps_for_final_temperature=int(1e5),
+        piecewise_decay_lr_scheduler=False,
         optim_type='Adam',
-        learning_rate=0.0005,
+        learning_rate=3e-3,
         weight_decay=1e-4,
         num_simulations=num_simulations,
         reanalyze_ratio=reanalyze_ratio,
-        n_episode=8,
-        eval_freq=int(1e3),
+        n_episode=n_episode,
+        eval_freq=int(2e3),
         replay_buffer_size=int(1e5),
         collector_env_num=collector_env_num,
         evaluator_env_num=evaluator_env_num,
