@@ -19,7 +19,6 @@ data_*
 *.csv
 
 pkg/
-src/
 
 ### CVS template
 /CVS/*
