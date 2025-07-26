@@ -31,8 +31,8 @@ class OptionsZeroGameEnv(gym.Env):
         steps_per_day=1, # e.g., 75 for 5-min, 375 for 1-min, 1 for daily
         rolling_vol_window=5,
         iv_skew_table={
-            'call': {-5: (13.5, 16.0), -4: (13.3, 15.8), -3: (13.2, 15.7), -2: (13.1, 15.5), -1: (13.0, 15.4), 0: (13.0, 15.3), 1: (13.0, 15.4), 2: (13.1, 15.6), 3: (13.2, 15.7), 4: (13.3, 15.8), 5: (13.5, 16.0)},
-            'put':  {-5: (14.0, 16.5), -4: (13.8, 16.3), -3: (13.8, 16.1), -2: (13.6, 16.0), -1: (13.5, 15.8), 0: (13.5, 15.8), 1: (13.5, 15.8), 2: (13.6, 16.0), 3: (13.8, 16.1), 4: (13.8, 16.3), 5: (14.0, 16.5)},
+            'call': {'-5': (13.5, 16.0), '-4': (13.3, 15.8), '-3': (13.2, 15.7), '-2': (13.1, 15.5), '-1': (13.0, 15.4), '0': (13.0, 15.3), '1': (13.0, 15.4), '2': (13.1, 15.6), '3': (13.2, 15.7), '4': (13.3, 15.8), '5': (13.5, 16.0)},
+            'put':  {'-5': (14.0, 16.5), '-4': (13.8, 16.3), '-3': (13.8, 16.1), '-2': (13.6, 16.0), '-1': (13.5, 15.8), '0': (13.5, 15.8), '1': (13.5, 15.8), '2': (13.6, 16.0), '3': (13.8, 16.1), '4': (13.8, 16.3), '5': (14.0, 16.5)},
         },
         strike_distance=50.0,
         lot_size=75,
@@ -147,7 +147,7 @@ class OptionsZeroGameEnv(gym.Env):
     
     def _get_implied_volatility(self, offset, option_type):
         clamped_offset = max(-5, min(5, offset))
-        return self.iv_bins[option_type][clamped_offset][self.iv_bin_index]
+        return self.iv_bins[option_type][str(clamped_offset)][self.iv_bin_index]
 
     def _get_option_details(self, underlying_price, strike_price, days_to_expiry, option_type):
         t = days_to_expiry / 365.25
