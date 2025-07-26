@@ -10,6 +10,7 @@ num_simulations = 100
 update_per_collect = 200
 max_env_step = int(5e6)
 reanalyze_ratio = 0.
+n_episode = 8
 action_space_size = 42
 
 market_regimes = [
