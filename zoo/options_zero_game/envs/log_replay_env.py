@@ -34,19 +34,24 @@ class LogReplayEnv(gym.Wrapper):
     # <<< MODIFIED: The new, two-part logging step method
     def step(self, action):
         # The agent has made a decision based on the state at the start of the day.
+
+        # --- Phase 1: Enforce Rules and Log the ACTUAL Action ---
+
+        # <<< THE FIX: Ask the underlying environment to validate the action first.
+        # This ensures we log the action that will actually be executed.
+        corrected_action = self.env._enforce_legal_action(action)
         
         # --- Phase 1: Log the Action ---
         # Get the human-readable action name
-        action_name = self.env.indices_to_actions.get(action, 'INVALID')
+        action_name = self.env.indices_to_actions.get(corrected_action, 'INVALID')
         
         # Log the state at the moment of the trade, BEFORE the market moves.
-        # We pass the action_name to be included in this specific log entry.
-        self._log_step(self.env._get_observation(), action=action, info_override={'action_name': action_name})
+        # We pass the corrected action and its name to be included in this log entry.
+        self._log_step(self.env._get_observation(), action=corrected_action, info_override={'action_name': action_name})
 
         # --- Phase 2: Execute the step and Log the Market Close ---
-        # Now, call the underlying environment's step function.
-        # This will execute the trade, move the market, and calculate the final PnL.
-        timestep = self.env.step(action)
+        # Now, call the underlying environment's step function with the GUARANTEED-LEGAL action.
+        timestep = self.env.step(corrected_action)
         
         # Log the state at the END of the day, after the market has moved.
         self._log_step(timestep.obs, action=None, reward=timestep.reward, done=timestep.done, info=timestep.info)

@@ -49,6 +49,7 @@ options_zero_game_muzero_config = dict(
         drawdown_penalty_weight=0.1,
         # Pass the entire new curriculum to the environment
         market_regimes=market_regimes,
+        illegal_action_penalty=-1.0,
     ),
     policy=dict(
         model=dict(

@@ -34,6 +34,7 @@ class OptionsZeroGameEnv(gym.Env):
         risk_free_rate=0.10,
         pnl_scaling_factor=1000,
         drawdown_penalty_weight=0.1,
+        illegal_action_penalty=-1.0,
         ignore_legal_actions=True,
     )
 
@@ -63,6 +64,7 @@ class OptionsZeroGameEnv(gym.Env):
         self.pnl_scaling_factor = self._cfg.pnl_scaling_factor
         self.drawdown_penalty_weight = self._cfg.drawdown_penalty_weight
         self.ignore_legal_actions = self._cfg.ignore_legal_actions
+        self.illegal_action_penalty = self._cfg.illegal_action_penalty
         
         self.actions_to_indices = self._build_action_space()
         self.indices_to_actions = {v: k for k, v in self.actions_to_indices.items()}
@@ -197,36 +199,50 @@ class OptionsZeroGameEnv(gym.Env):
             self.realized_pnl += pnl
 
     def _calculate_shaped_reward(self, tpv_before, tpv_after):
-        """
-        Calculates the final shaped reward for the agent, including the drawdown penalty.
-        """
         raw_reward = tpv_after - tpv_before
-        
-        # 1. PnL Component (shaped with tanh)
         pnl_component = math.tanh(raw_reward / self.pnl_scaling_factor)
-        
-        # 2. Drawdown Component
+
+        # Drawdown Component
         self.high_water_mark = max(self.high_water_mark, tpv_after)
         drawdown = self.high_water_mark - tpv_after
-        normalized_drawdown = drawdown / self.initial_cash
-        drawdown_penalty = self.drawdown_penalty_weight * normalized_drawdown
+        # Normalize the drawdown and apply the weight. Note the negative sign.
+        # We use initial_cash as a stable denominator for normalization.
+        drawdown_penalty_component = -self.drawdown_penalty_weight * math.tanh(drawdown / self.initial_cash)
         
-        # 3. Final Shaped Reward
-        final_reward = pnl_component - drawdown_penalty
+        # --- 2. Combine the normalized components ---
+        combined_score = pnl_component + drawdown_penalty_component
         
+        # --- 3. Apply a final normalization to guarantee the [-1, 1] bound ---
+        # This ensures that even if the sum of components exceeds 1 or -1, the final
+        # reward is cleanly bounded. It also preserves the sign and relative magnitude.
+        final_reward = math.tanh(combined_score / 2)
+
         return final_reward, raw_reward
 
-    def step(self, action: int):
-        # --- 0. Check if the action is legal, otherwise choose a HOLD action
+    def _enforce_legal_action(self, action: int) -> int:
+        """
+        Checks if an action is legal based on the true action mask.
+        If the action is illegal, it returns the action index for HOLD.
+        This method is the single point of truth for rule enforcement.
+        """
         true_legal_actions_mask = self._get_true_action_mask()
-        legal_action_indices = np.where(true_legal_actions_mask == 1)[0]
-        if action not in legal_action_indices:
+        if true_legal_actions_mask[action] == 1:
+            return action
+        else:
+            return self.actions_to_indices['HOLD']
+
+    def step(self, action: int):
+        # --- 1. Enforce Rules and Check for Illegality ---
+        true_legal_actions_mask = self._get_true_action_mask()
+        was_illegal_action = true_legal_actions_mask[action] == 0
+
+        if was_illegal_action:
             action = self.actions_to_indices['HOLD']
 
         action_name = self.indices_to_actions.get(action, 'INVALID')
         tpv_before = self._get_portfolio_value()
 
-        # --- 1. Handle Agent's Action ---
+        # --- 2. Handle Agent's Action ---
         if action_name.startswith('OPEN_'): self._handle_open_action(action_name)
         elif action_name.startswith('CLOSE_POSITION_'):
             try:
@@ -235,23 +251,27 @@ class OptionsZeroGameEnv(gym.Env):
             except (ValueError, IndexError): pass
         elif action_name == 'CLOSE_ALL':
             while len(self.portfolio) > 0: self._close_position(0)
-        
+
         self.portfolio.sort(key=lambda p: (p['strike_price'], p['type']))
-        
-        # --- 2. Advance Time and Market ---
+
+        # --- 3. Advance Time and Market ---
         self.current_step += 1
         self._simulate_price_step()
         for pos in self.portfolio: pos['days_to_expiry'] -= 1
 
-        # --- 3. Check for Episode End and Auto-Settle ---
+        # --- 4. Check for Episode End and Auto-Settle ---
         done = self.current_step >= self.total_steps
         if done:
             while len(self.portfolio) > 0: self._close_position(0)
 
-        # --- 4. Calculate Final PnL and Reward ---
+        # --- 5. Calculate Final PnL and Reward ---
         tpv_after = self._get_portfolio_value()
         final_reward, raw_reward = self._calculate_shaped_reward(tpv_before, tpv_after)
-        
+
+        if was_illegal_action:
+            final_reward = self.illegal_action_penalty
+
+        # --- 6. Prepare and Return Timestep ---
         obs = self._get_observation()
         self._final_eval_reward += raw_reward
         info = {'price': self.current_price, 'eval_episode_return': self._final_eval_reward}
