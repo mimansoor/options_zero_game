@@ -32,28 +32,13 @@ class LogReplayEnv(gym.Wrapper):
         self._log_step(obs, is_initial_state=True)
         return obs
 
-    # <<< MODIFIED: The corrected, two-part logging step method
     def step(self, action):
-        # The agent has made a decision based on the state at the start of the day.
-        
-        # --- Phase 1: Enforce Rules and Log the ACTUAL Action ---
-        
-        # <<< THE FIX: Ask the underlying environment to validate the action first.
-        # This ensures we log the action that will actually be executed.
         corrected_action = self.env._enforce_legal_action(action)
-        
-        # Get the human-readable name of the corrected action
         action_name = self.env.indices_to_actions.get(corrected_action, 'INVALID')
-        
-        # Log the state at the moment of the trade, BEFORE the market moves.
-        # We pass the corrected action and its name to be included in this log entry.
         self._log_step(self.env._get_observation(), action=corrected_action, info_override={'action_name': action_name})
 
-        # --- Phase 2: Execute the step and Log the Market Close ---
-        # Now, call the underlying environment's step function with the GUARANTEED-LEGAL action.
         timestep = self.env.step(corrected_action)
         
-        # Calculate daily change before logging the market close
         current_price = timestep.info['price']
         daily_change_pct = ((current_price / self._last_day_price) - 1) * 100 if self._last_day_price else 0.0
         self._last_day_price = current_price
@@ -61,7 +46,6 @@ class LogReplayEnv(gym.Wrapper):
         info_with_daily_change = timestep.info.copy()
         info_with_daily_change['daily_change_pct'] = daily_change_pct
         
-        # Log the state at the END of the day, after the market has moved.
         self._log_step(timestep.obs, action=None, reward=timestep.reward, done=timestep.done, info=info_with_daily_change)
         
         if timestep.done:
@@ -92,7 +76,10 @@ class LogReplayEnv(gym.Wrapper):
         log_info.setdefault('price', self.env.current_price)
         log_info.setdefault('eval_episode_return', self.env._get_portfolio_value())
         log_info.setdefault('start_price', self.env.start_price)
-        log_info.setdefault('volatility', self.env.volatility)
+        
+        # <<< THE FIX: Access the correct, dynamically calculated volatility attribute
+        log_info.setdefault('volatility', self.env.garch_implied_vol)
+        
         log_info.setdefault('risk_free_rate', self.env.risk_free_rate)
         log_info.setdefault('daily_change_pct', 0.0)
 
