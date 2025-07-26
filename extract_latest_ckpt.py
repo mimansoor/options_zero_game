@@ -5,8 +5,8 @@ import glob
 import shutil
 
 # Pattern to search for ckpt_best.pth.tar files
-source_pattern = './options_zero_game_muzero_global_markets_ns100_upc200_bs256*/ckpt/ckpt_best.pth.tar'
-target_dir = './options_zero_game_muzero_global_markets_ns100_upc200_bs256/ckpt/'
+source_pattern = './options_zero_game_muzero_final_model_ns25_upc1000_bs256*/ckpt/ckpt_best.pth.tar'
+target_dir = './options_zero_game_muzero_final_model_ns25_upc1000_bs256/ckpt/'
 target_path = os.path.join(target_dir, 'ckpt_best.pth.tar')
 
 # Find all matching checkpoint files
