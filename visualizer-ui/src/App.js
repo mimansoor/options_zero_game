@@ -1,11 +1,15 @@
 import React, { useState, useEffect } from 'react';
 import './App.css';
 
-// MetricsDashboard and PortfolioTable components remain unchanged from the last correct version.
-function MetricsDashboard({ day, price, pnl, actionName, startPrice }) {
+// <<< MODIFIED: The MetricsDashboard now accepts and displays the daily change
+function MetricsDashboard({ day, price, pnl, actionName, startPrice, dailyChange }) {
   const pnlColor = pnl > 0 ? '#4CAF50' : pnl < 0 ? '#F44336' : 'white';
-  const underlyingChange = price && startPrice ? ((price / startPrice) - 1) * 100 : 0;
-  const changeColor = underlyingChange > 0 ? '#4CAF50' : underlyingChange < 0 ? '#F44336' : 'white';
+  const cumulativeChange = price && startPrice ? ((price / startPrice) - 1) * 100 : 0;
+  const cumulativeChangeColor = cumulativeChange > 0 ? '#4CAF50' : cumulativeChange < 0 ? '#F44336' : 'white';
+  
+  // <<< NEW: Formatting for the daily change
+  const dailyChangeColor = dailyChange > 0 ? '#4CAF50' : dailyChange < 0 ? '#F44336' : 'white';
+  const dailyChangeString = dailyChange ? `(${dailyChange.toFixed(2)}%)` : '';
 
   return (
     <div className="metrics-dashboard">
@@ -15,9 +19,15 @@ function MetricsDashboard({ day, price, pnl, actionName, startPrice }) {
       </div>
       <div className="metric-item">
         <h2>EOD Price</h2>
-        <p>${price ? price.toFixed(2) : '0.00'}</p>
-        <p style={{ fontSize: '0.8em', color: changeColor, fontWeight: 'bold' }}>
-          {underlyingChange.toFixed(2)}%
+        <p>
+          ${price ? price.toFixed(2) : '0.00'}
+          {/* <<< NEW: Display the daily change next to the price */}
+          <span style={{ fontSize: '0.7em', color: dailyChangeColor, marginLeft: '10px' }}>
+            {dailyChangeString}
+          </span>
+        </p>
+        <p style={{ fontSize: '0.8em', color: cumulativeChangeColor, fontWeight: 'bold' }}>
+          {cumulativeChange.toFixed(2)}% vs Day 0
         </p>
       </div>
       <div className="metric-item">
@@ -72,15 +82,11 @@ function PortfolioTable({ portfolio }) {
   );
 }
 
-// <<< THE DEFINITIVE FIX: A correct and clear data processing function.
 function processReplayData(rawHistory) {
   if (!rawHistory || rawHistory.length === 0) {
     return [];
   }
-
   const dailySummaries = [];
-  
-  // Day 0 Summary (Initial State)
   const initialState = rawHistory[0];
   dailySummaries.push({
     day: 0,
@@ -89,18 +95,13 @@ function processReplayData(rawHistory) {
     eodTotalPnl: initialState.info.eval_episode_return,
     eodPortfolio: initialState.portfolio,
     startPrice: initialState.info.start_price,
+    dailyChange: 0, // No daily change on day 0
   });
 
-  // Loop through the trading days
   for (let day = 1; day <= 30; day++) {
     const actionStepIndex = (day * 2) - 1;
     const marketCloseStepIndex = day * 2;
-
-    // Ensure both steps exist in the log
-    if (marketCloseStepIndex >= rawHistory.length) {
-      break;
-    }
-
+    if (marketCloseStepIndex >= rawHistory.length) break;
     const actionStep = rawHistory[actionStepIndex];
     const marketCloseStep = rawHistory[marketCloseStepIndex];
 
@@ -111,9 +112,10 @@ function processReplayData(rawHistory) {
       eodTotalPnl: marketCloseStep.info.eval_episode_return,
       eodPortfolio: marketCloseStep.portfolio,
       startPrice: marketCloseStep.info.start_price,
+      // <<< NEW: Pass the daily change to the summary object
+      dailyChange: marketCloseStep.info.daily_change_pct,
     });
   }
-
   return dailySummaries;
 }
 
@@ -168,6 +170,8 @@ function App() {
                   pnl={dayData.eodTotalPnl}
                   actionName={dayData.actionName}
                   startPrice={dayData.startPrice}
+                  // <<< NEW: Pass the daily change prop
+                  dailyChange={dayData.dailyChange}
                 />
                 <h2 style={{marginTop: '40px'}}>End-of-Day Positions</h2>
                 <PortfolioTable portfolio={dayData.eodPortfolio} />

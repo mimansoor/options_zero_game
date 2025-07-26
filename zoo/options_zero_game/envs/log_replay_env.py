@@ -19,6 +19,7 @@ class LogReplayEnv(gym.Wrapper):
         super().__init__(base_env)
         self.log_file_path = cfg.log_file_path
         self._episode_history = []
+        self._last_day_price = None # <<< NEW: Track the previous day's price
         print(f"LogReplayEnv initialized. Replay will be saved to: {self.log_file_path}")
 
     def seed(self, seed: int, dynamic_seed: int = None):
@@ -27,34 +28,26 @@ class LogReplayEnv(gym.Wrapper):
     def reset(self, **kwargs):
         self._episode_history = []
         obs = self.env.reset(**kwargs)
-        # Log the initial state (e.g., Day 0 EOD)
+        self._last_day_price = self.env.start_price # Initialize with start price
         self._log_step(obs, is_initial_state=True)
         return obs
 
-    # <<< MODIFIED: The new, two-part logging step method
     def step(self, action):
-        # The agent has made a decision based on the state at the start of the day.
+        action_name = self.env.indices_to_actions.get(action, 'INVALID')
+        self._log_step(self.env._get_observation(), action=action, info_override={'action_name': action_name})
 
-        # --- Phase 1: Enforce Rules and Log the ACTUAL Action ---
-
-        # <<< THE FIX: Ask the underlying environment to validate the action first.
-        # This ensures we log the action that will actually be executed.
-        corrected_action = self.env._enforce_legal_action(action)
+        timestep = self.env.step(action)
         
-        # --- Phase 1: Log the Action ---
-        # Get the human-readable action name
-        action_name = self.env.indices_to_actions.get(corrected_action, 'INVALID')
+        # <<< NEW: Calculate daily change before logging the market close
+        current_price = timestep.info['price']
+        daily_change_pct = ((current_price / self._last_day_price) - 1) * 100 if self._last_day_price else 0.0
+        self._last_day_price = current_price # Update for the next day
         
-        # Log the state at the moment of the trade, BEFORE the market moves.
-        # We pass the corrected action and its name to be included in this log entry.
-        self._log_step(self.env._get_observation(), action=corrected_action, info_override={'action_name': action_name})
-
-        # --- Phase 2: Execute the step and Log the Market Close ---
-        # Now, call the underlying environment's step function with the GUARANTEED-LEGAL action.
-        timestep = self.env.step(corrected_action)
+        # Add the new metric to the info dictionary
+        info_with_daily_change = timestep.info.copy()
+        info_with_daily_change['daily_change_pct'] = daily_change_pct
         
-        # Log the state at the END of the day, after the market has moved.
-        self._log_step(timestep.obs, action=None, reward=timestep.reward, done=timestep.done, info=timestep.info)
+        self._log_step(timestep.obs, action=None, reward=timestep.reward, done=timestep.done, info=info_with_daily_change)
         
         if timestep.done:
             self.save_log()
@@ -62,8 +55,6 @@ class LogReplayEnv(gym.Wrapper):
         return timestep
 
     def _log_step(self, obs, action=None, reward=None, done=False, info=None, is_initial_state=False, info_override=None):
-        """Logs a single timestep of data."""
-        
         serializable_portfolio = []
         for pos in self.env.portfolio:
             mid_price, _, _ = self.env._get_option_details(self.env.current_price, pos['strike_price'], pos['days_to_expiry'], pos['type'])
@@ -79,18 +70,17 @@ class LogReplayEnv(gym.Wrapper):
                 'live_pnl': round(pnl, 2),
             })
 
-        # Use the provided info dict, or create a new one
         log_info = info if info is not None else {}
-        # If an override is provided (for the "Action" log), update the info
         if info_override:
             log_info.update(info_override)
             
-        # Ensure base keys exist
         log_info.setdefault('price', self.env.current_price)
         log_info.setdefault('eval_episode_return', self.env._get_portfolio_value())
         log_info.setdefault('start_price', self.env.start_price)
         log_info.setdefault('volatility', self.env.volatility)
         log_info.setdefault('risk_free_rate', self.env.risk_free_rate)
+        # <<< NEW: Ensure daily_change_pct has a default value
+        log_info.setdefault('daily_change_pct', 0.0)
 
         log_entry = {
             'portfolio': serializable_portfolio,
