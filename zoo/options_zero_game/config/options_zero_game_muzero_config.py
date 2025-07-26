@@ -3,19 +3,16 @@ from easydict import EasyDict
 # ==============================================================
 #                 Options-Zero-Game Config
 # ==============================================================
-env_id='OptionsZeroGame-v0',
-evaluator_env_num = 2
 collector_env_num = 4
-action_space_size = 42
-n_episode = 8
+evaluator_env_num = 2
+batch_size = 256
 num_simulations = 100
 update_per_collect = 200
-batch_size = 256
 max_env_step = int(5e6)
 reanalyze_ratio = 0.
+action_space_size = 42
 
 market_regimes = [
-    # Name, mu (trend), omega, alpha, beta
     {'name': 'Developed_Markets', 'mu': 0.00006, 'omega': 0.000005, 'alpha': 0.08, 'beta': 0.90},
     {'name': 'Emerging_Markets', 'mu': 0.0001, 'omega': 0.00005, 'alpha': 0.12, 'beta': 0.86},
     {'name': 'Individual_Stocks', 'mu': 0.00008, 'omega': 0.00007, 'alpha': 0.10, 'beta': 0.88},
@@ -32,28 +29,26 @@ market_regimes = [
 ]
 
 # ==============================================================
-# end of the most frequently changed config specified by the user
-# ==============================================================
-
-# ==============================================================
 #                    Main Config (The Parameters)
 # ==============================================================
 options_zero_game_muzero_config = dict(
-    exp_name=f'options_zero_game_muzero_global_markets_ns{num_simulations}_upc{update_per_collect}_bs{batch_size}',
+    exp_name=f'options_zero_game_muzero_final_model_ns{num_simulations}_upc{update_per_collect}_bs{batch_size}',
     env=dict(
-        env_id=env_id,
+        env_id='OptionsZeroGame-v0',
         collector_env_num=collector_env_num,
         evaluator_env_num=evaluator_env_num,
         n_evaluator_episode=evaluator_env_num,
         manager=dict(shared_memory=False, ),
         drawdown_penalty_weight=0.1,
-        # Pass the entire new curriculum to the environment
         market_regimes=market_regimes,
         illegal_action_penalty=-1.0,
+        # <<< NEW: Add the rolling window parameter
+        rolling_vol_window=5,
     ),
     policy=dict(
         model=dict(
-            observation_shape=35,
+            # <<< MODIFIED: Update observation shape to 36
+            observation_shape=36,
             action_space_size=action_space_size,
             model_type='mlp',
             lstm_hidden_size=512,
@@ -62,7 +57,7 @@ options_zero_game_muzero_config = dict(
             discrete_action_encoding_type='one_hot',
             norm_type='BN',
         ),
-        model_path = './options_zero_game_muzero_global_markets_ns100_upc200_bs256/ckpt/ckpt_best.pth.tar', # UPDATE THIS PATH
+        model_path = './options_zero_game_muzero_global_markets_ns100_upc200_bs256/ckpt/ckpt_best.pth.tar',
         cuda=True,
         game_segment_length=30,
         update_per_collect=update_per_collect,
