@@ -19,7 +19,7 @@ class LogReplayEnv(gym.Wrapper):
         super().__init__(base_env)
         self.log_file_path = cfg.log_file_path
         self._episode_history = []
-        self._last_day_price = None # <<< NEW: Track the previous day's price
+        self._last_day_price = None
         print(f"LogReplayEnv initialized. Replay will be saved to: {self.log_file_path}")
 
     def seed(self, seed: int, dynamic_seed: int = None):
@@ -28,25 +28,40 @@ class LogReplayEnv(gym.Wrapper):
     def reset(self, **kwargs):
         self._episode_history = []
         obs = self.env.reset(**kwargs)
-        self._last_day_price = self.env.start_price # Initialize with start price
+        self._last_day_price = self.env.start_price
         self._log_step(obs, is_initial_state=True)
         return obs
 
+    # <<< MODIFIED: The corrected, two-part logging step method
     def step(self, action):
-        action_name = self.env.indices_to_actions.get(action, 'INVALID')
-        self._log_step(self.env._get_observation(), action=action, info_override={'action_name': action_name})
-
-        timestep = self.env.step(action)
+        # The agent has made a decision based on the state at the start of the day.
         
-        # <<< NEW: Calculate daily change before logging the market close
+        # --- Phase 1: Enforce Rules and Log the ACTUAL Action ---
+        
+        # <<< THE FIX: Ask the underlying environment to validate the action first.
+        # This ensures we log the action that will actually be executed.
+        corrected_action = self.env._enforce_legal_action(action)
+        
+        # Get the human-readable name of the corrected action
+        action_name = self.env.indices_to_actions.get(corrected_action, 'INVALID')
+        
+        # Log the state at the moment of the trade, BEFORE the market moves.
+        # We pass the corrected action and its name to be included in this log entry.
+        self._log_step(self.env._get_observation(), action=corrected_action, info_override={'action_name': action_name})
+
+        # --- Phase 2: Execute the step and Log the Market Close ---
+        # Now, call the underlying environment's step function with the GUARANTEED-LEGAL action.
+        timestep = self.env.step(corrected_action)
+        
+        # Calculate daily change before logging the market close
         current_price = timestep.info['price']
         daily_change_pct = ((current_price / self._last_day_price) - 1) * 100 if self._last_day_price else 0.0
-        self._last_day_price = current_price # Update for the next day
+        self._last_day_price = current_price
         
-        # Add the new metric to the info dictionary
         info_with_daily_change = timestep.info.copy()
         info_with_daily_change['daily_change_pct'] = daily_change_pct
         
+        # Log the state at the END of the day, after the market has moved.
         self._log_step(timestep.obs, action=None, reward=timestep.reward, done=timestep.done, info=info_with_daily_change)
         
         if timestep.done:
@@ -79,7 +94,6 @@ class LogReplayEnv(gym.Wrapper):
         log_info.setdefault('start_price', self.env.start_price)
         log_info.setdefault('volatility', self.env.volatility)
         log_info.setdefault('risk_free_rate', self.env.risk_free_rate)
-        # <<< NEW: Ensure daily_change_pct has a default value
         log_info.setdefault('daily_change_pct', 0.0)
 
         log_entry = {
