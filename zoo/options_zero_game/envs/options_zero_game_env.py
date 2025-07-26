@@ -27,7 +27,7 @@ class OptionsZeroGameEnv(gym.Env):
         market_regimes = [
             {'name': 'Developed_Market', 'mu': 0.00005, 'omega': 0.000005, 'alpha': 0.09, 'beta': 0.90},
         ],
-        time_to_expiry_days=30, # This now represents TRADING days
+        time_to_expiry_days=20, # This now represents TRADING days (20 is one month)
         steps_per_day=1, # e.g., 75 for 5-min, 375 for 1-min, 1 for daily
         rolling_vol_window=5,
         iv_skew_table={
@@ -339,36 +339,118 @@ class OptionsZeroGameEnv(gym.Env):
         elif 'IRON_FLY' in action_name:
             if len(self.portfolio) > self.max_positions - 4: return
             direction = 'long' if 'LONG' in action_name else 'short'
-            straddle_dir = 'long' if direction == 'long' else 'short'
-            strangle_dir = 'short' if direction == 'long' else 'long'
+            
+            # --- DYNAMIC HEDGE CALCULATION ---
+            # First, determine the premium of the inner straddle to find the breakeven points.
+            # This is the same for both long and short flies, just the direction of the trade changes.
             mid_price_call_atm, _, _ = self._get_option_details(self.current_price, atm_price, days_to_expiry, 'call')
-            trades_to_execute.append({'type': 'call', 'direction': straddle_dir, 'strike_price': atm_price, 'entry_premium': self._get_option_price(mid_price_call_atm, straddle_dir == 'long')})
+            premium_call_atm = self._get_option_price(mid_price_call_atm, is_buy=(direction == 'long'))
+            
             mid_price_put_atm, _, _ = self._get_option_details(self.current_price, atm_price, days_to_expiry, 'put')
-            trades_to_execute.append({'type': 'put', 'direction': straddle_dir, 'strike_price': atm_price, 'entry_premium': self._get_option_price(mid_price_put_atm, straddle_dir == 'long')})
-            call_strike_otm = atm_price + (2 * self.strike_distance)
-            put_strike_otm = atm_price - (2 * self.strike_distance)
-            mid_price_call_otm, _, _ = self._get_option_details(self.current_price, call_strike_otm, days_to_expiry, 'call')
-            trades_to_execute.append({'type': 'call', 'direction': strangle_dir, 'strike_price': call_strike_otm, 'entry_premium': self._get_option_price(mid_price_call_otm, strangle_dir == 'long')})
-            mid_price_put_otm, _, _ = self._get_option_details(self.current_price, put_strike_otm, days_to_expiry, 'put')
-            trades_to_execute.append({'type': 'put', 'direction': strangle_dir, 'strike_price': put_strike_otm, 'entry_premium': self._get_option_price(mid_price_put_otm, strangle_dir == 'long')})
+            premium_put_atm = self._get_option_price(mid_price_put_atm, is_buy=(direction == 'long'))
+            
+            # For a short fly, this is premium collected. For a long fly, it's the debit paid.
+            net_premium = premium_call_atm + premium_put_atm
+
+            # Determine the breakeven points based on the straddle's cost/credit
+            upper_breakeven = atm_price + net_premium
+            lower_breakeven = atm_price - net_premium
+
+            # Find the closest available strikes for the hedges
+            hedge_strike_call = int(upper_breakeven / self.strike_distance + 0.5) * self.strike_distance
+            hedge_strike_put = int(lower_breakeven / self.strike_distance + 0.5) * self.strike_distance
+
+            # --- Construct the Full 4-Legged Trade ---
+            
+            # Leg 1 & 2: The ATM Straddle
+            # If it's a LONG Iron Fly, we are LONG the straddle. If SHORT, we are SHORT the straddle.
+            trades_to_execute.append({'type': 'call', 'direction': direction, 'strike_price': atm_price, 'entry_premium': premium_call_atm})
+            trades_to_execute.append({'type': 'put', 'direction': direction, 'strike_price': atm_price, 'entry_premium': premium_put_atm})
+            
+            # Leg 3 & 4: The Hedging OTM Strangle
+            # If it's a LONG Iron Fly, we are SHORT the hedges. If SHORT, we are LONG the hedges.
+            hedge_direction = 'short' if direction == 'long' else 'long'
+            is_buy_hedge = (hedge_direction == 'long')
+
+            mid_price_hedge_call, _, _ = self._get_option_details(self.current_price, hedge_strike_call, days_to_expiry, 'call')
+            trades_to_execute.append({'type': 'call', 'direction': hedge_direction, 'strike_price': hedge_strike_call, 'entry_premium': self._get_option_price(mid_price_hedge_call, is_buy_hedge)})
+            
+            mid_price_hedge_put, _, _ = self._get_option_details(self.current_price, hedge_strike_put, days_to_expiry, 'put')
+            trades_to_execute.append({'type': 'put', 'direction': hedge_direction, 'strike_price': hedge_strike_put, 'entry_premium': self._get_option_price(mid_price_hedge_put, is_buy_hedge)})
 
         elif 'IRON_CONDOR' in action_name:
             if len(self.portfolio) > self.max_positions - 4: return
             direction = 'long' if 'LONG' in action_name else 'short'
+            
+            # --- Dynamic, Delta-Based Strike Selection ---
+            # Define the target deltas for the short and long legs
+            target_delta_short = 0.30
+            target_delta_long = 0.10
+            
+            # Define the search range for strikes (e.g., up to 10 strikes away)
+            search_range = range(1, 11)
+            
+            # --- Find the Call Strikes ---
+            # Find the strike closest to the target delta for the short call
+            best_short_call_strike = atm_price + (self.strike_distance * 2) # Default fallback
+            min_delta_diff_short_call = 999
+            for offset in search_range:
+                strike = atm_price + (offset * self.strike_distance)
+                _, d, _ = self._get_option_details(self.current_price, strike, days_to_expiry, 'call')
+                if abs(d - target_delta_short) < min_delta_diff_short_call:
+                    min_delta_diff_short_call = abs(d - target_delta_short)
+                    best_short_call_strike = strike
+
+            # Find the strike closest to the target delta for the long call (must be further OTM)
+            best_long_call_strike = best_short_call_strike + self.strike_distance # Default fallback
+            min_delta_diff_long_call = 999
+            for offset in range(int((best_short_call_strike - atm_price) / self.strike_distance) + 1, 11):
+                strike = atm_price + (offset * self.strike_distance)
+                _, d, _ = self._get_option_details(self.current_price, strike, days_to_expiry, 'call')
+                if abs(d - target_delta_long) < min_delta_diff_long_call:
+                    min_delta_diff_long_call = abs(d - target_delta_long)
+                    best_long_call_strike = strike
+
+            # --- Find the Put Strikes ---
+            # Find the strike closest to the target delta for the short put
+            best_short_put_strike = atm_price - (self.strike_distance * 2) # Default fallback
+            min_delta_diff_short_put = 999
+            for offset in search_range:
+                strike = atm_price - (offset * self.strike_distance)
+                _, d, _ = self._get_option_details(self.current_price, strike, days_to_expiry, 'put')
+                if abs(d - target_delta_short) < min_delta_diff_short_put:
+                    min_delta_diff_short_put = abs(d - target_delta_short)
+                    best_short_put_strike = strike
+
+            # Find the strike closest to the target delta for the long put (must be further OTM)
+            best_long_put_strike = best_short_put_strike - self.strike_distance # Default fallback
+            min_delta_diff_long_put = 999
+            for offset in range(int((atm_price - best_short_put_strike) / self.strike_distance) + 1, 11):
+                strike = atm_price - (offset * self.strike_distance)
+                _, d, _ = self._get_option_details(self.current_price, strike, days_to_expiry, 'put')
+                if abs(d - target_delta_long) < min_delta_diff_long_put:
+                    min_delta_diff_long_put = abs(d - target_delta_long)
+                    best_long_put_strike = strike
+
+            # --- Construct the Full 4-Legged Trade ---
             inner_dir = 'long' if direction == 'long' else 'short'
             outer_dir = 'short' if direction == 'long' else 'long'
-            call_strike_inner = atm_price + (2 * self.strike_distance)
-            put_strike_inner = atm_price - (2 * self.strike_distance)
-            mid_price_call_inner, _, _ = self._get_option_details(self.current_price, call_strike_inner, days_to_expiry, 'call')
-            trades_to_execute.append({'type': 'call', 'direction': inner_dir, 'strike_price': call_strike_inner, 'entry_premium': self._get_option_price(mid_price_call_inner, inner_dir == 'long')})
-            mid_price_put_inner, _, _ = self._get_option_details(self.current_price, put_strike_inner, days_to_expiry, 'put')
-            trades_to_execute.append({'type': 'put', 'direction': inner_dir, 'strike_price': put_strike_inner, 'entry_premium': self._get_option_price(mid_price_put_inner, inner_dir == 'long')})
-            call_strike_outer = atm_price + (3 * self.strike_distance)
-            put_strike_outer = atm_price - (3 * self.strike_distance)
-            mid_price_call_outer, _, _ = self._get_option_details(self.current_price, call_strike_outer, days_to_expiry, 'call')
-            trades_to_execute.append({'type': 'call', 'direction': outer_dir, 'strike_price': call_strike_outer, 'entry_premium': self._get_option_price(mid_price_call_outer, outer_dir == 'long')})
-            mid_price_put_outer, _, _ = self._get_option_details(self.current_price, put_strike_outer, days_to_expiry, 'put')
-            trades_to_execute.append({'type': 'put', 'direction': outer_dir, 'strike_price': put_strike_outer, 'entry_premium': self._get_option_price(mid_price_put_outer, outer_dir == 'long')})
+
+            # Leg 1: Inner Call
+            mid_price_call_inner, _, _ = self._get_option_details(self.current_price, best_short_call_strike, days_to_expiry, 'call')
+            trades_to_execute.append({'type': 'call', 'direction': inner_dir, 'strike_price': best_short_call_strike, 'entry_premium': self._get_option_price(mid_price_call_inner, inner_dir == 'long')})
+            
+            # Leg 2: Inner Put
+            mid_price_put_inner, _, _ = self._get_option_details(self.current_price, best_short_put_strike, days_to_expiry, 'put')
+            trades_to_execute.append({'type': 'put', 'direction': inner_dir, 'strike_price': best_short_put_strike, 'entry_premium': self._get_option_price(mid_price_put_inner, inner_dir == 'long')})
+
+            # Leg 3: Outer Call (Hedge)
+            mid_price_call_outer, _, _ = self._get_option_details(self.current_price, best_long_call_strike, days_to_expiry, 'call')
+            trades_to_execute.append({'type': 'call', 'direction': outer_dir, 'strike_price': best_long_call_strike, 'entry_premium': self._get_option_price(mid_price_call_outer, outer_dir == 'long')})
+            
+            # Leg 4: Outer Put (Hedge)
+            mid_price_put_outer, _, _ = self._get_option_details(self.current_price, best_long_put_strike, days_to_expiry, 'put')
+            trades_to_execute.append({'type': 'put', 'direction': outer_dir, 'strike_price': best_long_put_strike, 'entry_premium': self._get_option_price(mid_price_put_outer, outer_dir == 'long')})
 
         else:
             if len(self.portfolio) >= self.max_positions: return

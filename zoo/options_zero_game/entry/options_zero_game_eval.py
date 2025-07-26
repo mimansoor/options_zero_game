@@ -14,7 +14,7 @@ if __name__ == "__main__":
     # ==============================================================
     # 1. Set the path to your best trained model checkpoint
     # ==============================================================
-    model_path = './options_zero_game_muzero_global_markets_ns100_upc200_bs256/ckpt/ckpt_best.pth.tar' # UPDATE THIS PATH
+    model_path = './options_zero_game_muzero_global_markets_ns25_upc1000_bs256/ckpt/ckpt_best.pth.tar' # UPDATE THIS PATH
 
     # ==============================================================
     # 2. Configure the environment for logging
