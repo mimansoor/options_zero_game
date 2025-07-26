@@ -360,6 +360,16 @@ class OptionsZeroGameEnv(gym.Env):
 
     def _get_true_action_mask(self):
         action_mask = np.zeros(self.action_space_size, dtype=np.int8)
+
+        # --- Rule 0: Expiry Day ---
+        # If it's the last step, only HOLD and CLOSE_ALL are allowed.
+        if self.current_step >= self.total_steps - 1:
+            action_mask[self.actions_to_indices['HOLD']] = 1
+            if len(self.portfolio) > 0:
+                action_mask[self.actions_to_indices['CLOSE_ALL']] = 1
+            return action_mask
+
+        # If not expiry day, proceed with all other rules
         action_mask[self.actions_to_indices['HOLD']] = 1
         
         num_long_calls = sum(1 for p in self.portfolio if p['type'] == 'call' and p['direction'] == 'long')
