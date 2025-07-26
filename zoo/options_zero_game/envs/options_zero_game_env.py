@@ -107,13 +107,23 @@ class OptionsZeroGameEnv(gym.Env):
         return [seed]
 
     def _generate_price_path(self):
-        garch_spec = arch_model(None, p=1, q=1)
+        # Use dummy data to initialize a fully specified model
+        dummy_returns = np.zeros(100)
+        model = arch_model(dummy_returns, mean='Constant', vol='GARCH', p=1, q=1)
+
+        # Set the parameters for the chosen regime
         params = np.array([self.trend, self.omega, self.alpha, self.beta])
-        sim_returns = garch_spec.simulate(params, self.total_steps + 1)
+
+        # Simulate the path of log returns
+        sim_data = model.simulate(params, nobs=self.total_steps + 1)
+
+        # Reconstruct the price path using exponential compounding
         price_path = np.zeros(self.total_steps + 1)
         price_path[0] = self.start_price
+
         for i in range(1, self.total_steps + 1):
-            price_path[i] = price_path[i-1] * (1 + sim_returns['data'][i-1])
+            price_path[i] = price_path[i - 1] * np.exp(sim_data['data'][i - 1])
+
         self.price_path = price_path
 
     def _simulate_price_step(self):
