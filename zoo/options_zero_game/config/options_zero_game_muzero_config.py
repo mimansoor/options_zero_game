@@ -42,8 +42,8 @@ options_zero_game_muzero_config = dict(
         drawdown_penalty_weight=0.1,
         market_regimes=market_regimes,
         illegal_action_penalty=-1.0,
-        # <<< NEW: Add the rolling window parameter
         rolling_vol_window=5,
+        steps_per_day=75, # 75 steps for 5-minute intervals
     ),
     policy=dict(
         model=dict(

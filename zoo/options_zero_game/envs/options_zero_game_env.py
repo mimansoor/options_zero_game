@@ -27,12 +27,15 @@ class OptionsZeroGameEnv(gym.Env):
         market_regimes = [
             {'name': 'Developed_Market', 'mu': 0.00005, 'omega': 0.000005, 'alpha': 0.09, 'beta': 0.90},
         ],
+        # <<< NEW: Parameters for intraday and weekend logic
+        time_to_expiry_days=30,
+        steps_per_day=75, # e.g., 75 for 5-min, 375 for 1-min, 1 for daily
+        # <<<
         rolling_vol_window=5,
         iv_skew_table={
             'call': {-5: (13.5, 16.0), -4: (13.3, 15.8), -3: (13.2, 15.7), -2: (13.1, 15.5), -1: (13.0, 15.4), 0: (13.0, 15.3), 1: (13.0, 15.4), 2: (13.1, 15.6), 3: (13.2, 15.7), 4: (13.3, 15.8), 5: (13.5, 16.0)},
             'put':  {-5: (14.0, 16.5), -4: (13.8, 16.3), -3: (13.8, 16.1), -2: (13.6, 16.0), -1: (13.5, 15.8), 0: (13.5, 15.8), 1: (13.5, 15.8), 2: (13.6, 16.0), 3: (13.8, 16.1), 4: (13.8, 16.3), 5: (14.0, 16.5)},
         },
-        time_to_expiry=30,
         strike_distance=50.0,
         lot_size=75,
         max_positions=4,
@@ -55,14 +58,11 @@ class OptionsZeroGameEnv(gym.Env):
         if cfg is not None:
             self._cfg.update(cfg)
 
+        # ... (Standard parameters)
         self.start_price = self._cfg.start_price
         self.initial_cash = self._cfg.initial_cash
         self.market_regimes = self._cfg.market_regimes
         self.rolling_vol_window = self._cfg.rolling_vol_window
-        self.trend = 0.0
-        self.volatility = 0.20
-        
-        self.total_steps = self._cfg.time_to_expiry
         self.risk_free_rate = self._cfg.risk_free_rate
         self.lot_size = self._cfg.lot_size
         self.strike_distance = self._cfg.strike_distance
@@ -72,6 +72,11 @@ class OptionsZeroGameEnv(gym.Env):
         self.drawdown_penalty_weight = self._cfg.drawdown_penalty_weight
         self.illegal_action_penalty = self._cfg.illegal_action_penalty
         self.ignore_legal_actions = self._cfg.ignore_legal_actions
+        
+        # <<< MODIFIED: Time parameters are now more granular
+        self.time_to_expiry_days = self._cfg.time_to_expiry_days
+        self.steps_per_day = self._cfg.steps_per_day
+        self.total_steps = self.time_to_expiry_days * self.steps_per_day
         
         self.iv_bins = self._discretize_iv_skew(self._cfg.iv_skew_table)
         
@@ -125,13 +130,23 @@ class OptionsZeroGameEnv(gym.Env):
 
     def _generate_price_path(self):
         # Use a dummy series to initialize a GARCH model specification
-        # This is a robust way to access the .simulate() method
         garch_spec = arch_model(np.zeros(100), mean='Constant', vol='GARCH', p=1, q=1)
+        
+        # Scale daily GARCH parameters to the step frequency for log returns
+        # The mean (mu) scales linearly.
+        mu_step = self.trend / self.steps_per_day
+        # The variance parameters (omega, alpha) also scale linearly with time.
+        omega_step = self.omega / self.steps_per_day
+        alpha_step = self.alpha / self.steps_per_day
+        # Beta is a decay/persistence term and is more complex to scale.
+        # A common and robust simplification is to scale it by the root of time,
+        # but for stability, keeping it constant or slightly adjusted is also used.
+        # We will keep it simple and robust for now.
+        beta_step = self.beta 
+        
+        params = np.array([mu_step, omega_step, alpha_step, beta_step])
 
-        # Set the parameters for the chosen regime
-        params = np.array([self.trend, self.omega, self.alpha, self.beta])
-
-        # Simulate the path of log returns
+        # Simulate the path of log returns for the total number of steps
         sim_data = garch_spec.simulate(params, nobs=self.total_steps + 1)
 
         # Reconstruct the price path using exponential compounding for log returns
@@ -142,11 +157,13 @@ class OptionsZeroGameEnv(gym.Env):
             price_path[i] = price_path[i - 1] * np.exp(sim_data['data'][i - 1])
 
         self.price_path = price_path
-
-        # Now, correctly calculate the realized volatility from this new price path
+        
+        # Now, correctly calculate the realized volatility from this accurate price path
+        # We calculate simple returns here for the standard deviation calculation
         returns_df = pd.Series(price_path).pct_change().dropna()
+        rolling_window_steps = self.rolling_vol_window * self.steps_per_day
         # Annualize the rolling standard deviation
-        self.realized_vol_series = returns_df.rolling(window=self.rolling_vol_window).std().fillna(0) * np.sqrt(252)
+        self.realized_vol_series = returns_df.rolling(window=rolling_window_steps).std().fillna(0) * np.sqrt(252 * self.steps_per_day)
 
     def _simulate_price_step(self):
         self.current_price = self.price_path[self.current_step]
@@ -156,8 +173,9 @@ class OptionsZeroGameEnv(gym.Env):
         return self.iv_bins[option_type][clamped_offset][self.iv_bin_index]
 
     def _get_option_details(self, underlying_price, strike_price, days_to_expiry, option_type):
+        # <<< MODIFIED: Time `t` is now calculated from fractional days
         t = days_to_expiry / 365.25
-        if t <= 0:
+        if t <= 1e-6: # Use a small epsilon for floating point safety
             intrinsic_value = 0.0
             if option_type == 'call': intrinsic_value = max(0, underlying_price - strike_price)
             else: intrinsic_value = max(0, strike_price - underlying_price)
@@ -215,6 +233,10 @@ class OptionsZeroGameEnv(gym.Env):
         self._generate_price_path()
         
         self.current_step = 0
+        # <<< NEW: Initialize day-of-week and step-of-day counters
+        self.day_of_week = 0 # 0=Mon, 1=Tue, ..., 4=Fri
+        self.step_of_day = 0
+        
         self.current_price = self.price_path[0]
         self.portfolio = []
         self.realized_pnl = 0.0
@@ -250,11 +272,7 @@ class OptionsZeroGameEnv(gym.Env):
             return self.actions_to_indices['HOLD']
 
     def step(self, action: int):
-        true_legal_actions_mask = self._get_true_action_mask()
-        was_illegal_action = true_legal_actions_mask[action] == 0
-        if was_illegal_action:
-            action = self.actions_to_indices['HOLD']
-
+        action = self._enforce_legal_action(action)
         action_name = self.indices_to_actions.get(action, 'INVALID')
         tpv_before = self._get_portfolio_value()
 
@@ -269,9 +287,24 @@ class OptionsZeroGameEnv(gym.Env):
         
         self.portfolio.sort(key=lambda p: (p['strike_price'], p['type']))
         
+        # <<< MODIFIED: The new, advanced time progression logic
         self.current_step += 1
+        self.step_of_day += 1
+        
+        time_decay_days = 1.0 / self.steps_per_day
+        
+        # Check for end of day
+        if self.step_of_day >= self.steps_per_day:
+            self.step_of_day = 0
+            # Check for weekend
+            if self.day_of_week == 4: # It was a Friday
+                self.day_of_week = 0 # Next day is Monday
+                time_decay_days += 2 # Add Saturday and Sunday decay
+            else:
+                self.day_of_week += 1
+        
         self._simulate_price_step()
-        for pos in self.portfolio: pos['days_to_expiry'] -= 1
+        for pos in self.portfolio: pos['days_to_expiry'] -= time_decay_days
 
         done = self.current_step >= self.total_steps
         if done:
@@ -280,6 +313,7 @@ class OptionsZeroGameEnv(gym.Env):
         tpv_after = self._get_portfolio_value()
         normal_shaped_reward, raw_reward = self._calculate_shaped_reward(tpv_before, tpv_after)
         
+        was_illegal_action = self._get_true_action_mask()[action] == 0
         if was_illegal_action:
             final_reward = self.illegal_action_penalty
         else:
@@ -294,7 +328,7 @@ class OptionsZeroGameEnv(gym.Env):
         days_to_expiry = self.total_steps - self.current_step
         atm_price = int(self.current_price / self.strike_distance + 0.5) * self.strike_distance
         trades_to_execute = []
-        
+
         if 'STRADDLE' in action_name:
             if len(self.portfolio) > self.max_positions - 2: return
             direction = 'long' if 'LONG' in action_name else 'short'
@@ -303,7 +337,7 @@ class OptionsZeroGameEnv(gym.Env):
             trades_to_execute.append({'type': 'call', 'direction': direction, 'strike_price': atm_price, 'entry_premium': self._get_option_price(mid_price_call, is_buy)})
             mid_price_put, _, _ = self._get_option_details(self.current_price, atm_price, days_to_expiry, 'put')
             trades_to_execute.append({'type': 'put', 'direction': direction, 'strike_price': atm_price, 'entry_premium': self._get_option_price(mid_price_put, is_buy)})
-        
+
         elif 'STRANGLE' in action_name:
             if len(self.portfolio) > self.max_positions - 2: return
             direction = 'long' if 'LONG' in action_name else 'short'
@@ -377,7 +411,7 @@ class OptionsZeroGameEnv(gym.Env):
         num_long_puts = sum(1 for p in self.portfolio if p['type'] == 'put' and p['direction'] == 'long')
         num_short_puts = sum(1 for p in self.portfolio if p['type'] == 'put' and p['direction'] == 'short')
         existing_positions = {(p['strike_price'], p['type']): p['direction'] for p in self.portfolio}
-        
+
         if len(self.portfolio) <= self.max_positions - 4:
             action_mask[self.actions_to_indices['OPEN_LONG_IRON_FLY']] = 1
             action_mask[self.actions_to_indices['OPEN_SHORT_IRON_FLY']] = 1
@@ -425,7 +459,7 @@ class OptionsZeroGameEnv(gym.Env):
         obs_vec[2] = math.tanh(total_pnl / self.initial_cash)
         current_realized_vol = self.realized_vol_series.iloc[self.current_step - 1] if self.current_step > 0 else 0
         obs_vec[3] = math.tanh((current_realized_vol / self.garch_implied_vol) - 1.0) if self.garch_implied_vol > 0 else 0.0
-        
+
         current_idx = 4
         atm_price = int(self.current_price / self.strike_distance + 0.5) * self.strike_distance
         for i in range(self.max_positions):
@@ -445,12 +479,12 @@ class OptionsZeroGameEnv(gym.Env):
                 obs_vec[current_idx + 6] = math.tanh(max_profit / self.initial_cash)
                 obs_vec[current_idx + 7] = math.tanh(max_loss / self.initial_cash)
             current_idx += 8
-        
+
         if self.ignore_legal_actions:
             action_mask = np.ones(self.action_space_size, dtype=np.int8)
         else:
             action_mask = self._get_true_action_mask()
-        
+
         return {'observation': obs_vec, 'action_mask': action_mask, 'to_play': np.array([-1], dtype=np.int8)}
 
     def _calculate_max_profit_loss(self, position):
