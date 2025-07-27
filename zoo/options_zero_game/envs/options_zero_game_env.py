@@ -412,7 +412,6 @@ class OptionsZeroGameEnv(gym.Env):
         mid_price_put, _, _ = self._get_option_details(self.current_price, atm_price, days_to_expiry, 'put')
         trades_to_execute.append({'type': 'put', 'direction': direction, 'strike_price': atm_price, 'entry_premium': self._get_option_price(mid_price_put, is_buy)})
         
-        # <<< MODIFIED: Add strategy-aware PnL
         net_premium = sum(t['entry_premium'] for t in trades_to_execute)
         max_profit = self.initial_cash * 10 if direction == 'long' else net_premium * self.lot_size
         max_loss = -net_premium * self.lot_size if direction == 'long' else -self.initial_cash * 10
@@ -491,10 +490,10 @@ class OptionsZeroGameEnv(gym.Env):
         net_premium_hedge = trades_to_execute[2]['entry_premium'] + trades_to_execute[3]['entry_premium']
         net_premium = net_premium_straddle - net_premium_hedge
         
-        if direction == 'short': # Short Iron Fly
+        if direction == 'short':
             max_profit = net_premium * self.lot_size
             max_loss = -((hedge_strike_call - atm_price) * self.lot_size - max_profit)
-        else: # Long Iron Fly
+        else:
             max_loss = -net_premium * self.lot_size
             max_profit = ((hedge_strike_call - atm_price) * self.lot_size) + max_loss
 
@@ -575,7 +574,6 @@ class OptionsZeroGameEnv(gym.Env):
         
         net_premium = sum(t['entry_premium'] * (1 if t['direction'] == inner_dir else -1) for t in trades_to_execute)
         
-        # <<< MODIFIED: Use the actual width of the spreads for calculation
         call_spread_width = best_long_call_strike - best_short_call_strike
         put_spread_width = best_short_put_strike - best_long_put_strike
         
@@ -598,48 +596,74 @@ class OptionsZeroGameEnv(gym.Env):
             new_positions_df = pd.DataFrame(trades_to_execute)
             self.portfolio = pd.concat([self.portfolio, new_positions_df], ignore_index=True)
 
+    # <<< MODIFIED: Your superior, refactored action mask logic
     def _get_true_action_mask(self) -> np.ndarray:
         action_mask = np.zeros(self.action_space_size, dtype=np.int8)
         current_trading_day = self.current_step // self.steps_per_day
         is_expiry_day = current_trading_day >= self.time_to_expiry_days - 1
+        
         action_mask[self.actions_to_indices['HOLD']] = 1
+        
         if not self.portfolio.empty:
             action_mask[self.actions_to_indices['CLOSE_ALL']] = 1
             for i in range(len(self.portfolio)):
                 if f'CLOSE_POSITION_{i}' in self.actions_to_indices:
                     action_mask[self.actions_to_indices[f'CLOSE_POSITION_{i}']] = 1
+        
         if is_expiry_day:
             return action_mask
-        num_long_calls = len(self.portfolio.query("type == 'call' and direction == 'long'"))
-        num_short_calls = len(self.portfolio.query("type == 'call' and direction == 'short'"))
-        num_long_puts = len(self.portfolio.query("type == 'put' and direction == 'long'"))
-        num_short_puts = len(self.portfolio.query("type == 'put' and direction == 'short'"))
-        existing_positions = {(p['strike_price'], p['type']): p['direction'] for i, p in self.portfolio.iterrows()}
+        
         if len(self.portfolio) <= self.max_positions - 4:
             action_mask[self.actions_to_indices['OPEN_LONG_IRON_FLY']] = 1
             action_mask[self.actions_to_indices['OPEN_SHORT_IRON_FLY']] = 1
             action_mask[self.actions_to_indices['OPEN_LONG_IRON_CONDOR']] = 1
             action_mask[self.actions_to_indices['OPEN_SHORT_IRON_CONDOR']] = 1
+        
         if len(self.portfolio) <= self.max_positions - 2:
             action_mask[self.actions_to_indices['OPEN_LONG_STRADDLE_ATM']] = 1
             action_mask[self.actions_to_indices['OPEN_SHORT_STRADDLE_ATM']] = 1
             action_mask[self.actions_to_indices['OPEN_LONG_STRANGLE_ATM_1']] = 1
             action_mask[self.actions_to_indices['OPEN_SHORT_STRANGLE_ATM_1']] = 1
+        
         if len(self.portfolio) < self.max_positions:
             atm_price = int(self.current_price / self.strike_distance + 0.5) * self.strike_distance
-            days_to_expiry = self.time_to_expiry_days - current_trading_day
+            trading_days_left = self.time_to_expiry_days - current_trading_day
+            days_to_expiry = trading_days_left * (7.0 / 5.0)
+            
+            num_long_calls = len(self.portfolio.query("type == 'call' and direction == 'long'"))
+            num_short_calls = len(self.portfolio.query("type == 'call' and direction == 'short'"))
+            num_long_puts = len(self.portfolio.query("type == 'put' and direction == 'long'"))
+            num_short_puts = len(self.portfolio.query("type == 'put' and direction == 'short'"))
+            existing_positions = {(p['strike_price'], p['type']): p['direction'] for i, p in self.portfolio.iterrows()}
+            
             for offset in range(-3, 4):
                 strike_price = atm_price + (offset * self.strike_distance)
                 for option_type in ['call', 'put']:
-                    _, d, _ = self._get_option_details(self.current_price, strike_price, days_to_expiry, option_type)
-                    is_far_otm = abs(d) < self.otm_threshold
-                    is_far_itm = abs(d) > self.itm_threshold
+                    _, delta, _ = self._get_option_details(self.current_price, strike_price, days_to_expiry, option_type)
+                    abs_delta = abs(delta)
+                    is_far_otm = abs_delta < self.otm_threshold
+                    is_far_itm = abs_delta > self.itm_threshold
+                    
                     action_name_long = f'OPEN_LONG_{option_type.upper()}_ATM{"+" if offset >=0 else ""}{offset}'
-                    is_legal_long = ((not (is_far_otm or is_far_itm)) and not (option_type == 'put' and existing_positions.get((strike_price, 'call')) == 'short') and not (option_type == 'call' and existing_positions.get((strike_price, 'put')) == 'short') and not (option_type == 'call' and num_long_calls > 0) and not (option_type == 'put' and num_long_puts > 0))
-                    if is_legal_long: action_mask[self.actions_to_indices[action_name_long]] = 1
+                    is_legal_long = True
+                    is_legal_long &= not (is_far_otm or is_far_itm)
+                    if option_type == 'put': is_legal_long &= not existing_positions.get((strike_price, 'call')) == 'short'
+                    else: is_legal_long &= not existing_positions.get((strike_price, 'put')) == 'short'
+                    if option_type == 'call': is_legal_long &= num_long_calls == 0
+                    else: is_legal_long &= num_long_puts == 0
+                    if is_legal_long and action_name_long in self.actions_to_indices:
+                        action_mask[self.actions_to_indices[action_name_long]] = 1
+                    
                     action_name_short = f'OPEN_SHORT_{option_type.upper()}_ATM{"+" if offset >=0 else ""}{offset}'
-                    is_legal_short = ((not is_far_itm) and not (option_type == 'put' and existing_positions.get((strike_price, 'call')) == 'long') and not (option_type == 'call' and existing_positions.get((strike_price, 'put')) == 'long') and not (option_type == 'call' and num_short_calls > 0) and not (option_type == 'put' and num_short_puts > 0))
-                    if is_legal_short: action_mask[self.actions_to_indices[action_name_short]] = 1
+                    is_legal_short = True
+                    is_legal_short &= not is_far_itm
+                    if option_type == 'put': is_legal_short &= not existing_positions.get((strike_price, 'call')) == 'long'
+                    else: is_legal_short &= not existing_positions.get((strike_price, 'put')) == 'long'
+                    if option_type == 'call': is_legal_short &= num_short_calls == 0
+                    else: is_legal_short &= num_short_puts == 0
+                    if is_legal_short and action_name_short in self.actions_to_indices:
+                        action_mask[self.actions_to_indices[action_name_short]] = 1
+        
         return action_mask
 
     def _get_observation(self) -> Dict[str, np.ndarray]:
@@ -686,7 +710,7 @@ class OptionsZeroGameEnv(gym.Env):
         return {'observation': final_obs_vec, 'action_mask': mcts_action_mask, 'to_play': np.array([-1], dtype=np.int8)}
 
     def _calculate_max_profit_loss(self, position: pd.Series) -> Tuple[float, float]:
-        if position['strategy_id'] != -1:
+        if position['strategy_id'] != -1 and position['strategy_max_loss'] != 0:
             return position['strategy_max_profit'], position['strategy_max_loss']
         else:
             entry_premium = position['entry_premium'] * self.lot_size
