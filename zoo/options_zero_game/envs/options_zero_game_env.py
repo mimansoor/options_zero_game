@@ -203,7 +203,14 @@ class OptionsZeroGameEnv(gym.Env):
         if is_buy: return mid_price * (1 + self.bid_ask_spread_pct)
         else: return mid_price * (1 - self.bid_ask_spread_pct)
 
-    def _get_portfolio_value(self):
+    def _get_current_equity(self):
+        """
+        Calculates the total net worth of the account (cash + PnL).
+        This is used for the drawdown calculation.
+        """
+        return self.initial_cash + self._get_total_pnl()
+
+    def _get_total_pnl(self):
         unrealized_pnl = 0.0
         for pos in self.portfolio:
             mid_price, _, _ = self._get_option_details(self.current_price, pos['strike_price'], pos['days_to_expiry'], pos['type'])
@@ -256,11 +263,11 @@ class OptionsZeroGameEnv(gym.Env):
             else: pnl = (entry_premium - exit_premium) * self.lot_size
             self.realized_pnl += pnl
 
-    def _calculate_shaped_reward(self, tpv_before, tpv_after):
-        raw_reward = tpv_after - tpv_before
+    def _calculate_shaped_reward(self, equity_before, equity_after):
+        raw_reward = equity_after - equity_before
         pnl_component = math.tanh(raw_reward / self.pnl_scaling_factor)
-        self.high_water_mark = max(self.high_water_mark, tpv_after)
-        drawdown = self.high_water_mark - tpv_after
+        self.high_water_mark = max(self.high_water_mark, equity_after)
+        drawdown = self.high_water_mark - equity_after
         drawdown_penalty_component = -self.drawdown_penalty_weight * math.tanh(drawdown / self.initial_cash)
         combined_score = pnl_component + drawdown_penalty_component
         final_reward = math.tanh(combined_score / 2)
@@ -294,7 +301,7 @@ class OptionsZeroGameEnv(gym.Env):
             action = self.actions_to_indices['HOLD']
 
         action_name = self.indices_to_actions.get(action, 'INVALID')
-        tpv_before = self._get_portfolio_value()
+        equity_before = self._get_current_equity()
 
         if action_name.startswith('OPEN_'): self._handle_open_action(action_name)
         elif action_name.startswith('CLOSE_POSITION_'):
@@ -315,8 +322,8 @@ class OptionsZeroGameEnv(gym.Env):
         if done:
             while len(self.portfolio) > 0: self._close_position(0)
 
-        tpv_after = self._get_portfolio_value()
-        normal_shaped_reward, raw_reward = self._calculate_shaped_reward(tpv_before, tpv_after)
+        equity_after = self._get_current_equity()
+        normal_shaped_reward, raw_reward = self._calculate_shaped_reward(equity_before, equity_after)
         
         if was_illegal_action:
             final_reward = self.illegal_action_penalty
@@ -511,7 +518,7 @@ class OptionsZeroGameEnv(gym.Env):
         market_portfolio_vec = np.zeros(self.market_and_portfolio_state_size, dtype=np.float32)
         market_portfolio_vec[0] = (self.current_price / self.start_price) - 1.0
         market_portfolio_vec[1] = (self.total_steps - self.current_step) / self.total_steps
-        total_pnl = self._get_portfolio_value()
+        total_pnl = self._get_total_pnl()
         market_portfolio_vec[2] = math.tanh(total_pnl / self.initial_cash)
         current_realized_vol = self.realized_vol_series.iloc[self.current_step - 1] if self.current_step > 0 else 0
         market_portfolio_vec[3] = math.tanh((current_realized_vol / self.garch_implied_vol) - 1.0) if self.garch_implied_vol > 0 else 0.0
@@ -561,8 +568,8 @@ class OptionsZeroGameEnv(gym.Env):
         return max_profit, max_loss
 
     def render(self, mode='human'):
-        portfolio_val = self._get_portfolio_value()
-        print(f"Step: {self.current_step:02d} | Price: ${self.current_price:8.2f} | Positions: {len(self.portfolio):1d} | Total PnL: ${portfolio_val:9.2f}")
+        total_pnl = self._get_total_pnl()
+        print(f"Step: {self.current_step:02d} | Price: ${self.current_price:8.2f} | Positions: {len(self.portfolio):1d} | Total PnL: ${total_pnl:9.2f}")
     
     @property
     def observation_space(self) -> gym.spaces.Space: return self._observation_space
