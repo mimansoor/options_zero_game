@@ -12,6 +12,7 @@ from gym import spaces
 from gymnasium.utils import seeding
 from py_vollib.black_scholes import black_scholes
 from py_vollib.black_scholes.greeks.analytical import delta
+from scipy.stats import norm
 
 from ding.envs import BaseEnvTimestep
 from ding.utils import ENV_REGISTRY
@@ -141,7 +142,8 @@ class OptionsZeroGameEnv(gym.Env):
         
         self.np_random: Any = None
         
-        self.portfolio_columns: List[str] = ['type', 'direction', 'entry_step', 'strike_price', 'entry_premium', 'days_to_expiry']
+        # <<< MODIFIED: Add creation_id to the portfolio definition
+        self.portfolio_columns: List[str] = ['type', 'direction', 'entry_step', 'strike_price', 'entry_premium', 'days_to_expiry', 'creation_id']
         self.portfolio: pd.DataFrame = pd.DataFrame(columns=self.portfolio_columns)
 
     def _discretize_iv_skew(self, skew_table: Dict[str, Dict[str, Tuple[float, float]]], num_bins: int = 5) -> Dict[str, Dict[str, np.ndarray]]:
@@ -258,7 +260,7 @@ class OptionsZeroGameEnv(gym.Env):
         elif self.np_random is None: self.seed(0)
 
         chosen_regime = random.choice(self.market_regimes)
-        self.current_regime_name = chosen_regime['name'] # For logging
+        self.current_regime_name = chosen_regime['name']
         self.trend: float = chosen_regime['mu']
         self.omega: float = chosen_regime['omega']
         self.alpha: float = chosen_regime['alpha']
@@ -281,6 +283,8 @@ class OptionsZeroGameEnv(gym.Env):
         self._final_eval_reward: float = 0.0
         self.high_water_mark: float = self.initial_cash
         self.illegal_action_count: int = 0
+        # <<< MODIFIED: Initialize creation ID counter
+        self.next_creation_id: int = 0
         return self._get_observation()
 
     def _close_position(self, position_index: int) -> None:
@@ -349,9 +353,9 @@ class OptionsZeroGameEnv(gym.Env):
             while not self.portfolio.empty:
                 self._close_position(-1)
 
-        # <<< THE FIX: Add deterministic tie-breaker to the sort
+        # <<< MODIFIED: Add deterministic tie-breaker to the sort
         if not self.portfolio.empty:
-            self.portfolio = self.portfolio.sort_values(by=['strike_price', 'type', 'entry_step']).reset_index(drop=True)
+            self.portfolio = self.portfolio.sort_values(by=['strike_price', 'type', 'creation_id']).reset_index(drop=True)
 
         self._advance_time_and_market()
 
@@ -396,7 +400,11 @@ class OptionsZeroGameEnv(gym.Env):
         is_buy = (direction == 'LONG')
         mid_price, _, _ = self._get_option_details(self.current_price, strike_price, days_to_expiry, type.lower())
         entry_premium = self._get_option_price(mid_price, is_buy)
-        new_position = pd.DataFrame([{'type': type.lower(), 'direction': direction.lower(), 'entry_step': self.current_step, 'strike_price': strike_price, 'entry_premium': entry_premium, 'days_to_expiry': days_to_expiry}])
+        
+        # <<< MODIFIED: Add creation_id
+        new_position = pd.DataFrame([{'type': type.lower(), 'direction': direction.lower(), 'entry_step': self.current_step, 'strike_price': strike_price, 'entry_premium': entry_premium, 'days_to_expiry': days_to_expiry, 'creation_id': self.next_creation_id}])
+        self.next_creation_id += 1
+        
         self.portfolio = pd.concat([self.portfolio, new_position], ignore_index=True)
 
     def _open_straddle(self, action_name: str) -> None:
@@ -412,6 +420,12 @@ class OptionsZeroGameEnv(gym.Env):
         trades_to_execute.append({'type': 'call', 'direction': direction, 'strike_price': atm_price, 'entry_premium': self._get_option_price(mid_price_call, is_buy)})
         mid_price_put, _, _ = self._get_option_details(self.current_price, atm_price, days_to_expiry, 'put')
         trades_to_execute.append({'type': 'put', 'direction': direction, 'strike_price': atm_price, 'entry_premium': self._get_option_price(mid_price_put, is_buy)})
+        
+        # <<< MODIFIED: Add creation_id
+        for trade in trades_to_execute:
+            trade['creation_id'] = self.next_creation_id
+            self.next_creation_id += 1
+            
         if trades_to_execute:
             new_positions_df = pd.DataFrame(trades_to_execute)
             self.portfolio = pd.concat([self.portfolio, new_positions_df], ignore_index=True)
@@ -431,6 +445,11 @@ class OptionsZeroGameEnv(gym.Env):
         put_strike = atm_price - (1 * self.strike_distance)
         mid_price_put, _, _ = self._get_option_details(self.current_price, put_strike, days_to_expiry, 'put')
         trades_to_execute.append({'type': 'put', 'direction': direction, 'strike_price': put_strike, 'entry_premium': self._get_option_price(mid_price_put, is_buy)})
+        
+        for trade in trades_to_execute:
+            trade['creation_id'] = self.next_creation_id
+            self.next_creation_id += 1
+            
         if trades_to_execute:
             new_positions_df = pd.DataFrame(trades_to_execute)
             self.portfolio = pd.concat([self.portfolio, new_positions_df], ignore_index=True)
@@ -460,6 +479,11 @@ class OptionsZeroGameEnv(gym.Env):
         trades_to_execute.append({'type': 'call', 'direction': hedge_dir, 'strike_price': hedge_strike_call, 'entry_premium': self._get_option_price(mid_price_hedge_call, hedge_dir == 'long')})
         mid_price_hedge_put, _, _ = self._get_option_details(self.current_price, hedge_strike_put, days_to_expiry, 'put')
         trades_to_execute.append({'type': 'put', 'direction': hedge_dir, 'strike_price': hedge_strike_put, 'entry_premium': self._get_option_price(mid_price_hedge_put, hedge_dir == 'long')})
+        
+        for trade in trades_to_execute:
+            trade['creation_id'] = self.next_creation_id
+            self.next_creation_id += 1
+            
         if trades_to_execute:
             new_positions_df = pd.DataFrame(trades_to_execute)
             self.portfolio = pd.concat([self.portfolio, new_positions_df], ignore_index=True)
@@ -526,6 +550,11 @@ class OptionsZeroGameEnv(gym.Env):
         trades_to_execute.append({'type': 'call', 'direction': outer_dir, 'strike_price': best_long_call_strike, 'entry_premium': self._get_option_price(mid_price_call_outer, outer_dir == 'long')})
         mid_price_put_outer, _, _ = self._get_option_details(self.current_price, best_long_put_strike, days_to_expiry, 'put')
         trades_to_execute.append({'type': 'put', 'direction': outer_dir, 'strike_price': best_long_put_strike, 'entry_premium': self._get_option_price(mid_price_put_outer, outer_dir == 'long')})
+        
+        for trade in trades_to_execute:
+            trade['creation_id'] = self.next_creation_id
+            self.next_creation_id += 1
+            
         if trades_to_execute:
             new_positions_df = pd.DataFrame(trades_to_execute)
             self.portfolio = pd.concat([self.portfolio, new_positions_df], ignore_index=True)
