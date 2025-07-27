@@ -1,18 +1,14 @@
 import React, { useState, useEffect } from 'react';
 import './App.css';
 
-// <<< MODIFIED: The MetricsDashboard now accepts and displays the market regime
-function MetricsDashboard({ day, price, pnl, actionName, startPrice, dailyChange, marketRegime }) {
+// <<< MODIFIED: The MetricsDashboard now accepts and displays the market regime and illegal actions
+function MetricsDashboard({ day, price, pnl, actionName, startPrice, marketRegime, illegalActions }) {
   const pnlColor = pnl > 0 ? '#4CAF50' : pnl < 0 ? '#F44336' : 'white';
   const cumulativeChange = price && startPrice ? ((price / startPrice) - 1) * 100 : 0;
   const cumulativeChangeColor = cumulativeChange > 0 ? '#4CAF50' : cumulativeChange < 0 ? '#F44336' : 'white';
   
-  const dailyChangeColor = dailyChange > 0 ? '#4CAF50' : dailyChange < 0 ? '#F44336' : 'white';
-  const dailyChangeString = dailyChange ? `(${dailyChange.toFixed(2)}%)` : '';
-
   return (
     <div className="metrics-dashboard">
-      {/* <<< NEW: Market Regime Display */}
       <div className="metric-item">
         <h2>Market Regime</h2>
         <p style={{color: '#2196F3', fontWeight: 'bold'}}>{(marketRegime || 'N/A').replace(/_/g, ' ')}</p>
@@ -23,12 +19,7 @@ function MetricsDashboard({ day, price, pnl, actionName, startPrice, dailyChange
       </div>
       <div className="metric-item">
         <h2>EOD Price</h2>
-        <p>
-          ${price ? price.toFixed(2) : '0.00'}
-          <span style={{ fontSize: '0.7em', color: dailyChangeColor, marginLeft: '10px' }}>
-            {dailyChangeString}
-          </span>
-        </p>
+        <p>${price ? price.toFixed(2) : '0.00'}</p>
         <p style={{ fontSize: '0.8em', color: cumulativeChangeColor, fontWeight: 'bold' }}>
           {cumulativeChange.toFixed(2)}% vs Day 0
         </p>
@@ -42,6 +33,11 @@ function MetricsDashboard({ day, price, pnl, actionName, startPrice, dailyChange
         <p style={{fontSize: '1.1em', color: '#ddd', textTransform: 'capitalize'}}>
           {(actionName || 'N/A').replace(/_/g, ' ')}
         </p>
+      </div>
+      {/* <<< NEW: Display the illegal action count */}
+      <div className="metric-item">
+        <h2>Illegal Attempts</h2>
+        <p style={{color: illegalActions > 0 ? '#FFC107' : 'white'}}>{illegalActions}</p>
       </div>
     </div>
   );
@@ -85,104 +81,70 @@ function PortfolioTable({ portfolio }) {
   );
 }
 
+// <<< MODIFIED: The data processing logic is now much simpler
 function processReplayData(rawHistory) {
   if (!rawHistory || rawHistory.length === 0) {
     return [];
   }
-  const dailySummaries = [];
-  const initialState = rawHistory[0];
-  dailySummaries.push({
-    day: 0,
-    actionName: 'EPISODE_START',
-    eodPrice: initialState.info.price,
-    eodTotalPnl: initialState.info.eval_episode_return,
-    eodPortfolio: initialState.portfolio,
-    startPrice: initialState.info.start_price,
-    dailyChange: 0,
-    // <<< NEW: Capture the market regime for the whole episode
-    marketRegime: initialState.info.market_regime,
-  });
-
-  for (let day = 1; day <= 30; day++) {
-    const actionStepIndex = (day * 2) - 1;
-    const marketCloseStepIndex = day * 2;
-    if (marketCloseStepIndex >= rawHistory.length) break;
-    const actionStep = rawHistory[actionStepIndex];
-    const marketCloseStep = rawHistory[marketCloseStepIndex];
-
-    dailySummaries.push({
-      day: day,
-      actionName: actionStep.info.action_name,
-      eodPrice: marketCloseStep.info.price,
-      eodTotalPnl: marketCloseStep.info.eval_episode_return,
-      eodPortfolio: marketCloseStep.portfolio,
-      startPrice: marketCloseStep.info.start_price,
-      dailyChange: marketCloseStep.info.daily_change_pct,
-      // <<< NEW: Pass the regime to each daily summary
-      marketRegime: marketCloseStep.info.market_regime,
-    });
-  }
-  return dailySummaries;
+  // The log now contains one entry per step, so we can use it directly.
+  return rawHistory;
 }
 
-
 function App() {
-  const [dailySummaries, setDailySummaries] = useState([]);
-  const [currentDay, setCurrentDay] = useState(0);
+  const [replayData, setReplayData] = useState([]);
+  const [currentStep, setCurrentStep] = useState(0);
 
   useEffect(() => {
-    // Use a cache-busting query parameter to ensure we always get the latest log
     fetch(`/replay_log.json?t=${new Date().getTime()}`)
       .then(response => response.json())
       .then(rawHistory => {
         console.log('Successfully loaded raw replay data:', rawHistory);
         const processedData = processReplayData(rawHistory);
-        console.log('Processed daily summaries:', processedData);
-        setDailySummaries(processedData);
+        console.log('Processed step data:', processedData);
+        setReplayData(processedData);
       })
       .catch(error => console.error('Error loading replay_log.json:', error));
   }, []);
 
   const handleSliderChange = (event) => {
-    setCurrentDay(Number(event.target.value));
+    setCurrentStep(Number(event.target.value));
   };
 
-  const dayData = dailySummaries[currentDay];
+  const stepData = replayData[currentStep];
 
   return (
     <div className="App">
       <header className="App-header">
         <h1>Options-Zero-Game Replayer</h1>
         
-        {dailySummaries.length === 0 ? (
+        {replayData.length === 0 ? (
           <p><i>Loading and Processing Replay Data...</i></p>
         ) : (
           <div style={{ width: '90%', maxWidth: '1200px', marginTop: '20px' }}>
             
-            <h2>Day: {currentDay} / {dailySummaries.length - 1}</h2>
+            <h2>Step: {currentStep} / {replayData.length - 1} (Day: {stepData ? stepData.day : 0})</h2>
             <input
               type="range"
               min="0"
-              max={dailySummaries.length - 1}
-              value={currentDay}
+              max={replayData.length - 1}
+              value={currentStep}
               onChange={handleSliderChange}
               style={{ width: '100%' }}
             />
 
-            {dayData && (
+            {stepData && (
               <>
                 <MetricsDashboard 
-                  day={dayData.day} 
-                  price={dayData.eodPrice} 
-                  pnl={dayData.eodTotalPnl}
-                  actionName={dayData.actionName}
-                  startPrice={dayData.startPrice}
-                  dailyChange={dayData.dailyChange}
-                  // <<< NEW: Pass the market regime prop
-                  marketRegime={dayData.marketRegime}
+                  day={stepData.day} 
+                  price={stepData.info.price} 
+                  pnl={stepData.info.eval_episode_return}
+                  actionName={stepData.info.action_name}
+                  startPrice={stepData.info.start_price}
+                  marketRegime={stepData.info.market_regime}
+                  illegalActions={stepData.info.illegal_actions_in_episode}
                 />
-                <h2 style={{marginTop: '40px'}}>End-of-Day Positions</h2>
-                <PortfolioTable portfolio={dayData.eodPortfolio} />
+                <h2 style={{marginTop: '40px'}}>Positions at Step {currentStep}</h2>
+                <PortfolioTable portfolio={stepData.portfolio} />
               </>
             )}
           </div>
