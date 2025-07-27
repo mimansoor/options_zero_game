@@ -196,22 +196,37 @@ class OptionsZeroGameEnv(gym.Env):
         return [seed]
 
     def _generate_price_path(self) -> None:
+        """
+        Generates a realistic, GARCH(1,1)-based price path for an entire episode.
+
+        This function scales annualized, daily GARCH parameters to an intra-day,
+        per-step level. It then uses the arch library to simulate a path of log returns,
+        which is efficiently converted to a price path using vectorized NumPy operations.
+        """
         trading_days_per_year = 252
         steps_per_year = trading_days_per_year * self.steps_per_day
+        
+        # Scale daily parameters to the per-step frequency for realism
         mu_step = self.trend / steps_per_year
         omega_step = self.omega / steps_per_year
-        alpha_step = self.alpha / steps_per_year
-        beta_step = self.beta
-        garch_spec = arch_model(np.zeros(100, dtype=np.float32), mean='Constant', vol='GARCH', p=1, q=1)
+        alpha_step = self.alpha / steps_per_year # Use the safer, scaled alpha
+        beta_step = self.beta # Beta is a persistence coefficient and is not scaled
+            
+        garch_spec = arch_model(None, mean='Constant', vol='GARCH', p=1, q=1, dist='normal')
         params = np.array([mu_step, omega_step, alpha_step, beta_step], dtype=np.float32)
-        # <<< MODIFIED: Seed the GARCH simulation for full reproducibility
-        sim_data = garch_spec.simulate(params, nobs=self.total_steps + 1, random_state=self.np_random)
-        price_path = np.zeros(self.total_steps + 1, dtype=np.float32)
-        price_path[0] = self.start_price
-        for i in range(1, self.total_steps + 1):
-            price_path[i] = price_path[i - 1] * np.exp(sim_data['data'][i - 1])
-        self.price_path = price_path
-        log_returns = np.diff(np.log(price_path))
+        
+        # Simulate the returns for the entire episode
+        sim_result = garch_spec.simulate(params, nobs=self.total_steps, random_state=self.np_random)
+        simulated_returns = sim_result.data.to_numpy(dtype=np.float32)
+        
+        # <<< YOUR SUPERIOR VECTORIZED LOGIC >>>
+        # Build the price path efficiently from the simulated returns
+        cumulative_returns = np.cumsum(np.concatenate([np.array([0.0], dtype=np.float32), simulated_returns]))
+        price_path = self.start_price * np.exp(cumulative_returns)
+        self.price_path = price_path.astype(np.float32)
+        
+        # Compute the realized volatility series
+        log_returns = np.diff(np.log(self.price_path))
         returns_series = pd.Series(log_returns, dtype=np.float32)
         rolling_window_steps = self.rolling_vol_window * self.steps_per_day
         self.realized_vol_series = returns_series.rolling(window=rolling_window_steps).std().fillna(0) * np.sqrt(steps_per_year)
