@@ -10,7 +10,6 @@ from arch import arch_model
 from easydict import EasyDict
 from gym import spaces
 from gymnasium.utils import seeding
-from py_vollib.black_scholes.greeks.analytical import delta
 
 from ding.envs import BaseEnvTimestep
 from ding.utils import ENV_REGISTRY
@@ -413,10 +412,17 @@ class OptionsZeroGameEnv(gym.Env):
         mid_price_put, _, _ = self._get_option_details(self.current_price, atm_price, days_to_expiry, 'put')
         trades_to_execute.append({'type': 'put', 'direction': direction, 'strike_price': atm_price, 'entry_premium': self._get_option_price(mid_price_put, is_buy)})
         
+        # <<< MODIFIED: Add strategy-aware PnL
+        net_premium = sum(t['entry_premium'] for t in trades_to_execute)
+        max_profit = self.initial_cash * 10 if direction == 'long' else net_premium * self.lot_size
+        max_loss = -net_premium * self.lot_size if direction == 'long' else -self.initial_cash * 10
+        
         strategy_id = self.next_creation_id
         for trade in trades_to_execute:
             trade['creation_id'] = self.next_creation_id
             trade['strategy_id'] = strategy_id
+            trade['strategy_max_profit'] = max_profit
+            trade['strategy_max_loss'] = max_loss
             self.next_creation_id += 1
             
         if trades_to_execute:
@@ -439,10 +445,16 @@ class OptionsZeroGameEnv(gym.Env):
         mid_price_put, _, _ = self._get_option_details(self.current_price, put_strike, days_to_expiry, 'put')
         trades_to_execute.append({'type': 'put', 'direction': direction, 'strike_price': put_strike, 'entry_premium': self._get_option_price(mid_price_put, is_buy)})
         
+        net_premium = sum(t['entry_premium'] for t in trades_to_execute)
+        max_profit = self.initial_cash * 10 if direction == 'long' else net_premium * self.lot_size
+        max_loss = -net_premium * self.lot_size if direction == 'long' else -self.initial_cash * 10
+        
         strategy_id = self.next_creation_id
         for trade in trades_to_execute:
             trade['creation_id'] = self.next_creation_id
             trade['strategy_id'] = strategy_id
+            trade['strategy_max_profit'] = max_profit
+            trade['strategy_max_loss'] = max_loss
             self.next_creation_id += 1
             
         if trades_to_execute:
@@ -475,10 +487,23 @@ class OptionsZeroGameEnv(gym.Env):
         mid_price_hedge_put, _, _ = self._get_option_details(self.current_price, hedge_strike_put, days_to_expiry, 'put')
         trades_to_execute.append({'type': 'put', 'direction': hedge_dir, 'strike_price': hedge_strike_put, 'entry_premium': self._get_option_price(mid_price_hedge_put, hedge_dir == 'long')})
         
+        net_premium_straddle = trades_to_execute[0]['entry_premium'] + trades_to_execute[1]['entry_premium']
+        net_premium_hedge = trades_to_execute[2]['entry_premium'] + trades_to_execute[3]['entry_premium']
+        net_premium = net_premium_straddle - net_premium_hedge
+        
+        if direction == 'short': # Short Iron Fly
+            max_profit = net_premium * self.lot_size
+            max_loss = -((hedge_strike_call - atm_price) * self.lot_size - max_profit)
+        else: # Long Iron Fly
+            max_loss = -net_premium * self.lot_size
+            max_profit = ((hedge_strike_call - atm_price) * self.lot_size) + max_loss
+
         strategy_id = self.next_creation_id
         for trade in trades_to_execute:
             trade['creation_id'] = self.next_creation_id
             trade['strategy_id'] = strategy_id
+            trade['strategy_max_profit'] = max_profit
+            trade['strategy_max_loss'] = max_loss
             self.next_creation_id += 1
             
         if trades_to_execute:
@@ -549,12 +574,17 @@ class OptionsZeroGameEnv(gym.Env):
         trades_to_execute.append({'type': 'put', 'direction': outer_dir, 'strike_price': best_long_put_strike, 'entry_premium': self._get_option_price(mid_price_put_outer, outer_dir == 'long')})
         
         net_premium = sum(t['entry_premium'] * (1 if t['direction'] == inner_dir else -1) for t in trades_to_execute)
+        
+        # <<< MODIFIED: Use the actual width of the spreads for calculation
+        call_spread_width = best_long_call_strike - best_short_call_strike
+        put_spread_width = best_short_put_strike - best_long_put_strike
+        
         if direction == 'short':
             max_profit = net_premium * self.lot_size
-            max_loss = -((best_short_call_strike - best_long_call_strike) * self.lot_size - max_profit)
+            max_loss = - (max(call_spread_width, put_spread_width) * self.lot_size - max_profit)
         else:
             max_loss = -net_premium * self.lot_size
-            max_profit = ((best_short_call_strike - best_long_call_strike) * self.lot_size) + max_loss
+            max_profit = (max(call_spread_width, put_spread_width) * self.lot_size) + max_loss
 
         strategy_id = self.next_creation_id
         for trade in trades_to_execute:
