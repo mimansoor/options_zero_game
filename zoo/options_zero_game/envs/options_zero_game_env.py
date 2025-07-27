@@ -4,13 +4,13 @@ import random
 import logging
 from typing import Tuple, Dict, Any, List
 
-import gym
+import gymnasium as gym
+from gym import spaces
 import numpy as np
 import pandas as pd
 from arch import arch_model
 from easydict import EasyDict
-from gym import spaces
-from gymnasium.utils import seeding
+from gym.utils import seeding
 
 from ding.envs import BaseEnvTimestep
 from ding.utils import ENV_REGISTRY
