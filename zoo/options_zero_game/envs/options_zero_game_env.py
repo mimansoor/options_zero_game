@@ -103,7 +103,6 @@ class OptionsZeroGameEnv(gym.Env):
         ignore_legal_actions=True,
         otm_delta_threshold=0.15,
         itm_delta_threshold=0.85,
-        # <<< NEW: Named constants for magic numbers
         TRADING_DAYS_IN_WEEK=5,
         TOTAL_DAYS_IN_WEEK=7,
         UNDEFINED_RISK_CAP_MULTIPLIER=10,
@@ -120,7 +119,6 @@ class OptionsZeroGameEnv(gym.Env):
         if cfg is not None:
             self._cfg.update(cfg)
 
-        # ... (Parameter setup is unchanged)
         self.start_price: float = self._cfg.start_price
         self.initial_cash: float = self._cfg.initial_cash
         self.market_regimes: List[Dict[str, Any]] = self._cfg.market_regimes
@@ -206,7 +204,8 @@ class OptionsZeroGameEnv(gym.Env):
         beta_step = self.beta
         garch_spec = arch_model(np.zeros(100, dtype=np.float32), mean='Constant', vol='GARCH', p=1, q=1)
         params = np.array([mu_step, omega_step, alpha_step, beta_step], dtype=np.float32)
-        sim_data = garch_spec.simulate(params, nobs=self.total_steps + 1)
+        # <<< MODIFIED: Seed the GARCH simulation for full reproducibility
+        sim_data = garch_spec.simulate(params, nobs=self.total_steps + 1, random_state=self.np_random)
         price_path = np.zeros(self.total_steps + 1, dtype=np.float32)
         price_path[0] = self.start_price
         for i in range(1, self.total_steps + 1):
@@ -351,20 +350,26 @@ class OptionsZeroGameEnv(gym.Env):
 
         action_name = self.indices_to_actions.get(action, 'INVALID')
         equity_before = self._get_current_equity()
-
+        
+        portfolio_changed = False
         if action_name.startswith('OPEN_'):
             self._handle_open_action(action_name)
+            portfolio_changed = True
         elif action_name.startswith('CLOSE_POSITION_'):
             try:
                 pos_index = int(action_name.split('_')[-1])
                 self._close_position(pos_index)
+                portfolio_changed = True
             except (ValueError, IndexError):
                 logging.warning(f"Attempted to close an invalid position index from action: {action_name}")
         elif action_name == 'CLOSE_ALL':
+            if not self.portfolio.empty:
+                portfolio_changed = True
             while not self.portfolio.empty:
                 self._close_position(-1)
 
-        if not self.portfolio.empty:
+        # <<< MODIFIED: Only sort the portfolio when its structure has changed
+        if portfolio_changed and not self.portfolio.empty:
             self.portfolio = self.portfolio.sort_values(by=['strike_price', 'type', 'creation_id']).reset_index(drop=True)
 
         self._advance_time_and_market()
@@ -740,6 +745,9 @@ class OptionsZeroGameEnv(gym.Env):
     def render(self, mode: str = 'human') -> None:
         total_pnl = self._get_total_pnl()
         print(f"Step: {self.current_step:04d} | Day: {self.current_step // self.steps_per_day + 1:02d} | Price: ${self.current_price:9.2f} | Positions: {len(self.portfolio):1d} | Total PnL: ${total_pnl:9.2f}")
+        # <<< NEW: Add detailed portfolio rendering
+        if not self.portfolio.empty:
+            print(self.portfolio.to_string())
     
     @property
     def observation_space(self) -> gym.spaces.Space: return self._observation_space
