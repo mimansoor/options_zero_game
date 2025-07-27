@@ -549,7 +549,11 @@ class OptionsZeroGameEnv(gym.Env):
             current_idx += 8
         true_action_mask = self._get_true_action_mask()
         final_obs_vec = np.concatenate((market_portfolio_vec, true_action_mask.astype(np.float32)))
-        mcts_action_mask = np.ones(self.action_space_size, dtype=np.int8)
+        # Handle MCTS action mask based on config
+        if self.ignore_legal_actions:
+            mcts_action_mask = np.ones(self.action_space_size, dtype=np.int8)
+        else:
+            mcts_action_mask = true_action_mask
         return {'observation': final_obs_vec, 'action_mask': mcts_action_mask, 'to_play': np.array([-1], dtype=np.int8)}
 
     def _calculate_max_profit_loss(self, position: pd.Series) -> Tuple[float, float]:
