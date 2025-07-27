@@ -12,12 +12,11 @@ from gym import spaces
 from gymnasium.utils import seeding
 from py_vollib.black_scholes import black_scholes
 from py_vollib.black_scholes.greeks.analytical import delta
-from scipy.stats import norm
 
 from ding.envs import BaseEnvTimestep
 from ding.utils import ENV_REGISTRY
 
-# <<< NEW: Numba JIT compilation for performance-critical math
+# Numba JIT compilation for performance-critical math
 try:
     from numba import jit
 except ImportError:
@@ -215,7 +214,6 @@ class OptionsZeroGameEnv(gym.Env):
         t = days_to_expiry / 365.25
         is_call = option_type == 'call'
         
-        # <<< MODIFIED: Cleaner edge case handling
         if t < 1e-6:
             intrinsic = max(0.0, underlying_price - strike_price) if is_call else max(0.0, strike_price - underlying_price)
             delta_val = 1.0 if intrinsic > 0 else 0.0
@@ -226,15 +224,12 @@ class OptionsZeroGameEnv(gym.Env):
         vol = self._get_implied_volatility(offset, option_type)
 
         price = _numba_black_scholes(underlying_price, strike_price, t, self.risk_free_rate, vol, is_call)
-        # <<< MODIFIED: Use consistent Numba delta
         delta_val = abs(_numba_delta(underlying_price, strike_price, t, self.risk_free_rate, vol, is_call))
         
-        # Calculate d2 only if needed (e.g., for POP)
+        d2 = 0.0
         if vol > 1e-6:
             d1 = (math.log(underlying_price / strike_price) + (self.risk_free_rate + 0.5 * vol ** 2) * t) / (vol * math.sqrt(t))
             d2 = d1 - vol * math.sqrt(t)
-        else:
-            d2 = 0.0
             
         return price, delta_val, d2
 
@@ -242,7 +237,6 @@ class OptionsZeroGameEnv(gym.Env):
         if is_buy: return mid_price * (1 + self.bid_ask_spread_pct)
         else: return mid_price * (1 - self.bid_ask_spread_pct)
 
-    # <<< MODIFIED: Optimized portfolio valuation
     def _get_total_pnl(self) -> float:
         if self.portfolio.empty:
             return self.realized_pnl
@@ -251,7 +245,6 @@ class OptionsZeroGameEnv(gym.Env):
             mid_price, _, _ = self._get_option_details(self.current_price, row['strike_price'], row['days_to_expiry'], row['type'])
             current_price = self._get_option_price(mid_price, row['direction'] == 'short')
             price_diff = current_price - row['entry_premium']
-            # For shorts, the PnL is the negative of the price difference
             return price_diff * self.lot_size * (1 if row['direction'] == 'long' else -1)
         
         unrealized_pnl = self.portfolio.apply(calculate_pnl, axis=1).sum()
@@ -508,10 +501,11 @@ class OptionsZeroGameEnv(gym.Env):
         
         # <<< MODIFIED: Robust safety and bounds checking
         min_strike = self.strike_distance
-        best_short_call_strike = max(min_strike, best_short_call_strike)
-        best_long_call_strike = max(min_strike, best_long_call_strike)
-        best_short_put_strike = max(min_strike, best_short_put_strike)
-        best_long_put_strike = max(min_strike, best_long_put_strike)
+        max_strike = self.start_price * 3
+        best_short_call_strike = max(min_strike, min(max_strike, best_short_call_strike))
+        best_long_call_strike = max(min_strike, min(max_strike, best_long_call_strike))
+        best_short_put_strike = max(min_strike, min(max_strike, best_short_put_strike))
+        best_long_put_strike = max(min_strike, min(max_strike, best_long_put_strike))
 
         if best_long_call_strike <= best_short_call_strike:
             best_long_call_strike = best_short_call_strike + self.strike_distance
@@ -600,10 +594,12 @@ class OptionsZeroGameEnv(gym.Env):
             market_portfolio_vec[current_idx + 3] = (pos['strike_price'] - atm_price) / (3 * self.strike_distance)
             market_portfolio_vec[current_idx + 4] = (self.current_step - pos['entry_step']) / self.total_steps
             _, _, d2 = self._get_option_details(self.current_price, pos['strike_price'], pos['days_to_expiry'], pos['type'])
-            pop = 0.0
-            if pos['type'] == 'call': pop = norm.cdf(d2) if pos['direction'] == 'long' else 1 - norm.cdf(d2)
-            else: pop = 1 - norm.cdf(d2) if pos['direction'] == 'long' else norm.cdf(d2)
+            
+            # <<< MODIFIED: Use Numba CDF for POP calculation
+            if pos['type'] == 'call': pop = _numba_cdf(d2) if pos['direction'] == 'long' else 1 - _numba_cdf(d2)
+            else: pop = 1 - _numba_cdf(d2) if pos['direction'] == 'long' else _numba_cdf(d2)
             market_portfolio_vec[current_idx + 5] = pop
+            
             max_profit, max_loss = self._calculate_max_profit_loss(pos)
             market_portfolio_vec[current_idx + 6] = math.tanh(max_profit / self.initial_cash)
             market_portfolio_vec[current_idx + 7] = math.tanh(max_loss / self.initial_cash)
