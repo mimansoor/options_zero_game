@@ -216,10 +216,9 @@ class OptionsZeroGameEnv(gym.Env):
         params = np.array([mu_step, omega_step, alpha_step, beta_step], dtype=np.float32)
         
         # Simulate the returns for the entire episode
-        sim_result = garch_spec.simulate(params, nobs=self.total_steps, random_state=self.np_random)
+        sim_result = garch_spec.simulate(params, nobs=self.total_steps)
         simulated_returns = sim_result.data.to_numpy(dtype=np.float32)
         
-        # <<< YOUR SUPERIOR VECTORIZED LOGIC >>>
         # Build the price path efficiently from the simulated returns
         cumulative_returns = np.cumsum(np.concatenate([np.array([0.0], dtype=np.float32), simulated_returns]))
         price_path = self.start_price * np.exp(cumulative_returns)
