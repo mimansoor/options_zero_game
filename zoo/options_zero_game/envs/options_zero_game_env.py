@@ -23,7 +23,7 @@ class OptionsZeroGameEnv(gym.Env):
 
     config = dict(
         start_price=20000.0,
-        initial_cash=100000.0,
+        initial_cash=500000.0,
         market_regimes = [
             {'name': 'Developed_Market', 'mu': 0.00005, 'omega': 0.000005, 'alpha': 0.09, 'beta': 0.90},
         ],
@@ -37,9 +37,9 @@ class OptionsZeroGameEnv(gym.Env):
         strike_distance=50.0,
         lot_size=75,
         max_positions=4,
-        bid_ask_spread_pct=0.002,
+        bid_ask_spread_pct=0.0015,
         risk_free_rate=0.10,
-        pnl_scaling_factor=1000,
+        pnl_scaling_factor=5000,
         drawdown_penalty_weight=0.1,
         illegal_action_penalty=-1.0,
         ignore_legal_actions=True,
