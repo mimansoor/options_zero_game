@@ -145,22 +145,33 @@ class OptionsZeroGameEnv(gym.Env):
         return [seed]
 
     def _generate_price_path(self) -> None:
+        # Calculate steps per year
+        trading_days_per_year = 252
+        steps_per_year = trading_days_per_year * self.steps_per_day
+
+        # Convert annualized parameters to per-step values
+        mu_step = self.trend / steps_per_year
+        omega_step = self.omega / steps_per_year
+        alpha_step = self.alpha / steps_per_year
+        beta_step = self.beta  # Beta remains unchanged
+
         garch_spec = arch_model(np.zeros(100), mean='Constant', vol='GARCH', p=1, q=1)
-        mu_step = self.trend / self.steps_per_day
-        omega_step = self.omega / self.steps_per_day
-        alpha_step = self.alpha / self.steps_per_day
-        beta_step = self.beta
         params = np.array([mu_step, omega_step, alpha_step, beta_step])
         sim_data = garch_spec.simulate(params, nobs=self.total_steps + 1)
+
         price_path = np.zeros(self.total_steps + 1)
         price_path[0] = self.start_price
         for i in range(1, self.total_steps + 1):
             price_path[i] = price_path[i - 1] * np.exp(sim_data['data'][i - 1])
+
         self.price_path = price_path
         log_returns = np.diff(np.log(price_path))
         returns_series = pd.Series(log_returns)
+
         rolling_window_steps = self.rolling_vol_window * self.steps_per_day
-        self.realized_vol_series = returns_series.rolling(window=rolling_window_steps).std().fillna(0) * np.sqrt(252 * self.steps_per_day)
+        self.realized_vol_series = returns_series.rolling(
+            window=rolling_window_steps
+        ).std().fillna(0) * np.sqrt(steps_per_year)  # Correct annualization
 
     def _simulate_price_step(self) -> None:
         self.current_price = self.price_path[self.current_step]
