@@ -17,14 +17,41 @@ from scipy.stats import norm
 from ding.envs import BaseEnvTimestep
 from ding.utils import ENV_REGISTRY
 
-# Optional: For JIT compilation
+# <<< NEW: Import Numba for JIT compilation
 try:
     from numba import jit
 except ImportError:
-    def jit(nopython=False):
+    def jit(nopython=True): # Dummy decorator if numba is not installed
         def decorator(func):
             return func
         return decorator
+
+# <<< NEW: Numba-compatible Black-Scholes implementation
+@jit(nopython=True)
+def _numba_black_scholes(S: float, K: float, T: float, r: float, sigma: float, option_type: str) -> float:
+    """
+    A Numba-JIT compiled Black-Scholes pricing function.
+    Uses a pure-python CDF implementation for nopython mode compatibility.
+    """
+    if T <= 0: # Handle expiry
+        if option_type == 'c': return max(0.0, S - K)
+        else: return max(0.0, K - S)
+    if sigma <= 0 or T <= 0: return max(0.0, S - K) if option_type == 'c' else max(0.0, K - S)
+
+    d1 = (math.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * math.sqrt(T))
+    d2 = d1 - sigma * math.sqrt(T)
+    
+    # Numba-compatible CDF using the error function (math.erf)
+    cdf_d1 = 0.5 * (1 + math.erf(d1 / math.sqrt(2.0)))
+    cdf_d2 = 0.5 * (1 + math.erf(d2 / math.sqrt(2.0)))
+    cdf_neg_d1 = 0.5 * (1 + math.erf(-d1 / math.sqrt(2.0)))
+    cdf_neg_d2 = 0.5 * (1 + math.erf(-d2 / math.sqrt(2.0)))
+    
+    if option_type == 'c':
+        price = S * cdf_d1 - K * math.exp(-r * T) * cdf_d2
+    else: # put
+        price = K * math.exp(-r * T) * cdf_neg_d2 - S * cdf_neg_d1
+    return price
 
 @ENV_REGISTRY.register('options_zero_game')
 class OptionsZeroGameEnv(gym.Env):
@@ -167,35 +194,28 @@ class OptionsZeroGameEnv(gym.Env):
         clamped_offset = max(-5, min(5, offset))
         return self.iv_bins[option_type][str(clamped_offset)][self.iv_bin_index]
 
-    @jit(nopython=False)
     def _get_option_details(self, underlying_price: float, strike_price: float, days_to_expiry: float, option_type: str) -> Tuple[float, float, float]:
         t = days_to_expiry / 365.25
-        intrinsic_value = 0.0
-        if option_type == 'call':
-            intrinsic_value = max(0.0, underlying_price - strike_price)
-        else:
-            intrinsic_value = max(0.0, strike_price - underlying_price)
-        if t < (1.0 / 365.25):
-            abs_delta_at_expiry = 1.0 if intrinsic_value > 0 else 0.0
-            return intrinsic_value, abs_delta_at_expiry, 0.0
-        
         atm_price = int(underlying_price / self.strike_distance + 0.5) * self.strike_distance
         offset = round((strike_price - atm_price) / self.strike_distance)
         vol = self._get_implied_volatility(offset, option_type)
+        
+        # <<< MODIFIED: Use our super-fast Numba function for pricing
+        mid_price = _numba_black_scholes(underlying_price, strike_price, t, self.risk_free_rate, vol, option_type[0])
 
-        if vol < 1e-6:
-            abs_delta_at_expiry = 1.0 if intrinsic_value > 0 else 0.0
-            return intrinsic_value, abs_delta_at_expiry, 0.0
+        if t < (1.0 / 365.25):
+            abs_delta_at_expiry = 1.0 if mid_price > 0 else 0.0
+            return mid_price, abs_delta_at_expiry, 0.0
         
         try:
+            # We still use py_vollib for the greeks as they are complex to implement
             d1 = (math.log(underlying_price / strike_price) + (self.risk_free_rate + 0.5 * vol ** 2) * t) / (vol * math.sqrt(t))
             d2 = d1 - vol * math.sqrt(t)
             d = delta(option_type[0], underlying_price, strike_price, t, self.risk_free_rate, vol)
-            mid_price = black_scholes(option_type[0], underlying_price, strike_price, t, self.risk_free_rate, vol)
             return mid_price, abs(d), d2
         except (ValueError, ZeroDivisionError):
-            abs_delta_at_expiry = 1.0 if intrinsic_value > 0 else 0.0
-            return intrinsic_value, abs_delta_at_expiry, 0.0
+            abs_delta_at_expiry = 1.0 if mid_price > 0 else 0.0
+            return mid_price, abs_delta_at_expiry, 0.0
 
     def _get_option_price(self, mid_price: float, is_buy: bool) -> float:
         if is_buy: return mid_price * (1 + self.bid_ask_spread_pct)
@@ -421,27 +441,23 @@ class OptionsZeroGameEnv(gym.Env):
             new_positions_df = pd.DataFrame(trades_to_execute)
             self.portfolio = pd.concat([self.portfolio, new_positions_df], ignore_index=True)
 
-    # <<< MODIFIED: The complete, corrected Iron Condor function
     def _open_iron_condor(self, action_name: str) -> None:
         if len(self.portfolio) > self.max_positions - 4: return
-
         current_trading_day = self.current_step // self.steps_per_day
         trading_days_left = self.time_to_expiry_days - current_trading_day
         days_to_expiry = trading_days_left * (7.0 / 5.0)
         atm_price = int(self.current_price / self.strike_distance + 0.5) * self.strike_distance
         direction = 'long' if 'LONG' in action_name else 'short'
-        
         target_delta_short = 0.30
         target_delta_long = 0.10
-
+        
         # --- Delta-Seeking Logic ---
-        # Call Side
         best_short_call_strike, best_long_call_strike = atm_price, atm_price
         min_delta_diff_short_call, min_delta_diff_long_call = 999, 999
-        for offset in range(1, 15): # Search OTM
+        for offset in range(1, 15):
             strike = atm_price + (offset * self.strike_distance)
             _, d, _ = self._get_option_details(self.current_price, strike, days_to_expiry, 'call')
-            if d == 0: break # Stop if we get too far OTM
+            if d == 0: break
             if abs(d - target_delta_short) < min_delta_diff_short_call:
                 min_delta_diff_short_call = abs(d - target_delta_short)
                 best_short_call_strike = strike
@@ -449,7 +465,6 @@ class OptionsZeroGameEnv(gym.Env):
                 min_delta_diff_long_call = abs(d - target_delta_long)
                 best_long_call_strike = strike
         
-        # Put Side
         best_short_put_strike, best_long_put_strike = atm_price, atm_price
         min_delta_diff_short_put, min_delta_diff_long_put = 999, 999
         max_put_offset = int((atm_price / self.strike_distance) - 1)
@@ -463,22 +478,19 @@ class OptionsZeroGameEnv(gym.Env):
             if abs(d - target_delta_long) < min_delta_diff_long_put:
                 min_delta_diff_long_put = abs(d - target_delta_long)
                 best_long_put_strike = strike
-
+        
         # --- Validation and Correction Block ---
         if best_long_call_strike <= best_short_call_strike:
             best_long_call_strike = best_short_call_strike + self.strike_distance
         if best_long_put_strike >= best_short_put_strike:
             best_long_put_strike = best_short_put_strike - self.strike_distance
-        
-        # Final check for validity
         if not (best_long_put_strike < best_short_put_strike < best_short_call_strike < best_long_call_strike):
-            return # Abort if strikes are not logical
+            return
 
         # --- Trade Execution ---
         trades_to_execute = []
         inner_dir = 'long' if direction == 'long' else 'short'
         outer_dir = 'short' if direction == 'long' else 'long'
-
         mid_price_call_inner, _, _ = self._get_option_details(self.current_price, best_short_call_strike, days_to_expiry, 'call')
         trades_to_execute.append({'type': 'call', 'direction': inner_dir, 'strike_price': best_short_call_strike, 'entry_premium': self._get_option_price(mid_price_call_inner, inner_dir == 'long')})
         mid_price_put_inner, _, _ = self._get_option_details(self.current_price, best_short_put_strike, days_to_expiry, 'put')
@@ -487,7 +499,6 @@ class OptionsZeroGameEnv(gym.Env):
         trades_to_execute.append({'type': 'call', 'direction': outer_dir, 'strike_price': best_long_call_strike, 'entry_premium': self._get_option_price(mid_price_call_outer, outer_dir == 'long')})
         mid_price_put_outer, _, _ = self._get_option_details(self.current_price, best_long_put_strike, days_to_expiry, 'put')
         trades_to_execute.append({'type': 'put', 'direction': outer_dir, 'strike_price': best_long_put_strike, 'entry_premium': self._get_option_price(mid_price_put_outer, outer_dir == 'long')})
-
         if trades_to_execute:
             new_positions_df = pd.DataFrame(trades_to_execute)
             self.portfolio = pd.concat([self.portfolio, new_positions_df], ignore_index=True)
