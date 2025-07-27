@@ -85,6 +85,9 @@ class OptionsZeroGameEnv(gym.Env):
         self._reward_range: spaces.Box = spaces.Box(low=-1.0, high=1.0, shape=(1,), dtype=np.float32)
         
         self.np_random: Any = None
+        
+        self.portfolio_columns: List[str] = ['type', 'direction', 'entry_step', 'strike_price', 'entry_premium', 'days_to_expiry']
+        self.portfolio: pd.DataFrame = pd.DataFrame(columns=self.portfolio_columns)
 
     def _discretize_iv_skew(self, skew_table: Dict[str, Dict[str, Tuple[float, float]]], num_bins: int = 5) -> Dict[str, Dict[str, np.ndarray]]:
         binned_ivs = {'call': {}, 'put': {}}
@@ -185,14 +188,19 @@ class OptionsZeroGameEnv(gym.Env):
         else: return mid_price * (1 - self.bid_ask_spread_pct)
 
     def _get_total_pnl(self) -> float:
-        unrealized_pnl = 0.0
-        for pos in self.portfolio:
-            mid_price, _, _ = self._get_option_details(self.current_price, pos['strike_price'], pos['days_to_expiry'], pos['type'])
-            current_premium = self._get_option_price(mid_price, is_buy=(pos['direction'] == 'short'))
-            entry_premium = pos['entry_premium']
-            if pos['direction'] == 'long': pnl = (current_premium - entry_premium) * self.lot_size
-            else: pnl = (entry_premium - current_premium) * self.lot_size
-            unrealized_pnl += pnl
+        if self.portfolio.empty:
+            return self.realized_pnl
+
+        def get_current_premium(row):
+            mid_price, _, _ = self._get_option_details(self.current_price, row['strike_price'], row['days_to_expiry'], row['type'])
+            return self._get_option_price(mid_price, is_buy=(row['direction'] == 'short'))
+
+        current_premiums = self.portfolio.apply(get_current_premium, axis=1)
+        
+        pnl = (current_premiums - self.portfolio['entry_premium']) * self.lot_size
+        
+        unrealized_pnl = np.where(self.portfolio['direction'] == 'long', pnl, -pnl).sum()
+        
         return self.realized_pnl + unrealized_pnl
 
     def _get_current_equity(self) -> float:
@@ -203,10 +211,10 @@ class OptionsZeroGameEnv(gym.Env):
         elif self.np_random is None: self.seed(0)
         
         chosen_regime = random.choice(self.market_regimes)
-        self.trend = chosen_regime['mu']
-        self.omega = chosen_regime['omega']
-        self.alpha = chosen_regime['alpha']
-        self.beta = chosen_regime['beta']
+        self.trend: float = chosen_regime['mu']
+        self.omega: float = chosen_regime['omega']
+        self.alpha: float = chosen_regime['alpha']
+        self.beta: float = chosen_regime['beta']
         
         if self.alpha + self.beta >= 1.0:
             total = self.alpha + self.beta
@@ -214,9 +222,9 @@ class OptionsZeroGameEnv(gym.Env):
             self.beta = self.beta / (total + 0.01)
 
         unconditional_variance = self.omega / (1 - self.alpha - self.beta)
-        self.garch_implied_vol = math.sqrt(unconditional_variance * 252)
+        self.garch_implied_vol: float = math.sqrt(unconditional_variance * 252)
         
-        self.iv_bin_index = random.randint(0, 4)
+        self.iv_bin_index: int = random.randint(0, 4)
         
         self._generate_price_path()
         
@@ -224,7 +232,7 @@ class OptionsZeroGameEnv(gym.Env):
         self.day_of_week: int = 0
         
         self.current_price: float = self.price_path[0]
-        self.portfolio: List[Dict[str, Any]] = []
+        self.portfolio: pd.DataFrame = pd.DataFrame(columns=self.portfolio_columns)
         self.realized_pnl: float = 0.0
         self._final_eval_reward: float = 0.0
         self.high_water_mark: float = self.initial_cash
@@ -232,14 +240,18 @@ class OptionsZeroGameEnv(gym.Env):
         return self._get_observation()
 
     def _close_position(self, position_index: int) -> None:
-        if position_index < len(self.portfolio):
-            pos_to_close = self.portfolio.pop(position_index)
+        if position_index < 0:
+            position_index = len(self.portfolio) + position_index
+
+        if 0 <= position_index < len(self.portfolio):
+            pos_to_close = self.portfolio.iloc[position_index]
             mid_price, _, _ = self._get_option_details(self.current_price, pos_to_close['strike_price'], pos_to_close['days_to_expiry'], pos_to_close['type'])
             exit_premium = self._get_option_price(mid_price, is_buy=(pos_to_close['direction'] == 'short'))
             entry_premium = pos_to_close['entry_premium']
             if pos_to_close['direction'] == 'long': pnl = (exit_premium - entry_premium) * self.lot_size
             else: pnl = (entry_premium - exit_premium) * self.lot_size
             self.realized_pnl += pnl
+            self.portfolio = self.portfolio.drop(self.portfolio.index[position_index]).reset_index(drop=True)
 
     def _calculate_shaped_reward(self, equity_before: float, equity_after: float) -> Tuple[float, float]:
         raw_reward = equity_after - equity_before
@@ -269,8 +281,8 @@ class OptionsZeroGameEnv(gym.Env):
             else:
                 self.day_of_week += 1
         self._simulate_price_step()
-        for pos in self.portfolio:
-            pos['days_to_expiry'] -= time_decay_days
+        if not self.portfolio.empty:
+            self.portfolio['days_to_expiry'] -= time_decay_days
 
     def step(self, action: int) -> BaseEnvTimestep:
         true_legal_actions_mask = self._get_true_action_mask()
@@ -288,15 +300,16 @@ class OptionsZeroGameEnv(gym.Env):
                 self._close_position(pos_index)
             except (ValueError, IndexError): pass
         elif action_name == 'CLOSE_ALL':
-            while len(self.portfolio) > 0: self._close_position(-1)
+            while not self.portfolio.empty: self._close_position(-1)
         
-        self.portfolio.sort(key=lambda p: (p['strike_price'], p['type']))
+        if not self.portfolio.empty:
+            self.portfolio = self.portfolio.sort_values(by=['strike_price', 'type']).reset_index(drop=True)
         
         self._advance_time_and_market()
 
         done = self.current_step >= self.total_steps
         if done:
-            while len(self.portfolio) > 0: self._close_position(-1)
+            while not self.portfolio.empty: self._close_position(-1)
 
         equity_after = self._get_current_equity()
         normal_shaped_reward, raw_reward = self._calculate_shaped_reward(equity_before, equity_after)
@@ -414,8 +427,9 @@ class OptionsZeroGameEnv(gym.Env):
             mid_price, _, _ = self._get_option_details(self.current_price, strike_price, days_to_expiry, type.lower())
             trades_to_execute.append({'type': type.lower(), 'direction': direction.lower(), 'strike_price': strike_price, 'entry_premium': self._get_option_price(mid_price, is_buy)})
 
-        for trade in trades_to_execute:
-            self.portfolio.append({'type': trade['type'], 'direction': trade['direction'], 'entry_step': self.current_step, 'strike_price': trade['strike_price'], 'entry_premium': trade['entry_premium'], 'days_to_expiry': days_to_expiry})
+        if trades_to_execute:
+            new_positions_df = pd.DataFrame(trades_to_execute)
+            self.portfolio = pd.concat([self.portfolio, new_positions_df], ignore_index=True)
 
     def _get_true_action_mask(self) -> np.ndarray:
         action_mask = np.zeros(self.action_space_size, dtype=np.int8)
@@ -424,7 +438,7 @@ class OptionsZeroGameEnv(gym.Env):
         is_expiry_day = current_trading_day >= self.time_to_expiry_trading_days - 1
 
         action_mask[self.actions_to_indices['HOLD']] = 1
-        if len(self.portfolio) > 0:
+        if not self.portfolio.empty:
             action_mask[self.actions_to_indices['CLOSE_ALL']] = 1
             for i in range(len(self.portfolio)):
                 if f'CLOSE_POSITION_{i}' in self.actions_to_indices:
@@ -433,11 +447,11 @@ class OptionsZeroGameEnv(gym.Env):
         if is_expiry_day:
             return action_mask
 
-        num_long_calls = sum(1 for p in self.portfolio if p['type'] == 'call' and p['direction'] == 'long')
-        num_short_calls = sum(1 for p in self.portfolio if p['type'] == 'call' and p['direction'] == 'short')
-        num_long_puts = sum(1 for p in self.portfolio if p['type'] == 'put' and p['direction'] == 'long')
-        num_short_puts = sum(1 for p in self.portfolio if p['type'] == 'put' and p['direction'] == 'short')
-        existing_positions = {(p['strike_price'], p['type']): p['direction'] for p in self.portfolio}
+        num_long_calls = len(self.portfolio.query("type == 'call' and direction == 'long'"))
+        num_short_calls = len(self.portfolio.query("type == 'call' and direction == 'short'"))
+        num_long_puts = len(self.portfolio.query("type == 'put' and direction == 'long'"))
+        num_short_puts = len(self.portfolio.query("type == 'put' and direction == 'short'"))
+        existing_positions = {(p['strike_price'], p['type']): p['direction'] for i, p in self.portfolio.iterrows()}
         
         if len(self.portfolio) <= self.max_positions - 4:
             action_mask[self.actions_to_indices['OPEN_LONG_IRON_FLY']] = 1
@@ -491,22 +505,21 @@ class OptionsZeroGameEnv(gym.Env):
         
         current_idx = 5
         atm_price = int(self.current_price / self.strike_distance + 0.5) * self.strike_distance
-        for i in range(self.max_positions):
-            if i < len(self.portfolio):
-                pos = self.portfolio[i]
-                market_portfolio_vec[current_idx + 0] = 1.0
-                market_portfolio_vec[current_idx + 1] = 1.0 if pos['type'] == 'call' else -1.0
-                market_portfolio_vec[current_idx + 2] = 1.0 if pos['direction'] == 'long' else -1.0
-                market_portfolio_vec[current_idx + 3] = (pos['strike_price'] - atm_price) / (3 * self.strike_distance)
-                market_portfolio_vec[current_idx + 4] = (self.current_step - pos['entry_step']) / self.total_steps
-                _, _, d2 = self._get_option_details(self.current_price, pos['strike_price'], pos['days_to_expiry'], pos['type'])
-                pop = 0.0
-                if pos['type'] == 'call': pop = norm.cdf(d2) if pos['direction'] == 'long' else 1 - norm.cdf(d2)
-                else: pop = 1 - norm.cdf(d2) if pos['direction'] == 'long' else norm.cdf(d2)
-                market_portfolio_vec[current_idx + 5] = pop
-                max_profit, max_loss = self._calculate_max_profit_loss(pos)
-                market_portfolio_vec[current_idx + 6] = math.tanh(max_profit / self.initial_cash)
-                market_portfolio_vec[current_idx + 7] = math.tanh(max_loss / self.initial_cash)
+        for i, pos in self.portfolio.iterrows():
+            if i >= self.max_positions: break
+            market_portfolio_vec[current_idx + 0] = 1.0
+            market_portfolio_vec[current_idx + 1] = 1.0 if pos['type'] == 'call' else -1.0
+            market_portfolio_vec[current_idx + 2] = 1.0 if pos['direction'] == 'long' else -1.0
+            market_portfolio_vec[current_idx + 3] = (pos['strike_price'] - atm_price) / (3 * self.strike_distance)
+            market_portfolio_vec[current_idx + 4] = (self.current_step - pos['entry_step']) / self.total_steps
+            _, _, d2 = self._get_option_details(self.current_price, pos['strike_price'], pos['days_to_expiry'], pos['type'])
+            pop = 0.0
+            if pos['type'] == 'call': pop = norm.cdf(d2) if pos['direction'] == 'long' else 1 - norm.cdf(d2)
+            else: pop = 1 - norm.cdf(d2) if pos['direction'] == 'long' else norm.cdf(d2)
+            market_portfolio_vec[current_idx + 5] = pop
+            max_profit, max_loss = self._calculate_max_profit_loss(pos)
+            market_portfolio_vec[current_idx + 6] = math.tanh(max_profit / self.initial_cash)
+            market_portfolio_vec[current_idx + 7] = math.tanh(max_loss / self.initial_cash)
             current_idx += 8
         
         true_action_mask = self._get_true_action_mask()
@@ -517,7 +530,7 @@ class OptionsZeroGameEnv(gym.Env):
         
         return {'observation': final_obs_vec, 'action_mask': mcts_action_mask, 'to_play': np.array([-1], dtype=np.int8)}
 
-    def _calculate_max_profit_loss(self, position: Dict[str, Any]) -> Tuple[float, float]:
+    def _calculate_max_profit_loss(self, position: pd.Series) -> Tuple[float, float]:
         entry_premium = position['entry_premium'] * self.lot_size
         if position['direction'] == 'long':
             max_profit = self.initial_cash * 10

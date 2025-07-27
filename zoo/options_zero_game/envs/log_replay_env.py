@@ -55,7 +55,9 @@ class LogReplayEnv(gym.Wrapper):
 
     def _log_step(self, obs, action=None, reward=None, done=False, info=None, is_initial_state=False, info_override=None):
         serializable_portfolio = []
-        for pos in self.env.portfolio:
+        
+        # <<< THE FIX: Use .iterrows() to correctly iterate over the DataFrame rows
+        for index, pos in self.env.portfolio.iterrows():
             mid_price, _, _ = self.env._get_option_details(self.env.current_price, pos['strike_price'], pos['days_to_expiry'], pos['type'])
             current_premium = self.env._get_option_price(mid_price, is_buy=(pos['direction'] == 'short'))
             if pos['direction'] == 'long': pnl = (current_premium - pos['entry_premium']) * self.env.lot_size
@@ -74,12 +76,9 @@ class LogReplayEnv(gym.Wrapper):
             log_info.update(info_override)
             
         log_info.setdefault('price', self.env.current_price)
-        log_info.setdefault('eval_episode_return', self.env._get_portfolio_value())
+        log_info.setdefault('eval_episode_return', self.env._get_total_pnl()) # Use the correct method name
         log_info.setdefault('start_price', self.env.start_price)
-        
-        # <<< THE FIX: Access the correct, dynamically calculated volatility attribute
         log_info.setdefault('volatility', self.env.garch_implied_vol)
-        
         log_info.setdefault('risk_free_rate', self.env.risk_free_rate)
         log_info.setdefault('daily_change_pct', 0.0)
 
