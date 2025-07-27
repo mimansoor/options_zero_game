@@ -142,8 +142,8 @@ class OptionsZeroGameEnv(gym.Env):
         
         self.np_random: Any = None
         
-        # <<< MODIFIED: Add creation_id to the portfolio definition
-        self.portfolio_columns: List[str] = ['type', 'direction', 'entry_step', 'strike_price', 'entry_premium', 'days_to_expiry', 'creation_id']
+        # <<< MODIFIED: Add strategy-aware columns
+        self.portfolio_columns: List[str] = ['type', 'direction', 'entry_step', 'strike_price', 'entry_premium', 'days_to_expiry', 'creation_id', 'strategy_id', 'strategy_max_profit', 'strategy_max_loss']
         self.portfolio: pd.DataFrame = pd.DataFrame(columns=self.portfolio_columns)
 
     def _discretize_iv_skew(self, skew_table: Dict[str, Dict[str, Tuple[float, float]]], num_bins: int = 5) -> Dict[str, Dict[str, np.ndarray]]:
@@ -226,7 +226,8 @@ class OptionsZeroGameEnv(gym.Env):
         vol = self._get_implied_volatility(offset, option_type)
 
         price = _numba_black_scholes(underlying_price, strike_price, t, self.risk_free_rate, vol, is_call)
-        delta_val = abs(_numba_delta(underlying_price, strike_price, t, self.risk_free_rate, vol, is_call))
+        # <<< MODIFIED: Return signed delta
+        delta_val = _numba_delta(underlying_price, strike_price, t, self.risk_free_rate, vol, is_call)
         
         d2 = 0.0
         if vol > 1e-6:
@@ -283,7 +284,6 @@ class OptionsZeroGameEnv(gym.Env):
         self._final_eval_reward: float = 0.0
         self.high_water_mark: float = self.initial_cash
         self.illegal_action_count: int = 0
-        # <<< MODIFIED: Initialize creation ID counter
         self.next_creation_id: int = 0
         return self._get_observation()
 
@@ -353,7 +353,6 @@ class OptionsZeroGameEnv(gym.Env):
             while not self.portfolio.empty:
                 self._close_position(-1)
 
-        # <<< MODIFIED: Add deterministic tie-breaker to the sort
         if not self.portfolio.empty:
             self.portfolio = self.portfolio.sort_values(by=['strike_price', 'type', 'creation_id']).reset_index(drop=True)
 
@@ -400,11 +399,8 @@ class OptionsZeroGameEnv(gym.Env):
         is_buy = (direction == 'LONG')
         mid_price, _, _ = self._get_option_details(self.current_price, strike_price, days_to_expiry, type.lower())
         entry_premium = self._get_option_price(mid_price, is_buy)
-        
-        # <<< MODIFIED: Add creation_id
-        new_position = pd.DataFrame([{'type': type.lower(), 'direction': direction.lower(), 'entry_step': self.current_step, 'strike_price': strike_price, 'entry_premium': entry_premium, 'days_to_expiry': days_to_expiry, 'creation_id': self.next_creation_id}])
+        new_position = pd.DataFrame([{'type': type.lower(), 'direction': direction.lower(), 'entry_step': self.current_step, 'strike_price': strike_price, 'entry_premium': entry_premium, 'days_to_expiry': days_to_expiry, 'creation_id': self.next_creation_id, 'strategy_id': -1, 'strategy_max_profit': 0.0, 'strategy_max_loss': 0.0}])
         self.next_creation_id += 1
-        
         self.portfolio = pd.concat([self.portfolio, new_position], ignore_index=True)
 
     def _open_straddle(self, action_name: str) -> None:
@@ -421,7 +417,6 @@ class OptionsZeroGameEnv(gym.Env):
         mid_price_put, _, _ = self._get_option_details(self.current_price, atm_price, days_to_expiry, 'put')
         trades_to_execute.append({'type': 'put', 'direction': direction, 'strike_price': atm_price, 'entry_premium': self._get_option_price(mid_price_put, is_buy)})
         
-        # <<< MODIFIED: Add creation_id
         for trade in trades_to_execute:
             trade['creation_id'] = self.next_creation_id
             self.next_creation_id += 1
@@ -551,8 +546,20 @@ class OptionsZeroGameEnv(gym.Env):
         mid_price_put_outer, _, _ = self._get_option_details(self.current_price, best_long_put_strike, days_to_expiry, 'put')
         trades_to_execute.append({'type': 'put', 'direction': outer_dir, 'strike_price': best_long_put_strike, 'entry_premium': self._get_option_price(mid_price_put_outer, outer_dir == 'long')})
         
+        # <<< MODIFIED: Calculate true max profit/loss for the spread
+        net_premium = sum(t['entry_premium'] * (1 if t['direction'] == inner_dir else -1) for t in trades_to_execute)
+        if direction == 'short': # Short Iron Condor
+            max_profit = net_premium * self.lot_size
+            max_loss = -(self.strike_distance * self.lot_size - max_profit)
+        else: # Long Iron Condor
+            max_loss = -net_premium * self.lot_size
+            max_profit = (self.strike_distance * self.lot_size) + max_loss
+
         for trade in trades_to_execute:
             trade['creation_id'] = self.next_creation_id
+            trade['strategy_id'] = self.next_creation_id # Use the first ID for the whole strategy
+            trade['strategy_max_profit'] = max_profit
+            trade['strategy_max_loss'] = max_loss
             self.next_creation_id += 1
             
         if trades_to_execute:
@@ -623,14 +630,19 @@ class OptionsZeroGameEnv(gym.Env):
             market_portfolio_vec[current_idx + 2] = 1.0 if pos['direction'] == 'long' else -1.0
             market_portfolio_vec[current_idx + 3] = (pos['strike_price'] - atm_price) / (3 * self.strike_distance)
             market_portfolio_vec[current_idx + 4] = (self.current_step - pos['entry_step']) / self.total_steps
-            _, _, d2 = self._get_option_details(self.current_price, pos['strike_price'], pos['days_to_expiry'], pos['type'])
+            
+            # <<< MODIFIED: Use signed delta for POP calculation
+            _, signed_delta, d2 = self._get_option_details(self.current_price, pos['strike_price'], pos['days_to_expiry'], pos['type'])
             if pos['type'] == 'call': pop = _numba_cdf(d2) if pos['direction'] == 'long' else 1 - _numba_cdf(d2)
             else: pop = 1 - _numba_cdf(d2) if pos['direction'] == 'long' else _numba_cdf(d2)
             market_portfolio_vec[current_idx + 5] = pop
+            
+            # <<< MODIFIED: Use strategy-aware max profit/loss
             max_profit, max_loss = self._calculate_max_profit_loss(pos)
             market_portfolio_vec[current_idx + 6] = math.tanh(max_profit / self.initial_cash)
             market_portfolio_vec[current_idx + 7] = math.tanh(max_loss / self.initial_cash)
             current_idx += 8
+            
         true_action_mask = self._get_true_action_mask()
         final_obs_vec = np.concatenate((market_portfolio_vec, true_action_mask.astype(np.float32)))
         # Handle MCTS action mask based on config
@@ -641,14 +653,19 @@ class OptionsZeroGameEnv(gym.Env):
         return {'observation': final_obs_vec, 'action_mask': mcts_action_mask, 'to_play': np.array([-1], dtype=np.int8)}
 
     def _calculate_max_profit_loss(self, position: pd.Series) -> Tuple[float, float]:
-        entry_premium = position['entry_premium'] * self.lot_size
-        if position['direction'] == 'long':
-            max_profit = self.initial_cash * 10
-            max_loss = -entry_premium
+        if position['strategy_id'] != -1:
+            # This is part of a defined-risk spread, use the pre-calculated values
+            return position['strategy_max_profit'], position['strategy_max_loss']
         else:
-            max_profit = entry_premium
-            max_loss = -self.initial_cash * 10
-        return max_profit, max_loss
+            # This is a single, undefined-risk leg
+            entry_premium = position['entry_premium'] * self.lot_size
+            if position['direction'] == 'long':
+                max_profit = self.initial_cash * 10 # Capped "infinite"
+                max_loss = -entry_premium
+            else: # short
+                max_profit = entry_premium
+                max_loss = -self.initial_cash * 10 # Capped "infinite"
+            return max_profit, max_loss
 
     def render(self, mode: str = 'human') -> None:
         total_pnl = self._get_total_pnl()
