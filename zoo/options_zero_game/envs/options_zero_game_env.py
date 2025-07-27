@@ -10,9 +10,7 @@ from arch import arch_model
 from easydict import EasyDict
 from gym import spaces
 from gymnasium.utils import seeding
-from py_vollib.black_scholes import black_scholes
 from py_vollib.black_scholes.greeks.analytical import delta
-from scipy.stats import norm
 
 from ding.envs import BaseEnvTimestep
 from ding.utils import ENV_REGISTRY
@@ -142,7 +140,6 @@ class OptionsZeroGameEnv(gym.Env):
         
         self.np_random: Any = None
         
-        # <<< MODIFIED: Add creation_id to the portfolio definition
         self.portfolio_columns: List[str] = ['type', 'direction', 'entry_step', 'strike_price', 'entry_premium', 'days_to_expiry', 'creation_id', 'strategy_id', 'strategy_max_profit', 'strategy_max_loss']
         self.portfolio: pd.DataFrame = pd.DataFrame(columns=self.portfolio_columns)
 
@@ -283,7 +280,6 @@ class OptionsZeroGameEnv(gym.Env):
         self._final_eval_reward: float = 0.0
         self.high_water_mark: float = self.initial_cash
         self.illegal_action_count: int = 0
-        # <<< MODIFIED: Initialize creation ID counter
         self.next_creation_id: int = 0
         return self._get_observation()
 
@@ -353,7 +349,6 @@ class OptionsZeroGameEnv(gym.Env):
             while not self.portfolio.empty:
                 self._close_position(-1)
 
-        # <<< MODIFIED: Add deterministic tie-breaker to the sort
         if not self.portfolio.empty:
             self.portfolio = self.portfolio.sort_values(by=['strike_price', 'type', 'creation_id']).reset_index(drop=True)
 
@@ -400,7 +395,7 @@ class OptionsZeroGameEnv(gym.Env):
         is_buy = (direction == 'LONG')
         mid_price, _, _ = self._get_option_details(self.current_price, strike_price, days_to_expiry, type.lower())
         entry_premium = self._get_option_price(mid_price, is_buy)
-        new_position = pd.DataFrame([{'type': type.lower(), 'direction': direction.lower(), 'entry_step': self.current_step, 'strike_price': strike_price, 'entry_premium': entry_premium, 'days_to_expiry': days_to_expiry, 'creation_id': self.next_creation_id, 'strategy_id': -1, 'strategy_max_profit': 0.0, 'strategy_max_loss': 0.0}])
+        new_position = pd.DataFrame([{'type': type.lower(), 'direction': direction.lower(), 'entry_step': self.current_step, 'strike_price': strike_price, 'entry_premium': entry_premium, 'days_to_expiry': days_to_expiry, 'creation_id': self.next_creation_id, 'strategy_id': self.next_creation_id, 'strategy_max_profit': 0.0, 'strategy_max_loss': 0.0}])
         self.next_creation_id += 1
         self.portfolio = pd.concat([self.portfolio, new_position], ignore_index=True)
 
@@ -418,8 +413,10 @@ class OptionsZeroGameEnv(gym.Env):
         mid_price_put, _, _ = self._get_option_details(self.current_price, atm_price, days_to_expiry, 'put')
         trades_to_execute.append({'type': 'put', 'direction': direction, 'strike_price': atm_price, 'entry_premium': self._get_option_price(mid_price_put, is_buy)})
         
+        strategy_id = self.next_creation_id
         for trade in trades_to_execute:
             trade['creation_id'] = self.next_creation_id
+            trade['strategy_id'] = strategy_id
             self.next_creation_id += 1
             
         if trades_to_execute:
@@ -442,8 +439,10 @@ class OptionsZeroGameEnv(gym.Env):
         mid_price_put, _, _ = self._get_option_details(self.current_price, put_strike, days_to_expiry, 'put')
         trades_to_execute.append({'type': 'put', 'direction': direction, 'strike_price': put_strike, 'entry_premium': self._get_option_price(mid_price_put, is_buy)})
         
+        strategy_id = self.next_creation_id
         for trade in trades_to_execute:
             trade['creation_id'] = self.next_creation_id
+            trade['strategy_id'] = strategy_id
             self.next_creation_id += 1
             
         if trades_to_execute:
@@ -476,8 +475,10 @@ class OptionsZeroGameEnv(gym.Env):
         mid_price_hedge_put, _, _ = self._get_option_details(self.current_price, hedge_strike_put, days_to_expiry, 'put')
         trades_to_execute.append({'type': 'put', 'direction': hedge_dir, 'strike_price': hedge_strike_put, 'entry_premium': self._get_option_price(mid_price_hedge_put, hedge_dir == 'long')})
         
+        strategy_id = self.next_creation_id
         for trade in trades_to_execute:
             trade['creation_id'] = self.next_creation_id
+            trade['strategy_id'] = strategy_id
             self.next_creation_id += 1
             
         if trades_to_execute:
@@ -550,14 +551,15 @@ class OptionsZeroGameEnv(gym.Env):
         net_premium = sum(t['entry_premium'] * (1 if t['direction'] == inner_dir else -1) for t in trades_to_execute)
         if direction == 'short':
             max_profit = net_premium * self.lot_size
-            max_loss = -(self.strike_distance * self.lot_size - max_profit)
+            max_loss = -((best_short_call_strike - best_long_call_strike) * self.lot_size - max_profit)
         else:
             max_loss = -net_premium * self.lot_size
-            max_profit = (self.strike_distance * self.lot_size) + max_loss
+            max_profit = ((best_short_call_strike - best_long_call_strike) * self.lot_size) + max_loss
 
+        strategy_id = self.next_creation_id
         for trade in trades_to_execute:
             trade['creation_id'] = self.next_creation_id
-            trade['strategy_id'] = self.next_creation_id
+            trade['strategy_id'] = strategy_id
             trade['strategy_max_profit'] = max_profit
             trade['strategy_max_loss'] = max_loss
             self.next_creation_id += 1
@@ -600,8 +602,8 @@ class OptionsZeroGameEnv(gym.Env):
                 strike_price = atm_price + (offset * self.strike_distance)
                 for option_type in ['call', 'put']:
                     _, d, _ = self._get_option_details(self.current_price, strike_price, days_to_expiry, option_type)
-                    is_far_otm = d < self.otm_threshold
-                    is_far_itm = d > self.itm_threshold
+                    is_far_otm = abs(d) < self.otm_threshold
+                    is_far_itm = abs(d) > self.itm_threshold
                     action_name_long = f'OPEN_LONG_{option_type.upper()}_ATM{"+" if offset >=0 else ""}{offset}'
                     is_legal_long = ((not (is_far_otm or is_far_itm)) and not (option_type == 'put' and existing_positions.get((strike_price, 'call')) == 'short') and not (option_type == 'call' and existing_positions.get((strike_price, 'put')) == 'short') and not (option_type == 'call' and num_long_calls > 0) and not (option_type == 'put' and num_long_puts > 0))
                     if is_legal_long: action_mask[self.actions_to_indices[action_name_long]] = 1
