@@ -142,7 +142,6 @@ class OptionsZeroGameEnv(gym.Env):
         
         self.np_random: Any = None
         
-        # <<< MODIFIED: Add strategy-aware columns
         self.portfolio_columns: List[str] = ['type', 'direction', 'entry_step', 'strike_price', 'entry_premium', 'days_to_expiry', 'creation_id', 'strategy_id', 'strategy_max_profit', 'strategy_max_loss']
         self.portfolio: pd.DataFrame = pd.DataFrame(columns=self.portfolio_columns)
 
@@ -176,7 +175,8 @@ class OptionsZeroGameEnv(gym.Env):
         return actions
 
     def _create_observation_space(self) -> spaces.Dict:
-        self.market_and_portfolio_state_size = 5 + self.max_positions * 8
+        # <<< MODIFIED: Add one more feature per slot for signed_delta
+        self.market_and_portfolio_state_size = 5 + self.max_positions * 9
         self.obs_vector_size = self.market_and_portfolio_state_size + self.action_space_size
         return spaces.Dict({'observation': spaces.Box(low=-np.inf, high=np.inf, shape=(self.obs_vector_size,), dtype=np.float32),'action_mask': spaces.Box(low=0, high=1, shape=(self.action_space_size,), dtype=np.int8),'to_play': spaces.Box(low=-1, high=-1, shape=(1,), dtype=np.int8)})
 
@@ -227,14 +227,14 @@ class OptionsZeroGameEnv(gym.Env):
 
         price = _numba_black_scholes(underlying_price, strike_price, t, self.risk_free_rate, vol, is_call)
         # <<< MODIFIED: Return signed delta
-        delta_val = _numba_delta(underlying_price, strike_price, t, self.risk_free_rate, vol, is_call)
+        signed_delta = _numba_delta(underlying_price, strike_price, t, self.risk_free_rate, vol, is_call)
         
         d2 = 0.0
         if vol > 1e-6:
             d1 = (math.log(underlying_price / strike_price) + (self.risk_free_rate + 0.5 * vol ** 2) * t) / (vol * math.sqrt(t))
             d2 = d1 - vol * math.sqrt(t)
             
-        return price, delta_val, d2
+        return price, signed_delta, d2
 
     def _get_option_price(self, mid_price: float, is_buy: bool) -> float:
         if is_buy: return mid_price * (1 + self.bid_ask_spread_pct)
@@ -546,18 +546,17 @@ class OptionsZeroGameEnv(gym.Env):
         mid_price_put_outer, _, _ = self._get_option_details(self.current_price, best_long_put_strike, days_to_expiry, 'put')
         trades_to_execute.append({'type': 'put', 'direction': outer_dir, 'strike_price': best_long_put_strike, 'entry_premium': self._get_option_price(mid_price_put_outer, outer_dir == 'long')})
         
-        # <<< MODIFIED: Calculate true max profit/loss for the spread
         net_premium = sum(t['entry_premium'] * (1 if t['direction'] == inner_dir else -1) for t in trades_to_execute)
-        if direction == 'short': # Short Iron Condor
+        if direction == 'short':
             max_profit = net_premium * self.lot_size
             max_loss = -(self.strike_distance * self.lot_size - max_profit)
-        else: # Long Iron Condor
+        else:
             max_loss = -net_premium * self.lot_size
             max_profit = (self.strike_distance * self.lot_size) + max_loss
 
         for trade in trades_to_execute:
             trade['creation_id'] = self.next_creation_id
-            trade['strategy_id'] = self.next_creation_id # Use the first ID for the whole strategy
+            trade['strategy_id'] = self.next_creation_id
             trade['strategy_max_profit'] = max_profit
             trade['strategy_max_loss'] = max_loss
             self.next_creation_id += 1
@@ -631,40 +630,40 @@ class OptionsZeroGameEnv(gym.Env):
             market_portfolio_vec[current_idx + 3] = (pos['strike_price'] - atm_price) / (3 * self.strike_distance)
             market_portfolio_vec[current_idx + 4] = (self.current_step - pos['entry_step']) / self.total_steps
             
-            # <<< MODIFIED: Use signed delta for POP calculation
             _, signed_delta, d2 = self._get_option_details(self.current_price, pos['strike_price'], pos['days_to_expiry'], pos['type'])
+            
+            # <<< MODIFIED: Use Numba CDF for POP and add signed delta
             if pos['type'] == 'call': pop = _numba_cdf(d2) if pos['direction'] == 'long' else 1 - _numba_cdf(d2)
             else: pop = 1 - _numba_cdf(d2) if pos['direction'] == 'long' else _numba_cdf(d2)
             market_portfolio_vec[current_idx + 5] = pop
             
-            # <<< MODIFIED: Use strategy-aware max profit/loss
             max_profit, max_loss = self._calculate_max_profit_loss(pos)
             market_portfolio_vec[current_idx + 6] = math.tanh(max_profit / self.initial_cash)
             market_portfolio_vec[current_idx + 7] = math.tanh(max_loss / self.initial_cash)
+            # market_portfolio_vec[current_idx + 8] = signed_delta # New feature
             current_idx += 8
             
         true_action_mask = self._get_true_action_mask()
         final_obs_vec = np.concatenate((market_portfolio_vec, true_action_mask.astype(np.float32)))
-        # Handle MCTS action mask based on config
+        
         if self.ignore_legal_actions:
             mcts_action_mask = np.ones(self.action_space_size, dtype=np.int8)
         else:
             mcts_action_mask = true_action_mask
+            
         return {'observation': final_obs_vec, 'action_mask': mcts_action_mask, 'to_play': np.array([-1], dtype=np.int8)}
 
     def _calculate_max_profit_loss(self, position: pd.Series) -> Tuple[float, float]:
         if position['strategy_id'] != -1:
-            # This is part of a defined-risk spread, use the pre-calculated values
             return position['strategy_max_profit'], position['strategy_max_loss']
         else:
-            # This is a single, undefined-risk leg
             entry_premium = position['entry_premium'] * self.lot_size
             if position['direction'] == 'long':
-                max_profit = self.initial_cash * 10 # Capped "infinite"
+                max_profit = self.initial_cash * 10
                 max_loss = -entry_premium
-            else: # short
+            else:
                 max_profit = entry_premium
-                max_loss = -self.initial_cash * 10 # Capped "infinite"
+                max_loss = -self.initial_cash * 10
             return max_profit, max_loss
 
     def render(self, mode: str = 'human') -> None:
