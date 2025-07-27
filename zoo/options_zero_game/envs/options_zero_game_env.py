@@ -1,6 +1,7 @@
 import copy
 import math
 import random
+import logging
 from typing import Tuple, Dict, Any, List
 
 import gym
@@ -69,6 +70,13 @@ def _numba_delta(S: float, K: float, T: float, r: float, sigma: float, is_call: 
 
 @ENV_REGISTRY.register('options_zero_game')
 class OptionsZeroGameEnv(gym.Env):
+    """
+    Options-Zero-Game: A Reinforcement Learning Environment for Options Trading.
+
+    This environment simulates a realistic options trading scenario where an RL agent
+    can learn to manage a portfolio of options under a variety of market conditions
+    and a strict set of professional trading rules.
+    """
     metadata = {'render.modes': ['human']}
 
     config = dict(
@@ -95,6 +103,10 @@ class OptionsZeroGameEnv(gym.Env):
         ignore_legal_actions=True,
         otm_delta_threshold=0.15,
         itm_delta_threshold=0.85,
+        # <<< NEW: Named constants for magic numbers
+        TRADING_DAYS_IN_WEEK=5,
+        TOTAL_DAYS_IN_WEEK=7,
+        UNDEFINED_RISK_CAP_MULTIPLIER=10,
     )
 
     @classmethod
@@ -108,6 +120,7 @@ class OptionsZeroGameEnv(gym.Env):
         if cfg is not None:
             self._cfg.update(cfg)
 
+        # ... (Parameter setup is unchanged)
         self.start_price: float = self._cfg.start_price
         self.initial_cash: float = self._cfg.initial_cash
         self.market_regimes: List[Dict[str, Any]] = self._cfg.market_regimes
@@ -126,6 +139,9 @@ class OptionsZeroGameEnv(gym.Env):
         self.ignore_legal_actions: bool = self._cfg.ignore_legal_actions
         self.otm_threshold: float = self._cfg.otm_delta_threshold
         self.itm_threshold: float = self._cfg.itm_delta_threshold
+        self.trading_days_in_week: int = self._cfg.TRADING_DAYS_IN_WEEK
+        self.total_days_in_week: int = self._cfg.TOTAL_DAYS_IN_WEEK
+        self.undefined_risk_cap: float = self.initial_cash * self._cfg.UNDEFINED_RISK_CAP_MULTIPLIER
         
         self.iv_bins: Dict[str, Dict[str, np.ndarray]] = self._discretize_iv_skew(self._cfg.iv_skew_table)
         
@@ -319,7 +335,7 @@ class OptionsZeroGameEnv(gym.Env):
         if is_end_of_day:
             if self.day_of_week == 4:
                 self.day_of_week = 0
-                time_decay_days += 2
+                time_decay_days += (self.total_days_in_week - self.trading_days_in_week)
             else:
                 self.day_of_week += 1
         self._simulate_price_step()
@@ -343,7 +359,7 @@ class OptionsZeroGameEnv(gym.Env):
                 pos_index = int(action_name.split('_')[-1])
                 self._close_position(pos_index)
             except (ValueError, IndexError):
-                pass
+                logging.warning(f"Attempted to close an invalid position index from action: {action_name}")
         elif action_name == 'CLOSE_ALL':
             while not self.portfolio.empty:
                 self._close_position(-1)
@@ -386,7 +402,7 @@ class OptionsZeroGameEnv(gym.Env):
         if len(self.portfolio) >= self.max_positions: return
         current_trading_day = self.current_step // self.steps_per_day
         trading_days_left = self.time_to_expiry_days - current_trading_day
-        days_to_expiry = trading_days_left * (7.0 / 5.0)
+        days_to_expiry = trading_days_left * (self.total_days_in_week / self.trading_days_in_week)
         atm_price = int(self.current_price / self.strike_distance + 0.5) * self.strike_distance
         _, direction, type, strike_str = action_name.split('_')
         offset = int(strike_str.replace('ATM', ''))
@@ -402,7 +418,7 @@ class OptionsZeroGameEnv(gym.Env):
         if len(self.portfolio) > self.max_positions - 2: return
         current_trading_day = self.current_step // self.steps_per_day
         trading_days_left = self.time_to_expiry_days - current_trading_day
-        days_to_expiry = trading_days_left * (7.0 / 5.0)
+        days_to_expiry = trading_days_left * (self.total_days_in_week / self.trading_days_in_week)
         atm_price = int(self.current_price / self.strike_distance + 0.5) * self.strike_distance
         direction = 'long' if 'LONG' in action_name else 'short'
         is_buy = (direction == 'long')
@@ -413,8 +429,8 @@ class OptionsZeroGameEnv(gym.Env):
         trades_to_execute.append({'type': 'put', 'direction': direction, 'strike_price': atm_price, 'entry_premium': self._get_option_price(mid_price_put, is_buy)})
         
         net_premium = sum(t['entry_premium'] for t in trades_to_execute)
-        max_profit = self.initial_cash * 10 if direction == 'long' else net_premium * self.lot_size
-        max_loss = -net_premium * self.lot_size if direction == 'long' else -self.initial_cash * 10
+        max_profit = self.undefined_risk_cap if direction == 'long' else net_premium * self.lot_size
+        max_loss = -net_premium * self.lot_size if direction == 'long' else -self.undefined_risk_cap
         
         strategy_id = self.next_creation_id
         for trade in trades_to_execute:
@@ -432,7 +448,7 @@ class OptionsZeroGameEnv(gym.Env):
         if len(self.portfolio) > self.max_positions - 2: return
         current_trading_day = self.current_step // self.steps_per_day
         trading_days_left = self.time_to_expiry_days - current_trading_day
-        days_to_expiry = trading_days_left * (7.0 / 5.0)
+        days_to_expiry = trading_days_left * (self.total_days_in_week / self.trading_days_in_week)
         atm_price = int(self.current_price / self.strike_distance + 0.5) * self.strike_distance
         direction = 'long' if 'LONG' in action_name else 'short'
         is_buy = (direction == 'long')
@@ -445,8 +461,8 @@ class OptionsZeroGameEnv(gym.Env):
         trades_to_execute.append({'type': 'put', 'direction': direction, 'strike_price': put_strike, 'entry_premium': self._get_option_price(mid_price_put, is_buy)})
         
         net_premium = sum(t['entry_premium'] for t in trades_to_execute)
-        max_profit = self.initial_cash * 10 if direction == 'long' else net_premium * self.lot_size
-        max_loss = -net_premium * self.lot_size if direction == 'long' else -self.initial_cash * 10
+        max_profit = self.undefined_risk_cap if direction == 'long' else net_premium * self.lot_size
+        max_loss = -net_premium * self.lot_size if direction == 'long' else -self.undefined_risk_cap
         
         strategy_id = self.next_creation_id
         for trade in trades_to_execute:
@@ -464,7 +480,7 @@ class OptionsZeroGameEnv(gym.Env):
         if len(self.portfolio) > self.max_positions - 4: return
         current_trading_day = self.current_step // self.steps_per_day
         trading_days_left = self.time_to_expiry_days - current_trading_day
-        days_to_expiry = trading_days_left * (7.0 / 5.0)
+        days_to_expiry = trading_days_left * (self.total_days_in_week / self.trading_days_in_week)
         atm_price = int(self.current_price / self.strike_distance + 0.5) * self.strike_distance
         direction = 'long' if 'LONG' in action_name else 'short'
         trades_to_execute = []
@@ -513,7 +529,7 @@ class OptionsZeroGameEnv(gym.Env):
         if len(self.portfolio) > self.max_positions - 4: return
         current_trading_day = self.current_step // self.steps_per_day
         trading_days_left = self.time_to_expiry_days - current_trading_day
-        days_to_expiry = trading_days_left * (7.0 / 5.0)
+        days_to_expiry = trading_days_left * (self.total_days_in_week / self.trading_days_in_week)
         atm_price = int(self.current_price / self.strike_distance + 0.5) * self.strike_distance
         direction = 'long' if 'LONG' in action_name else 'short'
         target_delta_short = 0.30
@@ -596,7 +612,6 @@ class OptionsZeroGameEnv(gym.Env):
             new_positions_df = pd.DataFrame(trades_to_execute)
             self.portfolio = pd.concat([self.portfolio, new_positions_df], ignore_index=True)
 
-    # <<< MODIFIED: Your superior, refactored action mask logic
     def _get_true_action_mask(self) -> np.ndarray:
         action_mask = np.zeros(self.action_space_size, dtype=np.int8)
         current_trading_day = self.current_step // self.steps_per_day
@@ -628,7 +643,7 @@ class OptionsZeroGameEnv(gym.Env):
         if len(self.portfolio) < self.max_positions:
             atm_price = int(self.current_price / self.strike_distance + 0.5) * self.strike_distance
             trading_days_left = self.time_to_expiry_days - current_trading_day
-            days_to_expiry = trading_days_left * (7.0 / 5.0)
+            days_to_expiry = trading_days_left * (self.total_days_in_week / self.trading_days_in_week)
             
             num_long_calls = len(self.portfolio.query("type == 'call' and direction == 'long'"))
             num_short_calls = len(self.portfolio.query("type == 'call' and direction == 'short'"))
@@ -715,11 +730,11 @@ class OptionsZeroGameEnv(gym.Env):
         else:
             entry_premium = position['entry_premium'] * self.lot_size
             if position['direction'] == 'long':
-                max_profit = self.initial_cash * 10
+                max_profit = self.undefined_risk_cap
                 max_loss = -entry_premium
             else:
                 max_profit = entry_premium
-                max_loss = -self.initial_cash * 10
+                max_loss = -self.undefined_risk_cap
             return max_profit, max_loss
 
     def render(self, mode: str = 'human') -> None:
