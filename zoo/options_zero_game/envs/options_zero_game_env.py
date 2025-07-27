@@ -17,40 +17,54 @@ from scipy.stats import norm
 from ding.envs import BaseEnvTimestep
 from ding.utils import ENV_REGISTRY
 
-# <<< NEW: Import Numba for JIT compilation
+# Optional: For JIT compilation
 try:
     from numba import jit
 except ImportError:
-    def jit(nopython=True): # Dummy decorator if numba is not installed
+    def jit(nopython=True):
         def decorator(func):
             return func
         return decorator
 
-# <<< NEW: Numba-compatible Black-Scholes implementation
 @jit(nopython=True)
-def _numba_black_scholes(S: float, K: float, T: float, r: float, sigma: float, option_type: str) -> float:
-    """
-    A Numba-JIT compiled Black-Scholes pricing function.
-    Uses a pure-python CDF implementation for nopython mode compatibility.
-    """
-    if T <= 0: # Handle expiry
-        if option_type == 'c': return max(0.0, S - K)
+def _numba_erf(x):
+    # A Numba-compatible implementation of the error function
+    # save the sign of x
+    sign = 1 if x >= 0 else -1
+    x = abs(x)
+    # constants
+    a1 =  0.254829592
+    a2 = -0.284496736
+    a3 =  1.421413741
+    a4 = -1.453152027
+    a5 =  1.061405429
+    p  =  0.3275911
+    # A&S formula 7.1.26
+    t = 1.0/(1.0 + p*x)
+    y = 1.0 - (((((a5*t + a4)*t) + a3)*t + a2)*t + a1)*t*math.exp(-x*x)
+    return sign*y
+
+@jit(nopython=True)
+def _numba_cdf(x):
+    # Numba-compatible CDF using our erf implementation
+    return 0.5 * (1 + _numba_erf(x / math.sqrt(2.0)))
+
+@jit(nopython=True)
+def _numba_black_scholes(S: float, K: float, T: float, r: float, sigma: float, option_type_is_call: bool) -> float:
+    if T <= 0:
+        if option_type_is_call: return max(0.0, S - K)
         else: return max(0.0, K - S)
-    if sigma <= 0 or T <= 0: return max(0.0, S - K) if option_type == 'c' else max(0.0, K - S)
+    if sigma <= 0 or T <= 0:
+        if option_type_is_call: return max(0.0, S - K)
+        else: return max(0.0, K - S)
 
     d1 = (math.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * math.sqrt(T))
     d2 = d1 - sigma * math.sqrt(T)
     
-    # Numba-compatible CDF using the error function (math.erf)
-    cdf_d1 = 0.5 * (1 + math.erf(d1 / math.sqrt(2.0)))
-    cdf_d2 = 0.5 * (1 + math.erf(d2 / math.sqrt(2.0)))
-    cdf_neg_d1 = 0.5 * (1 + math.erf(-d1 / math.sqrt(2.0)))
-    cdf_neg_d2 = 0.5 * (1 + math.erf(-d2 / math.sqrt(2.0)))
-    
-    if option_type == 'c':
-        price = S * cdf_d1 - K * math.exp(-r * T) * cdf_d2
+    if option_type_is_call:
+        price = S * _numba_cdf(d1) - K * math.exp(-r * T) * _numba_cdf(d2)
     else: # put
-        price = K * math.exp(-r * T) * cdf_neg_d2 - S * cdf_neg_d1
+        price = K * math.exp(-r * T) * _numba_cdf(-d2) - S * _numba_cdf(-d1)
     return price
 
 @ENV_REGISTRY.register('options_zero_game')
@@ -200,15 +214,13 @@ class OptionsZeroGameEnv(gym.Env):
         offset = round((strike_price - atm_price) / self.strike_distance)
         vol = self._get_implied_volatility(offset, option_type)
         
-        # <<< MODIFIED: Use our super-fast Numba function for pricing
-        mid_price = _numba_black_scholes(underlying_price, strike_price, t, self.risk_free_rate, vol, option_type[0])
+        mid_price = _numba_black_scholes(underlying_price, strike_price, t, self.risk_free_rate, vol, option_type == 'call')
 
         if t < (1.0 / 365.25):
             abs_delta_at_expiry = 1.0 if mid_price > 0 else 0.0
             return mid_price, abs_delta_at_expiry, 0.0
         
         try:
-            # We still use py_vollib for the greeks as they are complex to implement
             d1 = (math.log(underlying_price / strike_price) + (self.risk_free_rate + 0.5 * vol ** 2) * t) / (vol * math.sqrt(t))
             d2 = d1 - vol * math.sqrt(t)
             d = delta(option_type[0], underlying_price, strike_price, t, self.risk_free_rate, vol)
@@ -261,6 +273,8 @@ class OptionsZeroGameEnv(gym.Env):
         self.realized_pnl: float = 0.0
         self._final_eval_reward: float = 0.0
         self.high_water_mark: float = self.initial_cash
+        # <<< NEW: Reset illegal action counter at the start of each episode
+        self.illegal_action_count: int = 0
         return self._get_observation()
 
     def _close_position(self, position_index: int) -> None:
@@ -311,6 +325,7 @@ class OptionsZeroGameEnv(gym.Env):
         true_legal_actions_mask = self._get_true_action_mask()
         was_illegal_action = true_legal_actions_mask[action] == 0
         if was_illegal_action:
+            self.illegal_action_count += 1 # <<< NEW: Increment counter
             action = self.actions_to_indices['HOLD']
 
         action_name = self.indices_to_actions.get(action, 'INVALID')
@@ -348,9 +363,12 @@ class OptionsZeroGameEnv(gym.Env):
 
         self._final_eval_reward += raw_reward
         obs = self._get_observation()
+        
+        # <<< NEW: Add the illegal action count to the info dictionary
         info = {
             'price': self.current_price,
-            'eval_episode_return': self._final_eval_reward
+            'eval_episode_return': self._final_eval_reward,
+            'illegal_actions_in_episode': self.illegal_action_count
         }
         return BaseEnvTimestep(obs, final_reward, done, info)
 
@@ -450,8 +468,6 @@ class OptionsZeroGameEnv(gym.Env):
         direction = 'long' if 'LONG' in action_name else 'short'
         target_delta_short = 0.30
         target_delta_long = 0.10
-        
-        # --- Delta-Seeking Logic ---
         best_short_call_strike, best_long_call_strike = atm_price, atm_price
         min_delta_diff_short_call, min_delta_diff_long_call = 999, 999
         for offset in range(1, 15):
@@ -464,7 +480,6 @@ class OptionsZeroGameEnv(gym.Env):
             if abs(d - target_delta_long) < min_delta_diff_long_call:
                 min_delta_diff_long_call = abs(d - target_delta_long)
                 best_long_call_strike = strike
-        
         best_short_put_strike, best_long_put_strike = atm_price, atm_price
         min_delta_diff_short_put, min_delta_diff_long_put = 999, 999
         max_put_offset = int((atm_price / self.strike_distance) - 1)
@@ -478,16 +493,12 @@ class OptionsZeroGameEnv(gym.Env):
             if abs(d - target_delta_long) < min_delta_diff_long_put:
                 min_delta_diff_long_put = abs(d - target_delta_long)
                 best_long_put_strike = strike
-        
-        # --- Validation and Correction Block ---
         if best_long_call_strike <= best_short_call_strike:
             best_long_call_strike = best_short_call_strike + self.strike_distance
         if best_long_put_strike >= best_short_put_strike:
             best_long_put_strike = best_short_put_strike - self.strike_distance
         if not (best_long_put_strike < best_short_put_strike < best_short_call_strike < best_long_call_strike):
             return
-
-        # --- Trade Execution ---
         trades_to_execute = []
         inner_dir = 'long' if direction == 'long' else 'short'
         outer_dir = 'short' if direction == 'long' else 'long'
@@ -582,7 +593,7 @@ class OptionsZeroGameEnv(gym.Env):
         if self.ignore_legal_actions:
             mcts_action_mask = np.ones(self.action_space_size, dtype=np.int8)
         else:
-            mcts_action_mask = true_action_mask
+            mcts_action_mask = true_action_mask1
         return {'observation': final_obs_vec, 'action_mask': mcts_action_mask, 'to_play': np.array([-1], dtype=np.int8)}
 
     def _calculate_max_profit_loss(self, position: pd.Series) -> Tuple[float, float]:
