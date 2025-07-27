@@ -383,10 +383,22 @@ class OptionsZeroGameEnv(gym.Env):
             direction = 'long' if 'LONG' in action_name else 'short'
             target_delta_short = 0.30
             target_delta_long = 0.10
-            search_range = range(1, 11)
+
+            # Dynamic and Safe Search Range
+            # Define a minimum possible strike to avoid errors
+            min_strike = self.strike_distance
+
+            # Calculate the maximum possible offset for the put side search
+            max_put_offset = int((atm_price - min_strike) / self.strike_distance)
+
+            # The search range is now safe and dynamic
+            put_search_range = range(1, max_put_offset + 1)
+
+            # --- Find the Call Strikes (Search range is effectively infinite upwards) ---
+            call_search_range = range(1, 15) # Use a reasonably large but finite search for calls
             best_short_call_strike, best_long_call_strike = atm_price, atm_price
             min_delta_diff_short_call, min_delta_diff_long_call = 999, 999
-            for offset in search_range:
+            for offset in call_search_range:
                 strike = atm_price + (offset * self.strike_distance)
                 _, d, _ = self._get_option_details(self.current_price, strike, days_to_expiry, 'call')
                 if abs(d - target_delta_short) < min_delta_diff_short_call:
@@ -395,9 +407,11 @@ class OptionsZeroGameEnv(gym.Env):
                 if abs(d - target_delta_long) < min_delta_diff_long_call:
                     min_delta_diff_long_call = abs(d - target_delta_long)
                     best_long_call_strike = strike
+
+            # --- Find the Put Strikes (Using the new safe search range) ---
             best_short_put_strike, best_long_put_strike = atm_price, atm_price
             min_delta_diff_short_put, min_delta_diff_long_put = 999, 999
-            for offset in search_range:
+            for offset in put_search_range:
                 strike = atm_price - (offset * self.strike_distance)
                 _, d, _ = self._get_option_details(self.current_price, strike, days_to_expiry, 'put')
                 if abs(d - target_delta_short) < min_delta_diff_short_put:
@@ -406,8 +420,15 @@ class OptionsZeroGameEnv(gym.Env):
                 if abs(d - target_delta_long) < min_delta_diff_long_put:
                     min_delta_diff_long_put = abs(d - target_delta_long)
                     best_long_put_strike = strike
+
+            # Ensure the found strikes are logical (long is further out than short)
+            if best_long_call_strike <= best_short_call_strike: best_long_call_strike = best_short_call_strike + self.strike_distance
+            if best_long_put_strike >= best_short_put_strike: best_long_put_strike = best_short_put_strike - self.strike_distance
+
+            # --- Construct the Full 4-Legged Trade ---
             inner_dir = 'long' if direction == 'long' else 'short'
             outer_dir = 'short' if direction == 'long' else 'long'
+
             mid_price_call_inner, _, _ = self._get_option_details(self.current_price, best_short_call_strike, days_to_expiry, 'call')
             trades_to_execute.append({'type': 'call', 'direction': inner_dir, 'strike_price': best_short_call_strike, 'entry_premium': self._get_option_price(mid_price_call_inner, inner_dir == 'long')})
             mid_price_put_inner, _, _ = self._get_option_details(self.current_price, best_short_put_strike, days_to_expiry, 'put')
