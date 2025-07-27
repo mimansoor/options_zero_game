@@ -175,7 +175,7 @@ class OptionsZeroGameEnv(gym.Env):
         return actions
 
     def _create_observation_space(self) -> spaces.Dict:
-        # <<< MODIFIED: Add one more feature per slot for signed_delta
+        # <<< MODIFIED: 5 global + 4 slots * 9 features/slot + action mask
         self.market_and_portfolio_state_size = 5 + self.max_positions * 9
         self.obs_vector_size = self.market_and_portfolio_state_size + self.action_space_size
         return spaces.Dict({'observation': spaces.Box(low=-np.inf, high=np.inf, shape=(self.obs_vector_size,), dtype=np.float32),'action_mask': spaces.Box(low=0, high=1, shape=(self.action_space_size,), dtype=np.int8),'to_play': spaces.Box(low=-1, high=-1, shape=(1,), dtype=np.int8)})
@@ -226,7 +226,6 @@ class OptionsZeroGameEnv(gym.Env):
         vol = self._get_implied_volatility(offset, option_type)
 
         price = _numba_black_scholes(underlying_price, strike_price, t, self.risk_free_rate, vol, is_call)
-        # <<< MODIFIED: Return signed delta
         signed_delta = _numba_delta(underlying_price, strike_price, t, self.risk_free_rate, vol, is_call)
         
         d2 = 0.0
@@ -632,7 +631,6 @@ class OptionsZeroGameEnv(gym.Env):
             
             _, signed_delta, d2 = self._get_option_details(self.current_price, pos['strike_price'], pos['days_to_expiry'], pos['type'])
             
-            # <<< MODIFIED: Use Numba CDF for POP and add signed delta
             if pos['type'] == 'call': pop = _numba_cdf(d2) if pos['direction'] == 'long' else 1 - _numba_cdf(d2)
             else: pop = 1 - _numba_cdf(d2) if pos['direction'] == 'long' else _numba_cdf(d2)
             market_portfolio_vec[current_idx + 5] = pop
@@ -640,8 +638,9 @@ class OptionsZeroGameEnv(gym.Env):
             max_profit, max_loss = self._calculate_max_profit_loss(pos)
             market_portfolio_vec[current_idx + 6] = math.tanh(max_profit / self.initial_cash)
             market_portfolio_vec[current_idx + 7] = math.tanh(max_loss / self.initial_cash)
-            # market_portfolio_vec[current_idx + 8] = signed_delta # New feature
-            current_idx += 8
+            # <<< THE FIX: Add signed_delta as a new feature
+            market_portfolio_vec[current_idx + 8] = signed_delta
+            current_idx += 9
             
         true_action_mask = self._get_true_action_mask()
         final_obs_vec = np.concatenate((market_portfolio_vec, true_action_mask.astype(np.float32)))

@@ -15,9 +15,9 @@ reanalyze_ratio = 0.
 action_space_size = 42
 n_episode = 8
 
-# <<< MODIFIED: The final observation shape
-# 5 (global) + 4*8 (portfolio) + 42 (action mask) = 79
-observation_shape = 79
+# <<< MODIFIED: The final, correct observation shape
+# 5 (global) + 4 slots * 9 features/slot + 42 (action mask) = 5 + 36 + 42 = 83
+observation_shape = 83
 
 market_regimes = [
     {'name': 'Developed_Markets', 'mu': 0.00006, 'omega': 0.000005, 'alpha': 0.08, 'beta': 0.90},
@@ -63,7 +63,7 @@ options_zero_game_muzero_config = dict(
             discrete_action_encoding_type='one_hot',
             norm_type='BN',
         ),
-        model_path = './options_zero_game_muzero_global_markets_ns100_upc200_bs256/ckpt/ckpt_best.pth.tar',
+        model_path = None, # Set to None for a fresh training run
         cuda=True,
         game_segment_length=30,
         update_per_collect=update_per_collect,
