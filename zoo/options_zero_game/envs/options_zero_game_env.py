@@ -166,17 +166,28 @@ class OptionsZeroGameEnv(gym.Env):
 
     def _get_option_details(self, underlying_price, strike_price, days_to_expiry, option_type):
         t = days_to_expiry / 365.25
-        if t <= 1e-6:
-            intrinsic_value = 0.0
-            if option_type == 'call': intrinsic_value = max(0, underlying_price - strike_price)
-            else: intrinsic_value = max(0, strike_price - underlying_price)
+
+        # First, calculate intrinsic value, as it's needed in multiple places
+        intrinsic_value = 0.0
+        if option_type == 'call':
+            intrinsic_value = max(0, underlying_price - strike_price)
+        else: # put
+            intrinsic_value = max(0, strike_price - underlying_price)
+
+        # If there is less than one day to expiry, or if vol is effectively zero,
+        # the option's value is just its intrinsic value.
+        if t < (1.0 / 365.25):
             abs_delta_at_expiry = 1.0 if intrinsic_value > 0 else 0.0
             return intrinsic_value, abs_delta_at_expiry, 0
-        
+
         atm_price = int(underlying_price / self.strike_distance + 0.5) * self.strike_distance
         offset = round((strike_price - atm_price) / self.strike_distance)
         vol = self._get_implied_volatility(offset, option_type)
-        
+
+        if vol < 1e-6:
+            abs_delta_at_expiry = 1.0 if intrinsic_value > 0 else 0.0
+            return intrinsic_value, abs_delta_at_expiry, 0
+
         try:
             d1 = (math.log(underlying_price / strike_price) + (self.risk_free_rate + 0.5 * vol ** 2) * t) / (vol * math.sqrt(t))
             d2 = d1 - vol * math.sqrt(t)
@@ -184,7 +195,9 @@ class OptionsZeroGameEnv(gym.Env):
             mid_price = black_scholes(option_type[0], underlying_price, strike_price, t, self.risk_free_rate, vol)
             return mid_price, abs(d), d2
         except (ValueError, ZeroDivisionError):
-            return 0, 0, 0
+            # Fallback in case of any other math errors
+            abs_delta_at_expiry = 1.0 if intrinsic_value > 0 else 0.0
+            return intrinsic_value, abs_delta_at_expiry, 0
 
     def _get_option_price(self, mid_price, is_buy):
         if is_buy: return mid_price * (1 + self.bid_ask_spread_pct)
@@ -290,7 +303,9 @@ class OptionsZeroGameEnv(gym.Env):
                 self._close_position(pos_index)
             except (ValueError, IndexError): pass
         elif action_name == 'CLOSE_ALL':
-            while len(self.portfolio) > 0: self._close_position(0)
+            # Repeatedly close the last position
+            # This is cleaner and more efficient.
+            while len(self.portfolio) > 0: self._close_position(-1)
         
         self.portfolio.sort(key=lambda p: (p['strike_price'], p['type']))
         
