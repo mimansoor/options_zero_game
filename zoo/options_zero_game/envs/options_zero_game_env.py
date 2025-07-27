@@ -142,6 +142,7 @@ class OptionsZeroGameEnv(gym.Env):
         
         self.np_random: Any = None
         
+        # <<< MODIFIED: Add creation_id to the portfolio definition
         self.portfolio_columns: List[str] = ['type', 'direction', 'entry_step', 'strike_price', 'entry_premium', 'days_to_expiry', 'creation_id', 'strategy_id', 'strategy_max_profit', 'strategy_max_loss']
         self.portfolio: pd.DataFrame = pd.DataFrame(columns=self.portfolio_columns)
 
@@ -175,7 +176,6 @@ class OptionsZeroGameEnv(gym.Env):
         return actions
 
     def _create_observation_space(self) -> spaces.Dict:
-        # <<< MODIFIED: 5 global + 4 slots * 9 features/slot + action mask
         self.market_and_portfolio_state_size = 5 + self.max_positions * 9
         self.obs_vector_size = self.market_and_portfolio_state_size + self.action_space_size
         return spaces.Dict({'observation': spaces.Box(low=-np.inf, high=np.inf, shape=(self.obs_vector_size,), dtype=np.float32),'action_mask': spaces.Box(low=0, high=1, shape=(self.action_space_size,), dtype=np.int8),'to_play': spaces.Box(low=-1, high=-1, shape=(1,), dtype=np.int8)})
@@ -283,6 +283,7 @@ class OptionsZeroGameEnv(gym.Env):
         self._final_eval_reward: float = 0.0
         self.high_water_mark: float = self.initial_cash
         self.illegal_action_count: int = 0
+        # <<< MODIFIED: Initialize creation ID counter
         self.next_creation_id: int = 0
         return self._get_observation()
 
@@ -352,6 +353,7 @@ class OptionsZeroGameEnv(gym.Env):
             while not self.portfolio.empty:
                 self._close_position(-1)
 
+        # <<< MODIFIED: Add deterministic tie-breaker to the sort
         if not self.portfolio.empty:
             self.portfolio = self.portfolio.sort_values(by=['strike_price', 'type', 'creation_id']).reset_index(drop=True)
 
@@ -638,7 +640,6 @@ class OptionsZeroGameEnv(gym.Env):
             max_profit, max_loss = self._calculate_max_profit_loss(pos)
             market_portfolio_vec[current_idx + 6] = math.tanh(max_profit / self.initial_cash)
             market_portfolio_vec[current_idx + 7] = math.tanh(max_loss / self.initial_cash)
-            # <<< THE FIX: Add signed_delta as a new feature
             market_portfolio_vec[current_idx + 8] = signed_delta
             current_idx += 9
             
