@@ -258,6 +258,7 @@ class OptionsZeroGameEnv(gym.Env):
         elif self.np_random is None: self.seed(0)
 
         chosen_regime = random.choice(self.market_regimes)
+        self.current_regime_name = chosen_regime['name'] # For logging
         self.trend: float = chosen_regime['mu']
         self.omega: float = chosen_regime['omega']
         self.alpha: float = chosen_regime['alpha']
@@ -348,8 +349,9 @@ class OptionsZeroGameEnv(gym.Env):
             while not self.portfolio.empty:
                 self._close_position(-1)
 
+        # <<< THE FIX: Add deterministic tie-breaker to the sort
         if not self.portfolio.empty:
-            self.portfolio = self.portfolio.sort_values(by=['strike_price', 'type']).reset_index(drop=True)
+            self.portfolio = self.portfolio.sort_values(by=['strike_price', 'type', 'entry_step']).reset_index(drop=True)
 
         self._advance_time_and_market()
 
@@ -499,7 +501,6 @@ class OptionsZeroGameEnv(gym.Env):
                 min_delta_diff_long_put = abs(d - target_delta_long)
                 best_long_put_strike = strike
         
-        # <<< MODIFIED: Robust safety and bounds checking
         min_strike = self.strike_distance
         max_strike = self.start_price * 3
         best_short_call_strike = max(min_strike, min(max_strike, best_short_call_strike))
@@ -594,12 +595,9 @@ class OptionsZeroGameEnv(gym.Env):
             market_portfolio_vec[current_idx + 3] = (pos['strike_price'] - atm_price) / (3 * self.strike_distance)
             market_portfolio_vec[current_idx + 4] = (self.current_step - pos['entry_step']) / self.total_steps
             _, _, d2 = self._get_option_details(self.current_price, pos['strike_price'], pos['days_to_expiry'], pos['type'])
-            
-            # <<< MODIFIED: Use Numba CDF for POP calculation
             if pos['type'] == 'call': pop = _numba_cdf(d2) if pos['direction'] == 'long' else 1 - _numba_cdf(d2)
             else: pop = 1 - _numba_cdf(d2) if pos['direction'] == 'long' else _numba_cdf(d2)
             market_portfolio_vec[current_idx + 5] = pop
-            
             max_profit, max_loss = self._calculate_max_profit_loss(pos)
             market_portfolio_vec[current_idx + 6] = math.tanh(max_profit / self.initial_cash)
             market_portfolio_vec[current_idx + 7] = math.tanh(max_loss / self.initial_cash)
