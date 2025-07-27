@@ -1,18 +1,22 @@
 import React, { useState, useEffect } from 'react';
 import './App.css';
 
-// <<< MODIFIED: The MetricsDashboard now accepts and displays the daily change
-function MetricsDashboard({ day, price, pnl, actionName, startPrice, dailyChange }) {
+// <<< MODIFIED: The MetricsDashboard now accepts and displays the market regime
+function MetricsDashboard({ day, price, pnl, actionName, startPrice, dailyChange, marketRegime }) {
   const pnlColor = pnl > 0 ? '#4CAF50' : pnl < 0 ? '#F44336' : 'white';
   const cumulativeChange = price && startPrice ? ((price / startPrice) - 1) * 100 : 0;
   const cumulativeChangeColor = cumulativeChange > 0 ? '#4CAF50' : cumulativeChange < 0 ? '#F44336' : 'white';
   
-  // <<< NEW: Formatting for the daily change
   const dailyChangeColor = dailyChange > 0 ? '#4CAF50' : dailyChange < 0 ? '#F44336' : 'white';
   const dailyChangeString = dailyChange ? `(${dailyChange.toFixed(2)}%)` : '';
 
   return (
     <div className="metrics-dashboard">
+      {/* <<< NEW: Market Regime Display */}
+      <div className="metric-item">
+        <h2>Market Regime</h2>
+        <p style={{color: '#2196F3', fontWeight: 'bold'}}>{(marketRegime || 'N/A').replace(/_/g, ' ')}</p>
+      </div>
       <div className="metric-item">
         <h2>Day</h2>
         <p>{day}</p>
@@ -21,7 +25,6 @@ function MetricsDashboard({ day, price, pnl, actionName, startPrice, dailyChange
         <h2>EOD Price</h2>
         <p>
           ${price ? price.toFixed(2) : '0.00'}
-          {/* <<< NEW: Display the daily change next to the price */}
           <span style={{ fontSize: '0.7em', color: dailyChangeColor, marginLeft: '10px' }}>
             {dailyChangeString}
           </span>
@@ -73,7 +76,7 @@ function PortfolioTable({ portfolio }) {
               <td>${pos.entry_premium.toFixed(2)}</td>
               <td>${pos.current_premium.toFixed(2)}</td>
               <td style={{ color: pnlColor, fontWeight: 'bold' }}>${pos.live_pnl.toFixed(2)}</td>
-              <td>{pos.days_to_expiry}</td>
+              <td>{pos.days_to_expiry.toFixed(2)}</td>
             </tr>
           );
         })}
@@ -95,7 +98,9 @@ function processReplayData(rawHistory) {
     eodTotalPnl: initialState.info.eval_episode_return,
     eodPortfolio: initialState.portfolio,
     startPrice: initialState.info.start_price,
-    dailyChange: 0, // No daily change on day 0
+    dailyChange: 0,
+    // <<< NEW: Capture the market regime for the whole episode
+    marketRegime: initialState.info.market_regime,
   });
 
   for (let day = 1; day <= 30; day++) {
@@ -112,8 +117,9 @@ function processReplayData(rawHistory) {
       eodTotalPnl: marketCloseStep.info.eval_episode_return,
       eodPortfolio: marketCloseStep.portfolio,
       startPrice: marketCloseStep.info.start_price,
-      // <<< NEW: Pass the daily change to the summary object
       dailyChange: marketCloseStep.info.daily_change_pct,
+      // <<< NEW: Pass the regime to each daily summary
+      marketRegime: marketCloseStep.info.market_regime,
     });
   }
   return dailySummaries;
@@ -125,7 +131,8 @@ function App() {
   const [currentDay, setCurrentDay] = useState(0);
 
   useEffect(() => {
-    fetch('/replay_log.json')
+    // Use a cache-busting query parameter to ensure we always get the latest log
+    fetch(`/replay_log.json?t=${new Date().getTime()}`)
       .then(response => response.json())
       .then(rawHistory => {
         console.log('Successfully loaded raw replay data:', rawHistory);
@@ -170,8 +177,9 @@ function App() {
                   pnl={dayData.eodTotalPnl}
                   actionName={dayData.actionName}
                   startPrice={dayData.startPrice}
-                  // <<< NEW: Pass the daily change prop
                   dailyChange={dayData.dailyChange}
+                  // <<< NEW: Pass the market regime prop
+                  marketRegime={dayData.marketRegime}
                 />
                 <h2 style={{marginTop: '40px'}}>End-of-Day Positions</h2>
                 <PortfolioTable portfolio={dayData.eodPortfolio} />

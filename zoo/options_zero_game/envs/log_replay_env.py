@@ -11,7 +11,7 @@ from ding.envs.env.base_env import BaseEnvTimestep
 class LogReplayEnv(gym.Wrapper):
     """
     A gym.Wrapper that logs all interactions and saves them to a JSON file.
-    This version implements a two-part log for action and market-close states.
+    This version is updated to work with the refactored OptionsZeroGameEnv.
     """
     
     def __init__(self, cfg: dict):
@@ -33,12 +33,16 @@ class LogReplayEnv(gym.Wrapper):
         return obs
 
     def step(self, action):
-        corrected_action = self.env._enforce_legal_action(action)
-        action_name = self.env.indices_to_actions.get(corrected_action, 'INVALID')
-        self._log_step(self.env._get_observation(), action=corrected_action, info_override={'action_name': action_name})
-
-        timestep = self.env.step(corrected_action)
+        # Note: The main env now handles illegal actions, so we don't need _enforce_legal_action here.
+        action_name = self.env.indices_to_actions.get(action, 'INVALID')
         
+        # Log the state *before* the action is taken
+        self._log_step(self.env._get_observation(), action=action, info_override={'action_name': action_name})
+
+        # Execute the step in the real environment
+        timestep = self.env.step(action)
+        
+        # Calculate daily change for logging
         current_price = timestep.info['price']
         daily_change_pct = ((current_price / self._last_day_price) - 1) * 100 if self._last_day_price else 0.0
         self._last_day_price = current_price
@@ -46,6 +50,7 @@ class LogReplayEnv(gym.Wrapper):
         info_with_daily_change = timestep.info.copy()
         info_with_daily_change['daily_change_pct'] = daily_change_pct
         
+        # Log the state *after* the action and market move
         self._log_step(timestep.obs, action=None, reward=timestep.reward, done=timestep.done, info=info_with_daily_change)
         
         if timestep.done:
@@ -66,7 +71,7 @@ class LogReplayEnv(gym.Wrapper):
                 'type': pos['type'], 'direction': pos['direction'],
                 'strike_price': round(pos['strike_price'], 2),
                 'entry_premium': round(pos['entry_premium'], 2),
-                'days_to_expiry': pos['days_to_expiry'],
+                'days_to_expiry': round(pos['days_to_expiry'], 2),
                 'current_premium': round(current_premium, 2),
                 'live_pnl': round(pnl, 2),
             })
@@ -75,12 +80,15 @@ class LogReplayEnv(gym.Wrapper):
         if info_override:
             log_info.update(info_override)
             
+        # Ensure all necessary info fields are present
         log_info.setdefault('price', self.env.current_price)
-        log_info.setdefault('eval_episode_return', self.env._get_total_pnl()) # Use the correct method name
+        log_info.setdefault('eval_episode_return', self._get_total_pnl())
         log_info.setdefault('start_price', self.env.start_price)
         log_info.setdefault('volatility', self.env.garch_implied_vol)
         log_info.setdefault('risk_free_rate', self.env.risk_free_rate)
         log_info.setdefault('daily_change_pct', 0.0)
+        # <<< NEW: Add the market regime name to the log!
+        log_info.setdefault('market_regime', self.env.current_regime_name)
 
         log_entry = {
             'portfolio': serializable_portfolio,
@@ -100,6 +108,12 @@ class LogReplayEnv(gym.Wrapper):
             print(f"Successfully saved replay log to {self.log_file_path}")
         except Exception as e:
             print(f"Error saving replay log: {e}")
+
+    # Helper to access the correct PnL method, as the wrapper hides the base env
+    def _get_total_pnl(self):
+        if hasattr(self.env, '_get_total_pnl'):
+            return self.env._get_total_pnl()
+        return 0.0
 
     @staticmethod
     def create_collector_env_cfg(cfg: dict) -> list:
