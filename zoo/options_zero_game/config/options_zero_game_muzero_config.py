@@ -1,4 +1,6 @@
 from easydict import EasyDict
+import copy
+import random
 
 # ==============================================================
 #                 Options-Zero-Game Config
@@ -6,12 +8,16 @@ from easydict import EasyDict
 collector_env_num = 4
 evaluator_env_num = 2
 batch_size = 256
-num_simulations = 25
-update_per_collect = 1000
+num_simulations = 100
+update_per_collect = 200
 max_env_step = int(5e6)
 reanalyze_ratio = 0.
-n_episode = 8
 action_space_size = 42
+n_episode = 8
+
+# <<< MODIFIED: The final observation shape
+# 5 (global) + 4*8 (portfolio) + 42 (action mask) = 79
+observation_shape = 79
 
 market_regimes = [
     {'name': 'Developed_Markets', 'mu': 0.00006, 'omega': 0.000005, 'alpha': 0.08, 'beta': 0.90},
@@ -33,7 +39,7 @@ market_regimes = [
 #                    Main Config (The Parameters)
 # ==============================================================
 options_zero_game_muzero_config = dict(
-    exp_name=f'options_zero_game_muzero_final_model_ns{num_simulations}_upc{update_per_collect}_bs{batch_size}',
+    exp_name=f'options_zero_game_muzero_final_agent_ns{num_simulations}_upc{update_per_collect}_bs{batch_size}',
     env=dict(
         env_id='OptionsZeroGame-v0',
         collector_env_num=collector_env_num,
@@ -44,12 +50,11 @@ options_zero_game_muzero_config = dict(
         market_regimes=market_regimes,
         illegal_action_penalty=-1.0,
         rolling_vol_window=5,
-        steps_per_day=75, # 75 steps for 5-minute intervals
+        steps_per_day=75,
     ),
     policy=dict(
         model=dict(
-            # <<< MODIFIED: Update observation shape to 36
-            observation_shape=36,
+            observation_shape=observation_shape,
             action_space_size=action_space_size,
             model_type='mlp',
             lstm_hidden_size=512,
@@ -90,7 +95,7 @@ create_config = dict(
         type='options_zero_game',
         import_names=['zoo.options_zero_game.envs'],
     ),
-    env_manager=dict(type='base'),
+    env_manager=dict(type='subprocess'),
     policy=dict(
         type='muzero',
         import_names=['lzero.policy.muzero'],
