@@ -28,25 +28,20 @@ except ImportError:
 
 @jit(nopython=True)
 def _numba_erf(x):
-    # A Numba-compatible implementation of the error function
-    # save the sign of x
     sign = 1 if x >= 0 else -1
     x = abs(x)
-    # constants
     a1 =  0.254829592
     a2 = -0.284496736
     a3 =  1.421413741
     a4 = -1.453152027
     a5 =  1.061405429
     p  =  0.3275911
-    # A&S formula 7.1.26
     t = 1.0/(1.0 + p*x)
     y = 1.0 - (((((a5*t + a4)*t) + a3)*t + a2)*t + a1)*t*math.exp(-x*x)
     return sign*y
 
 @jit(nopython=True)
 def _numba_cdf(x):
-    # Numba-compatible CDF using our erf implementation
     return 0.5 * (1 + _numba_erf(x / math.sqrt(2.0)))
 
 @jit(nopython=True)
@@ -147,7 +142,8 @@ class OptionsZeroGameEnv(gym.Env):
         for option_type, table in skew_table.items():
             for offset_str, iv_range in table.items():
                 min_iv, max_iv = iv_range
-                binned_ivs[option_type][offset_str] = np.linspace(min_iv, max_iv, num_bins) / 100.0
+                # <<< MODIFIED: Ensure float32 dtype
+                binned_ivs[option_type][offset_str] = np.linspace(min_iv, max_iv, num_bins, dtype=np.float32) / 100.0
         return binned_ivs
 
     def _build_action_space(self) -> Dict[str, int]:
@@ -188,16 +184,18 @@ class OptionsZeroGameEnv(gym.Env):
         omega_step = self.omega / steps_per_year
         alpha_step = self.alpha / steps_per_year
         beta_step = self.beta
-        garch_spec = arch_model(np.zeros(100), mean='Constant', vol='GARCH', p=1, q=1)
-        params = np.array([mu_step, omega_step, alpha_step, beta_step])
+        garch_spec = arch_model(np.zeros(100, dtype=np.float32), mean='Constant', vol='GARCH', p=1, q=1)
+        # <<< MODIFIED: Ensure float32 dtype
+        params = np.array([mu_step, omega_step, alpha_step, beta_step], dtype=np.float32)
         sim_data = garch_spec.simulate(params, nobs=self.total_steps + 1)
-        price_path = np.zeros(self.total_steps + 1)
+        # <<< MODIFIED: Ensure float32 dtype
+        price_path = np.zeros(self.total_steps + 1, dtype=np.float32)
         price_path[0] = self.start_price
         for i in range(1, self.total_steps + 1):
             price_path[i] = price_path[i - 1] * np.exp(sim_data['data'][i - 1])
         self.price_path = price_path
         log_returns = np.diff(np.log(price_path))
-        returns_series = pd.Series(log_returns)
+        returns_series = pd.Series(log_returns, dtype=np.float32)
         rolling_window_steps = self.rolling_vol_window * self.steps_per_day
         self.realized_vol_series = returns_series.rolling(window=rolling_window_steps).std().fillna(0) * np.sqrt(steps_per_year)
 
@@ -273,7 +271,6 @@ class OptionsZeroGameEnv(gym.Env):
         self.realized_pnl: float = 0.0
         self._final_eval_reward: float = 0.0
         self.high_water_mark: float = self.initial_cash
-        # <<< NEW: Reset illegal action counter at the start of each episode
         self.illegal_action_count: int = 0
         return self._get_observation()
 
@@ -325,7 +322,7 @@ class OptionsZeroGameEnv(gym.Env):
         true_legal_actions_mask = self._get_true_action_mask()
         was_illegal_action = true_legal_actions_mask[action] == 0
         if was_illegal_action:
-            self.illegal_action_count += 1 # <<< NEW: Increment counter
+            self.illegal_action_count += 1
             action = self.actions_to_indices['HOLD']
 
         action_name = self.indices_to_actions.get(action, 'INVALID')
@@ -363,8 +360,6 @@ class OptionsZeroGameEnv(gym.Env):
 
         self._final_eval_reward += raw_reward
         obs = self._get_observation()
-        
-        # <<< NEW: Add the illegal action count to the info dictionary
         info = {
             'price': self.current_price,
             'eval_episode_return': self._final_eval_reward,
