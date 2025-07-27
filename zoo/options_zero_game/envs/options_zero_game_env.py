@@ -287,7 +287,6 @@ class OptionsZeroGameEnv(gym.Env):
         if not self.portfolio.empty:
             self.portfolio['days_to_expiry'] -= time_decay_days
 
-    # <<< MODIFIED: The complete, corrected step function
     def step(self, action: int) -> BaseEnvTimestep:
         true_legal_actions_mask = self._get_true_action_mask()
         was_illegal_action = true_legal_actions_mask[action] == 0
@@ -422,46 +421,64 @@ class OptionsZeroGameEnv(gym.Env):
             new_positions_df = pd.DataFrame(trades_to_execute)
             self.portfolio = pd.concat([self.portfolio, new_positions_df], ignore_index=True)
 
+    # <<< MODIFIED: The complete, corrected Iron Condor function
     def _open_iron_condor(self, action_name: str) -> None:
         if len(self.portfolio) > self.max_positions - 4: return
+
         current_trading_day = self.current_step // self.steps_per_day
         trading_days_left = self.time_to_expiry_days - current_trading_day
         days_to_expiry = trading_days_left * (7.0 / 5.0)
         atm_price = int(self.current_price / self.strike_distance + 0.5) * self.strike_distance
         direction = 'long' if 'LONG' in action_name else 'short'
+        
         target_delta_short = 0.30
         target_delta_long = 0.10
-        min_strike = self.strike_distance
-        max_put_offset = int((atm_price - min_strike) / self.strike_distance)
-        put_search_range = range(1, max_put_offset + 1)
-        call_search_range = range(1, 15)
-        trades_to_execute = []
+
+        # --- Delta-Seeking Logic ---
+        # Call Side
         best_short_call_strike, best_long_call_strike = atm_price, atm_price
         min_delta_diff_short_call, min_delta_diff_long_call = 999, 999
-        for offset in call_search_range:
+        for offset in range(1, 15): # Search OTM
             strike = atm_price + (offset * self.strike_distance)
             _, d, _ = self._get_option_details(self.current_price, strike, days_to_expiry, 'call')
+            if d == 0: break # Stop if we get too far OTM
             if abs(d - target_delta_short) < min_delta_diff_short_call:
                 min_delta_diff_short_call = abs(d - target_delta_short)
                 best_short_call_strike = strike
             if abs(d - target_delta_long) < min_delta_diff_long_call:
                 min_delta_diff_long_call = abs(d - target_delta_long)
                 best_long_call_strike = strike
+        
+        # Put Side
         best_short_put_strike, best_long_put_strike = atm_price, atm_price
         min_delta_diff_short_put, min_delta_diff_long_put = 999, 999
-        for offset in put_search_range:
+        max_put_offset = int((atm_price / self.strike_distance) - 1)
+        for offset in range(1, max_put_offset):
             strike = atm_price - (offset * self.strike_distance)
             _, d, _ = self._get_option_details(self.current_price, strike, days_to_expiry, 'put')
+            if d == 0: break
             if abs(d - target_delta_short) < min_delta_diff_short_put:
                 min_delta_diff_short_put = abs(d - target_delta_short)
                 best_short_put_strike = strike
             if abs(d - target_delta_long) < min_delta_diff_long_put:
                 min_delta_diff_long_put = abs(d - target_delta_long)
                 best_long_put_strike = strike
-        if best_long_call_strike <= best_short_call_strike: best_long_call_strike = best_short_call_strike + self.strike_distance
-        if best_long_put_strike >= best_short_put_strike: best_long_put_strike = best_short_put_strike - self.strike_distance
+
+        # --- Validation and Correction Block ---
+        if best_long_call_strike <= best_short_call_strike:
+            best_long_call_strike = best_short_call_strike + self.strike_distance
+        if best_long_put_strike >= best_short_put_strike:
+            best_long_put_strike = best_short_put_strike - self.strike_distance
+        
+        # Final check for validity
+        if not (best_long_put_strike < best_short_put_strike < best_short_call_strike < best_long_call_strike):
+            return # Abort if strikes are not logical
+
+        # --- Trade Execution ---
+        trades_to_execute = []
         inner_dir = 'long' if direction == 'long' else 'short'
         outer_dir = 'short' if direction == 'long' else 'long'
+
         mid_price_call_inner, _, _ = self._get_option_details(self.current_price, best_short_call_strike, days_to_expiry, 'call')
         trades_to_execute.append({'type': 'call', 'direction': inner_dir, 'strike_price': best_short_call_strike, 'entry_premium': self._get_option_price(mid_price_call_inner, inner_dir == 'long')})
         mid_price_put_inner, _, _ = self._get_option_details(self.current_price, best_short_put_strike, days_to_expiry, 'put')
@@ -470,6 +487,7 @@ class OptionsZeroGameEnv(gym.Env):
         trades_to_execute.append({'type': 'call', 'direction': outer_dir, 'strike_price': best_long_call_strike, 'entry_premium': self._get_option_price(mid_price_call_outer, outer_dir == 'long')})
         mid_price_put_outer, _, _ = self._get_option_details(self.current_price, best_long_put_strike, days_to_expiry, 'put')
         trades_to_execute.append({'type': 'put', 'direction': outer_dir, 'strike_price': best_long_put_strike, 'entry_premium': self._get_option_price(mid_price_put_outer, outer_dir == 'long')})
+
         if trades_to_execute:
             new_positions_df = pd.DataFrame(trades_to_execute)
             self.portfolio = pd.concat([self.portfolio, new_positions_df], ignore_index=True)
