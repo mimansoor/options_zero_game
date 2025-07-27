@@ -17,7 +17,7 @@ from scipy.stats import norm
 from ding.envs import BaseEnvTimestep
 from ding.utils import ENV_REGISTRY
 
-# Optional: For JIT compilation
+# <<< NEW: Numba JIT compilation for performance-critical math
 try:
     from numba import jit
 except ImportError:
@@ -30,12 +30,8 @@ except ImportError:
 def _numba_erf(x):
     sign = 1 if x >= 0 else -1
     x = abs(x)
-    a1 =  0.254829592
-    a2 = -0.284496736
-    a3 =  1.421413741
-    a4 = -1.453152027
-    a5 =  1.061405429
-    p  =  0.3275911
+    a1 =  0.254829592; a2 = -0.284496736; a3 =  1.421413741
+    a4 = -1.453152027; a5 =  1.061405429; p  =  0.3275911
     t = 1.0/(1.0 + p*x)
     y = 1.0 - (((((a5*t + a4)*t) + a3)*t + a2)*t + a1)*t*math.exp(-x*x)
     return sign*y
@@ -45,22 +41,34 @@ def _numba_cdf(x):
     return 0.5 * (1 + _numba_erf(x / math.sqrt(2.0)))
 
 @jit(nopython=True)
-def _numba_black_scholes(S: float, K: float, T: float, r: float, sigma: float, option_type_is_call: bool) -> float:
-    if T <= 0:
-        if option_type_is_call: return max(0.0, S - K)
+def _numba_black_scholes(S: float, K: float, T: float, r: float, sigma: float, is_call: bool) -> float:
+    if T <= 1e-6:
+        if is_call: return max(0.0, S - K)
         else: return max(0.0, K - S)
-    if sigma <= 0 or T <= 0:
-        if option_type_is_call: return max(0.0, S - K)
+    if sigma <= 1e-6:
+        if is_call: return max(0.0, S - K)
         else: return max(0.0, K - S)
 
     d1 = (math.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * math.sqrt(T))
     d2 = d1 - sigma * math.sqrt(T)
     
-    if option_type_is_call:
+    if is_call:
         price = S * _numba_cdf(d1) - K * math.exp(-r * T) * _numba_cdf(d2)
-    else: # put
+    else:
         price = K * math.exp(-r * T) * _numba_cdf(-d2) - S * _numba_cdf(-d1)
     return price
+
+@jit(nopython=True)
+def _numba_delta(S: float, K: float, T: float, r: float, sigma: float, is_call: bool) -> float:
+    if T <= 1e-6 or sigma <= 1e-6:
+        if is_call: return 1.0 if S > K else 0.0
+        else: return -1.0 if S < K else 0.0
+    
+    d1 = (math.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * math.sqrt(T))
+    if is_call:
+        return _numba_cdf(d1)
+    else:
+        return _numba_cdf(d1) - 1.0
 
 @ENV_REGISTRY.register('options_zero_game')
 class OptionsZeroGameEnv(gym.Env):
@@ -142,7 +150,6 @@ class OptionsZeroGameEnv(gym.Env):
         for option_type, table in skew_table.items():
             for offset_str, iv_range in table.items():
                 min_iv, max_iv = iv_range
-                # <<< MODIFIED: Ensure float32 dtype
                 binned_ivs[option_type][offset_str] = np.linspace(min_iv, max_iv, num_bins, dtype=np.float32) / 100.0
         return binned_ivs
 
@@ -185,10 +192,8 @@ class OptionsZeroGameEnv(gym.Env):
         alpha_step = self.alpha / steps_per_year
         beta_step = self.beta
         garch_spec = arch_model(np.zeros(100, dtype=np.float32), mean='Constant', vol='GARCH', p=1, q=1)
-        # <<< MODIFIED: Ensure float32 dtype
         params = np.array([mu_step, omega_step, alpha_step, beta_step], dtype=np.float32)
         sim_data = garch_spec.simulate(params, nobs=self.total_steps + 1)
-        # <<< MODIFIED: Ensure float32 dtype
         price_path = np.zeros(self.total_steps + 1, dtype=np.float32)
         price_path[0] = self.start_price
         for i in range(1, self.total_steps + 1):
@@ -208,38 +213,48 @@ class OptionsZeroGameEnv(gym.Env):
 
     def _get_option_details(self, underlying_price: float, strike_price: float, days_to_expiry: float, option_type: str) -> Tuple[float, float, float]:
         t = days_to_expiry / 365.25
+        is_call = option_type == 'call'
+        
+        # <<< MODIFIED: Cleaner edge case handling
+        if t < 1e-6:
+            intrinsic = max(0.0, underlying_price - strike_price) if is_call else max(0.0, strike_price - underlying_price)
+            delta_val = 1.0 if intrinsic > 0 else 0.0
+            return intrinsic, delta_val, 0.0
+
         atm_price = int(underlying_price / self.strike_distance + 0.5) * self.strike_distance
         offset = round((strike_price - atm_price) / self.strike_distance)
         vol = self._get_implied_volatility(offset, option_type)
-        
-        mid_price = _numba_black_scholes(underlying_price, strike_price, t, self.risk_free_rate, vol, option_type == 'call')
 
-        if t < (1.0 / 365.25):
-            abs_delta_at_expiry = 1.0 if mid_price > 0 else 0.0
-            return mid_price, abs_delta_at_expiry, 0.0
+        price = _numba_black_scholes(underlying_price, strike_price, t, self.risk_free_rate, vol, is_call)
+        # <<< MODIFIED: Use consistent Numba delta
+        delta_val = abs(_numba_delta(underlying_price, strike_price, t, self.risk_free_rate, vol, is_call))
         
-        try:
+        # Calculate d2 only if needed (e.g., for POP)
+        if vol > 1e-6:
             d1 = (math.log(underlying_price / strike_price) + (self.risk_free_rate + 0.5 * vol ** 2) * t) / (vol * math.sqrt(t))
             d2 = d1 - vol * math.sqrt(t)
-            d = delta(option_type[0], underlying_price, strike_price, t, self.risk_free_rate, vol)
-            return mid_price, abs(d), d2
-        except (ValueError, ZeroDivisionError):
-            abs_delta_at_expiry = 1.0 if mid_price > 0 else 0.0
-            return mid_price, abs_delta_at_expiry, 0.0
+        else:
+            d2 = 0.0
+            
+        return price, delta_val, d2
 
     def _get_option_price(self, mid_price: float, is_buy: bool) -> float:
         if is_buy: return mid_price * (1 + self.bid_ask_spread_pct)
         else: return mid_price * (1 - self.bid_ask_spread_pct)
 
+    # <<< MODIFIED: Optimized portfolio valuation
     def _get_total_pnl(self) -> float:
         if self.portfolio.empty:
             return self.realized_pnl
-        def get_current_premium(row):
+        
+        def calculate_pnl(row):
             mid_price, _, _ = self._get_option_details(self.current_price, row['strike_price'], row['days_to_expiry'], row['type'])
-            return self._get_option_price(mid_price, is_buy=(row['direction'] == 'short'))
-        current_premiums = self.portfolio.apply(get_current_premium, axis=1)
-        pnl = (current_premiums - self.portfolio['entry_premium']) * self.lot_size
-        unrealized_pnl = np.where(self.portfolio['direction'] == 'long', pnl, -pnl).sum()
+            current_price = self._get_option_price(mid_price, row['direction'] == 'short')
+            price_diff = current_price - row['entry_premium']
+            # For shorts, the PnL is the negative of the price difference
+            return price_diff * self.lot_size * (1 if row['direction'] == 'long' else -1)
+        
+        unrealized_pnl = self.portfolio.apply(calculate_pnl, axis=1).sum()
         return self.realized_pnl + unrealized_pnl
 
     def _get_current_equity(self) -> float:
@@ -463,6 +478,7 @@ class OptionsZeroGameEnv(gym.Env):
         direction = 'long' if 'LONG' in action_name else 'short'
         target_delta_short = 0.30
         target_delta_long = 0.10
+        
         best_short_call_strike, best_long_call_strike = atm_price, atm_price
         min_delta_diff_short_call, min_delta_diff_long_call = 999, 999
         for offset in range(1, 15):
@@ -475,6 +491,7 @@ class OptionsZeroGameEnv(gym.Env):
             if abs(d - target_delta_long) < min_delta_diff_long_call:
                 min_delta_diff_long_call = abs(d - target_delta_long)
                 best_long_call_strike = strike
+        
         best_short_put_strike, best_long_put_strike = atm_price, atm_price
         min_delta_diff_short_put, min_delta_diff_long_put = 999, 999
         max_put_offset = int((atm_price / self.strike_distance) - 1)
@@ -488,12 +505,21 @@ class OptionsZeroGameEnv(gym.Env):
             if abs(d - target_delta_long) < min_delta_diff_long_put:
                 min_delta_diff_long_put = abs(d - target_delta_long)
                 best_long_put_strike = strike
+        
+        # <<< MODIFIED: Robust safety and bounds checking
+        min_strike = self.strike_distance
+        best_short_call_strike = max(min_strike, best_short_call_strike)
+        best_long_call_strike = max(min_strike, best_long_call_strike)
+        best_short_put_strike = max(min_strike, best_short_put_strike)
+        best_long_put_strike = max(min_strike, best_long_put_strike)
+
         if best_long_call_strike <= best_short_call_strike:
             best_long_call_strike = best_short_call_strike + self.strike_distance
         if best_long_put_strike >= best_short_put_strike:
             best_long_put_strike = best_short_put_strike - self.strike_distance
         if not (best_long_put_strike < best_short_put_strike < best_short_call_strike < best_long_call_strike):
             return
+
         trades_to_execute = []
         inner_dir = 'long' if direction == 'long' else 'short'
         outer_dir = 'short' if direction == 'long' else 'long'
@@ -588,7 +614,7 @@ class OptionsZeroGameEnv(gym.Env):
         if self.ignore_legal_actions:
             mcts_action_mask = np.ones(self.action_space_size, dtype=np.int8)
         else:
-            mcts_action_mask = true_action_mask1
+            mcts_action_mask = true_action_mask
         return {'observation': final_obs_vec, 'action_mask': mcts_action_mask, 'to_play': np.array([-1], dtype=np.int8)}
 
     def _calculate_max_profit_loss(self, position: pd.Series) -> Tuple[float, float]:
