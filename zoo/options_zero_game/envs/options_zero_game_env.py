@@ -272,6 +272,9 @@ class OptionsZeroGameEnv(gym.Env):
         unconditional_variance = self.omega / (1 - self.alpha - self.beta)
         self.garch_implied_vol: float = math.sqrt(unconditional_variance * 252)
         
+        # <<< THIS IS THE FIX: Initialize iv_bin_index before it's needed
+        self.iv_bin_index: int = random.randint(0, 4)
+        
         self.price_path = np.zeros(self.total_steps + 1, dtype=np.float32)
         self.realized_vol_series = np.zeros(self.total_steps + 1, dtype=np.float32)
         self._generate_price_path()
@@ -569,23 +572,15 @@ class OptionsZeroGameEnv(gym.Env):
                 if f'CLOSE_POSITION_{i}' in self.actions_to_indices:
                     action_mask[self.actions_to_indices[f'CLOSE_POSITION_{i}']] = 1
         
-        if is_expiry_day:
+        if (len(self.portfolio) == self.max_positions) or is_expiry_day:
             return action_mask
         
-        if len(self.portfolio) == self.max_positions:
-            return action_mask
-
-        # Check for 4-leg strategies.
-        # This is only possible if there are 4 or more empty slots.
-        # Since max_positions is 4, this is only true if len(self.portfolio) == 0.
         if len(self.portfolio) <= (self.max_positions - 4):
             action_mask[self.actions_to_indices['OPEN_LONG_IRON_FLY']] = 1
             action_mask[self.actions_to_indices['OPEN_SHORT_IRON_FLY']] = 1
             action_mask[self.actions_to_indices['OPEN_LONG_IRON_CONDOR']] = 1
             action_mask[self.actions_to_indices['OPEN_SHORT_IRON_CONDOR']] = 1
-
-        # Check for 2-leg strategies.
-        # This is only possible if there are 2 or more empty slots.
+        
         if len(self.portfolio) <= (self.max_positions - 2):
             action_mask[self.actions_to_indices['OPEN_LONG_STRADDLE_ATM']] = 1
             action_mask[self.actions_to_indices['OPEN_SHORT_STRADDLE_ATM']] = 1
