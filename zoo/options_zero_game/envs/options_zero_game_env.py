@@ -214,43 +214,31 @@ class OptionsZeroGameEnv(gym.Env):
             return 0.0, 0.0, 0.0
         t = days_to_expiry / 365.25
         is_call = option_type == 'call'
-
-        # Handle near-expiry cases
         if t <= 1e-6:
             intrinsic = max(0.0, underlying_price - strike_price) if is_call else max(0.0, strike_price - underlying_price)
             return intrinsic, 1.0 if intrinsic > 0 else 0.0, 0.0
-
         try:
             atm_price = int(underlying_price / self.strike_distance + 0.5) * self.strike_distance
             offset = round((strike_price - atm_price) / self.strike_distance)
             vol = self._get_implied_volatility(offset, option_type)
-
-            # Handle near-zero volatility cases
             if vol <= 1e-6:
                 intrinsic = max(0.0, underlying_price - strike_price) if is_call else max(0.0, strike_price - underlying_price)
                 return intrinsic, 1.0 if intrinsic > 0 else 0.0, 0.0
-
-            # Calculate with fallback to intrinsic value on numerical errors
             try:
                 price = _numba_black_scholes(underlying_price, strike_price, t, self.risk_free_rate, vol, is_call)
                 signed_delta = _numba_delta(underlying_price, strike_price, t, self.risk_free_rate, vol, is_call)
             except (ValueError, ZeroDivisionError):
                 intrinsic = max(0.0, underlying_price - strike_price) if is_call else max(0.0, strike_price - underlying_price)
                 return intrinsic, 1.0 if intrinsic > 0 else 0.0, 0.0
-
-            # Ensure finite values
             if not (math.isfinite(price) and math.isfinite(signed_delta)):
                 intrinsic = max(0.0, underlying_price - strike_price) if is_call else max(0.0, strike_price - underlying_price)
                 return intrinsic, 1.0 if intrinsic > 0 else 0.0, 0.0
-
-            # Calculate d2 safely
             d2 = 0.0
             if vol > 1e-6:
                 d1_denominator = vol * math.sqrt(t)
                 if d1_denominator >= 1e-8:
                     d1 = (math.log(underlying_price / strike_price) + (self.risk_free_rate + 0.5 * vol ** 2) * t) / d1_denominator
                     d2 = d1 - vol * math.sqrt(t)
-
             return price, signed_delta, d2
         except Exception:
             return 0.0, 0.0, 0.0
@@ -288,13 +276,11 @@ class OptionsZeroGameEnv(gym.Env):
             total = self.alpha + self.beta
             self.alpha = self.alpha / (total + 0.01)
             self.beta = self.beta / (total + 0.01)
-        
+
         unconditional_variance = self.omega / (1 - self.alpha - self.beta)
         self.garch_implied_vol: float = math.sqrt(unconditional_variance * 252)
         
-        # <<< THIS IS THE FIX: Initialize iv_bin_index before it's needed
         self.iv_bin_index: int = random.randint(0, 4)
-        
         self.price_path = np.zeros(self.total_steps + 1, dtype=np.float32)
         self.realized_vol_series = np.zeros(self.total_steps + 1, dtype=np.float32)
         self._generate_price_path()
@@ -326,16 +312,23 @@ class OptionsZeroGameEnv(gym.Env):
             self.realized_pnl += pnl
             self.portfolio = self.portfolio.drop(self.portfolio.index[position_index]).reset_index(drop=True)
 
+    # <<< MODIFIED: Simplified and more direct reward shaping
     def _calculate_shaped_reward(self, equity_before: float, equity_after: float) -> Tuple[float, float]:
         if not math.isfinite(equity_before) or not math.isfinite(equity_after):
             return 0.0, 0.0
         raw_reward = equity_after - equity_before
-        pnl_component = math.tanh(raw_reward / self.pnl_scaling_factor)
+        
+        # PnL component is now the raw PnL, scaled
+        pnl_component = raw_reward / self.pnl_scaling_factor
+        
         self.high_water_mark = max(self.high_water_mark, equity_after)
         drawdown = self.high_water_mark - equity_after
-        drawdown_penalty_component = -self.drawdown_penalty_weight * math.tanh(drawdown / self.initial_cash)
-        combined_score = pnl_component + drawdown_penalty_component
-        final_reward = math.tanh(combined_score / 2)
+        
+        # Drawdown penalty is also a scaled value
+        drawdown_penalty = self.drawdown_penalty_weight * (drawdown / self.pnl_scaling_factor)
+        
+        final_reward = pnl_component - drawdown_penalty
+        
         assert math.isfinite(final_reward)
         return final_reward, raw_reward
 
@@ -584,120 +577,65 @@ class OptionsZeroGameEnv(gym.Env):
         current_trading_day = self.current_step // self.steps_per_day
         is_expiry_day = current_trading_day >= self.time_to_expiry_days - 1
         
-        # HOLD is always allowed
         action_mask[self.actions_to_indices['HOLD']] = 1
         
-        # Closing actions are always allowed if positions exist
         if not self.portfolio.empty:
             action_mask[self.actions_to_indices['CLOSE_ALL']] = 1
             for i in range(len(self.portfolio)):
                 if f'CLOSE_POSITION_{i}' in self.actions_to_indices:
                     action_mask[self.actions_to_indices[f'CLOSE_POSITION_{i}']] = 1
         
-        # No new positions allowed on expiry day
         if is_expiry_day:
             return action_mask
         
-        # Check available capacity for new positions
-        positions_count = len(self.portfolio)
-        available_slots = self.max_positions - positions_count
-        
-        # 4-leg strategies require 4 available slots
-        if available_slots >= 4:
+        if len(self.portfolio) <= self.max_positions - 4:
             action_mask[self.actions_to_indices['OPEN_LONG_IRON_FLY']] = 1
             action_mask[self.actions_to_indices['OPEN_SHORT_IRON_FLY']] = 1
             action_mask[self.actions_to_indices['OPEN_LONG_IRON_CONDOR']] = 1
             action_mask[self.actions_to_indices['OPEN_SHORT_IRON_CONDOR']] = 1
         
-        # 2-leg strategies require 2 available slots
-        if available_slots >= 2:
+        if len(self.portfolio) <= self.max_positions - 2:
             action_mask[self.actions_to_indices['OPEN_LONG_STRADDLE_ATM']] = 1
             action_mask[self.actions_to_indices['OPEN_SHORT_STRADDLE_ATM']] = 1
             action_mask[self.actions_to_indices['OPEN_LONG_STRANGLE_ATM_1']] = 1
             action_mask[self.actions_to_indices['OPEN_SHORT_STRANGLE_ATM_1']] = 1
         
-        # Single-leg strategies require 1 available slot
-        if available_slots >= 1:
-            # Get position counts for conflict checking
-            num_long_calls = len(self.portfolio.query("type == 'call' and direction == 'long'"))
-            num_short_calls = len(self.portfolio.query("type == 'call' and direction == 'short'"))
-            num_long_puts = len(self.portfolio.query("type == 'put' and direction == 'long'"))
-            num_short_puts = len(self.portfolio.query("type == 'put' and direction == 'short'"))
-            
-            # Get existing positions for strike conflict checking
-            existing_positions = {}
-            for _, row in self.portfolio.iterrows():
-                key = (row['strike_price'], row['type'])
-                existing_positions[key] = row['direction']
-            
-            # Calculate current market parameters
+        if len(self.portfolio) < self.max_positions:
             atm_price = int(self.current_price / self.strike_distance + 0.5) * self.strike_distance
             trading_days_left = self.time_to_expiry_days - current_trading_day
             days_to_expiry = trading_days_left * (self.total_days_in_week / self.trading_days_in_week)
             
-            # Check all single-leg actions
+            num_long_calls = len(self.portfolio.query("type == 'call' and direction == 'long'"))
+            num_short_calls = len(self.portfolio.query("type == 'call' and direction == 'short'"))
+            num_long_puts = len(self.portfolio.query("type == 'put' and direction == 'long'"))
+            num_short_puts = len(self.portfolio.query("type == 'put' and direction == 'short'"))
+            existing_positions = {(p['strike_price'], p['type']): p['direction'] for i, p in self.portfolio.iterrows()}
+            
             for offset in range(-5, 6):
                 strike_price = atm_price + offset * self.strike_distance
-                
                 for option_type in ['call', 'put']:
-                    # Get option characteristics
-                    _, signed_delta, _ = self._get_option_details(
-                        self.current_price, strike_price, days_to_expiry, option_type
-                    )
+                    _, signed_delta, _ = self._get_option_details(self.current_price, strike_price, days_to_expiry, option_type)
+                    abs_delta = abs(signed_delta)
+                    is_far_otm = abs_delta < self.otm_threshold
+                    is_far_itm = abs_delta > self.itm_threshold
                     
-                    # Determine if option is too far OTM/ITM
-                    if option_type == 'call':
-                        is_far_otm = signed_delta < self.otm_threshold
-                        is_far_itm = signed_delta > self.itm_threshold
-                    else:  # put
-                        is_far_otm = signed_delta > -self.otm_threshold
-                        is_far_itm = signed_delta < -self.itm_threshold
-                    
-                    # Long actions
                     action_name_long = f'OPEN_LONG_{option_type.upper()}_ATM{"+" if offset >=0 else ""}{offset}'
                     if action_name_long in self.actions_to_indices:
                         is_legal = True
-                        
-                        # Check OTM/ITM constraints
-                        if is_far_otm or is_far_itm:
-                            is_legal = False
-                        
-                        # Check conflicting positions at same strike
+                        if is_far_otm or is_far_itm: is_legal = False
                         conflict_type = 'put' if option_type == 'call' else 'call'
-                        conflict_key = (strike_price, conflict_type)
-                        if conflict_key in existing_positions and existing_positions[conflict_key] == 'short':
-                            is_legal = False
-                        
-                        # Check position limit
-                        if (option_type == 'call' and num_long_calls > 0) or \
-                           (option_type == 'put' and num_long_puts > 0):
-                            is_legal = False
-                        
-                        if is_legal:
-                            action_mask[self.actions_to_indices[action_name_long]] = 1
+                        if existing_positions.get((strike_price, conflict_type)) == 'short': is_legal = False
+                        if (option_type == 'call' and num_long_calls > 0) or (option_type == 'put' and num_long_puts > 0): is_legal = False
+                        if is_legal: action_mask[self.actions_to_indices[action_name_long]] = 1
                     
-                    # Short actions
                     action_name_short = f'OPEN_SHORT_{option_type.upper()}_ATM{"+" if offset >=0 else ""}{offset}'
                     if action_name_short in self.actions_to_indices:
                         is_legal = True
-                        
-                        # Check ITM constraint
-                        if is_far_itm:
-                            is_legal = False
-                        
-                        # Check conflicting positions at same strike
+                        if is_far_itm: is_legal = False
                         conflict_type = 'put' if option_type == 'call' else 'call'
-                        conflict_key = (strike_price, conflict_type)
-                        if conflict_key in existing_positions and existing_positions[conflict_key] == 'long':
-                            is_legal = False
-                        
-                        # Check position limit
-                        if (option_type == 'call' and num_short_calls > 0) or \
-                           (option_type == 'put' and num_short_puts > 0):
-                            is_legal = False
-                        
-                        if is_legal:
-                            action_mask[self.actions_to_indices[action_name_short]] = 1
+                        if existing_positions.get((strike_price, conflict_type)) == 'long': is_legal = False
+                        if (option_type == 'call' and num_short_calls > 0) or (option_type == 'put' and num_short_puts > 0): is_legal = False
+                        if is_legal: action_mask[self.actions_to_indices[action_name_short]] = 1
         
         return action_mask
 
