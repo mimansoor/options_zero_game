@@ -72,6 +72,7 @@ def _numba_delta(S: float, K: float, T: float, r: float, sigma: float, is_call: 
 
 @ENV_REGISTRY.register('options_zero_game')
 class OptionsZeroGameEnv(gym.Env):
+    VERSION = "1.0"
     metadata = {'render.modes': ['human']}
 
     config = dict(
@@ -188,20 +189,16 @@ class OptionsZeroGameEnv(gym.Env):
         random.seed(seed)
         return [seed]
 
-    # <<< FIX 1: GARCH Simulation Fix
     def _generate_price_path(self) -> None:
         returns = np.zeros(self.total_steps + 1, dtype=np.float32)
         variances = np.zeros(self.total_steps + 1, dtype=np.float32)
-        
         initial_variance = self.omega / max(1e-9, (1 - self.alpha - self.beta))
         variances[0] = initial_variance
-        
         for t in range(1, self.total_steps + 1):
             shock = self.np_random.normal(0, 1)
             returns[t] = self.trend + math.sqrt(variances[t-1]) * shock
             variances[t] = self.omega + self.alpha * (returns[t]**2) + self.beta * variances[t-1]
             variances[t] = max(1e-9, variances[t])
-        
         cumulative_returns = np.cumsum(returns)
         self.price_path = self.start_price * np.exp(cumulative_returns)
 
@@ -215,14 +212,12 @@ class OptionsZeroGameEnv(gym.Env):
     def _get_option_details(self, underlying_price: float, strike_price: float, days_to_expiry: float, option_type: str) -> Tuple[float, float, float]:
         if underlying_price <= 0 or strike_price <= 0 or days_to_expiry < 0:
             return 0.0, 0.0, 0.0
-            
         t = days_to_expiry / 365.25
         is_call = option_type == 'call'
         if t < 1e-6:
             intrinsic = max(0.0, underlying_price - strike_price) if is_call else max(0.0, strike_price - underlying_price)
             delta_val = 1.0 if intrinsic > 0 else 0.0
             return intrinsic, delta_val, 0.0
-        
         try:
             atm_price = int(underlying_price / self.strike_distance + 0.5) * self.strike_distance
             offset = round((strike_price - atm_price) / self.strike_distance)
@@ -235,7 +230,6 @@ class OptionsZeroGameEnv(gym.Env):
                 if d1_denominator < 1e-8: return 0.0, 0.0, 0.0
                 d1 = (math.log(underlying_price / strike_price) + (self.risk_free_rate + 0.5 * vol ** 2) * t) / d1_denominator
                 d2 = d1 - vol * math.sqrt(t)
-            
             assert math.isfinite(price) and math.isfinite(signed_delta)
             return price, signed_delta, d2
         except (ValueError, ZeroDivisionError):
@@ -275,16 +269,13 @@ class OptionsZeroGameEnv(gym.Env):
             self.alpha = self.alpha / (total + 0.01)
             self.beta = self.beta / (total + 0.01)
         
-        # <<< FIX 1: GARCH Implied Volatility Calculation
         unconditional_variance = self.omega / (1 - self.alpha - self.beta)
         self.garch_implied_vol: float = math.sqrt(unconditional_variance * 252)
         
-        # <<< FIX 8: Price Path Initialization Fix
         self.price_path = np.zeros(self.total_steps + 1, dtype=np.float32)
         self.realized_vol_series = np.zeros(self.total_steps + 1, dtype=np.float32)
         self._generate_price_path()
         
-        # <<< FIX 9: Proper Initialization
         self.current_step: int = 0
         self.day_of_week: int = 0
         self.current_price: float = self.price_path[0]
@@ -296,7 +287,6 @@ class OptionsZeroGameEnv(gym.Env):
         self.next_creation_id: int = 0
         return self._get_observation()
 
-    # <<< FIX 4: Position Closing Logic Fix
     def _close_position(self, position_index: int) -> None:
         if position_index < 0:
             position_index = len(self.portfolio) + position_index
@@ -333,7 +323,6 @@ class OptionsZeroGameEnv(gym.Env):
         else:
             return self.actions_to_indices['HOLD']
 
-    # <<< FIX 5 & 8: Time Decay and Volatility Calculation Fix
     def _advance_time_and_market(self) -> None:
         self.current_step += 1
         time_decay_days = 1.0 / self.steps_per_day
@@ -411,12 +400,50 @@ class OptionsZeroGameEnv(gym.Env):
         }
         return BaseEnvTimestep(obs, final_reward, done, info)
 
+    # <<< MODULARIZATION: A clean dispatcher
     def _handle_open_action(self, action_name: str) -> None:
         if 'IRON_CONDOR' in action_name: self._open_iron_condor(action_name)
         elif 'IRON_FLY' in action_name: self._open_iron_fly(action_name)
         elif 'STRANGLE' in action_name: self._open_strangle(action_name)
         elif 'STRADDLE' in action_name: self._open_straddle(action_name)
         else: self._open_single_leg(action_name)
+
+    # <<< MODULARIZATION: Helper function to execute trades
+    def _execute_trades(self, trades_to_execute: List[Dict], strategy_pnl: Dict) -> None:
+        if not trades_to_execute: return
+        
+        strategy_id = self.next_creation_id
+        self.next_creation_id += 1
+        
+        for trade in trades_to_execute:
+            trade['creation_id'] = self.next_creation_id
+            self.next_creation_id += 1
+            trade['strategy_id'] = strategy_id
+            trade['strategy_max_profit'] = strategy_pnl['max_profit']
+            trade['strategy_max_loss'] = strategy_pnl['max_loss']
+            
+        new_positions_df = pd.DataFrame(trades_to_execute)
+        self.portfolio = pd.concat([self.portfolio, new_positions_df], ignore_index=True)
+
+    # <<< MODULARIZATION: Helper function to calculate PnL for multi-leg strategies
+    def _calculate_strategy_pnl(self, legs: List[Dict], strategy_type: str, width1: float = 0, width2: float = 0) -> Dict:
+        direction = legs[0]['direction']
+        net_premium = sum(t['entry_premium'] * (1 if t['direction'] == 'long' else -1) for t in legs)
+        
+        if strategy_type in ['STRADDLE', 'STRANGLE']:
+            max_profit = self.undefined_risk_cap if direction == 'long' else net_premium * self.lot_size
+            max_loss = -net_premium * self.lot_size if direction == 'long' else -self.undefined_risk_cap
+        elif strategy_type in ['IRON_FLY', 'IRON_CONDOR']:
+            if direction == 'short':
+                max_profit = net_premium * self.lot_size
+                max_loss = - (max(width1, width2) * self.lot_size - max_profit)
+            else: # long
+                max_loss = -net_premium * self.lot_size
+                max_profit = (max(width1, width2) * self.lot_size) + max_loss
+        else:
+            max_profit, max_loss = 0.0, 0.0
+            
+        return {'max_profit': max_profit, 'max_loss': max_loss}
 
     def _open_single_leg(self, action_name: str) -> None:
         if len(self.portfolio) >= self.max_positions: return
@@ -436,192 +463,100 @@ class OptionsZeroGameEnv(gym.Env):
 
     def _open_straddle(self, action_name: str) -> None:
         if len(self.portfolio) > self.max_positions - 2: return
-        current_trading_day = self.current_step // self.steps_per_day
-        trading_days_left = self.time_to_expiry_days - current_trading_day
-        days_to_expiry = trading_days_left * (self.total_days_in_week / self.trading_days_in_week)
-        atm_price = int(self.current_price / self.strike_distance + 0.5) * self.strike_distance
-        direction = 'long' if 'LONG' in action_name else 'short'
-        is_buy = (direction == 'long')
-        trades_to_execute = []
-        mid_price_call, _, _ = self._get_option_details(self.current_price, atm_price, days_to_expiry, 'call')
-        trades_to_execute.append({'type': 'call', 'direction': direction, 'strike_price': atm_price, 'entry_premium': self._get_option_price(mid_price_call, is_buy)})
-        mid_price_put, _, _ = self._get_option_details(self.current_price, atm_price, days_to_expiry, 'put')
-        trades_to_execute.append({'type': 'put', 'direction': direction, 'strike_price': atm_price, 'entry_premium': self._get_option_price(mid_price_put, is_buy)})
-        
-        net_premium = sum(t['entry_premium'] for t in trades_to_execute)
-        max_profit = self.undefined_risk_cap if direction == 'long' else net_premium * self.lot_size
-        max_loss = -net_premium * self.lot_size if direction == 'long' else -self.undefined_risk_cap
-        
-        # <<< FIX 7: Strategy ID Conflict Fix
-        strategy_id = self.next_creation_id
-        self.next_creation_id += 1
-        for trade in trades_to_execute:
-            trade['creation_id'] = self.next_creation_id
-            self.next_creation_id += 1
-            trade['strategy_id'] = strategy_id
-            trade['strategy_max_profit'] = max_profit
-            trade['strategy_max_loss'] = max_loss
-            
-        if trades_to_execute:
-            new_positions_df = pd.DataFrame(trades_to_execute)
-            self.portfolio = pd.concat([self.portfolio, new_positions_df], ignore_index=True)
+        legs = self._get_trade_legs(action_name)
+        pnl = self._calculate_strategy_pnl(legs, 'STRADDLE')
+        self._execute_trades(legs, pnl)
 
     def _open_strangle(self, action_name: str) -> None:
         if len(self.portfolio) > self.max_positions - 2: return
-        current_trading_day = self.current_step // self.steps_per_day
-        trading_days_left = self.time_to_expiry_days - current_trading_day
-        days_to_expiry = trading_days_left * (self.total_days_in_week / self.trading_days_in_week)
-        atm_price = int(self.current_price / self.strike_distance + 0.5) * self.strike_distance
-        direction = 'long' if 'LONG' in action_name else 'short'
-        is_buy = (direction == 'long')
-        trades_to_execute = []
-        call_strike = atm_price + (1 * self.strike_distance)
-        mid_price_call, _, _ = self._get_option_details(self.current_price, call_strike, days_to_expiry, 'call')
-        trades_to_execute.append({'type': 'call', 'direction': direction, 'strike_price': call_strike, 'entry_premium': self._get_option_price(mid_price_call, is_buy)})
-        put_strike = atm_price - (1 * self.strike_distance)
-        mid_price_put, _, _ = self._get_option_details(self.current_price, put_strike, days_to_expiry, 'put')
-        trades_to_execute.append({'type': 'put', 'direction': direction, 'strike_price': put_strike, 'entry_premium': self._get_option_price(mid_price_put, is_buy)})
-        
-        net_premium = sum(t['entry_premium'] for t in trades_to_execute)
-        max_profit = self.undefined_risk_cap if direction == 'long' else net_premium * self.lot_size
-        max_loss = -net_premium * self.lot_size if direction == 'long' else -self.undefined_risk_cap
-        
-        strategy_id = self.next_creation_id
-        self.next_creation_id += 1
-        for trade in trades_to_execute:
-            trade['creation_id'] = self.next_creation_id
-            self.next_creation_id += 1
-            trade['strategy_id'] = strategy_id
-            trade['strategy_max_profit'] = max_profit
-            trade['strategy_max_loss'] = max_loss
-            
-        if trades_to_execute:
-            new_positions_df = pd.DataFrame(trades_to_execute)
-            self.portfolio = pd.concat([self.portfolio, new_positions_df], ignore_index=True)
+        legs = self._get_trade_legs(action_name)
+        pnl = self._calculate_strategy_pnl(legs, 'STRANGLE')
+        self._execute_trades(legs, pnl)
 
     def _open_iron_fly(self, action_name: str) -> None:
         if len(self.portfolio) > self.max_positions - 4: return
-        current_trading_day = self.current_step // self.steps_per_day
-        trading_days_left = self.time_to_expiry_days - current_trading_day
-        days_to_expiry = trading_days_left * (self.total_days_in_week / self.trading_days_in_week)
-        atm_price = int(self.current_price / self.strike_distance + 0.5) * self.strike_distance
-        direction = 'long' if 'LONG' in action_name else 'short'
-        trades_to_execute = []
-        mid_price_call_atm, _, _ = self._get_option_details(self.current_price, atm_price, days_to_expiry, 'call')
-        premium_call_atm = self._get_option_price(mid_price_call_atm, is_buy=(direction == 'long'))
-        mid_price_put_atm, _, _ = self._get_option_details(self.current_price, atm_price, days_to_expiry, 'put')
-        premium_put_atm = self._get_option_price(mid_price_put_atm, is_buy=(direction == 'long'))
-        net_premium = premium_call_atm + premium_put_atm
-        upper_breakeven = atm_price + net_premium
-        lower_breakeven = atm_price - net_premium
-        hedge_strike_call = int(upper_breakeven / self.strike_distance + 0.5) * self.strike_distance
-        hedge_strike_put = int(lower_breakeven / self.strike_distance + 0.5) * self.strike_distance
-        straddle_dir = 'long' if direction == 'long' else 'short'
-        hedge_dir = 'short' if direction == 'long' else 'long'
-        trades_to_execute.append({'type': 'call', 'direction': straddle_dir, 'strike_price': atm_price, 'entry_premium': premium_call_atm})
-        trades_to_execute.append({'type': 'put', 'direction': straddle_dir, 'strike_price': atm_price, 'entry_premium': premium_put_atm})
-        mid_price_hedge_call, _, _ = self._get_option_details(self.current_price, hedge_strike_call, days_to_expiry, 'call')
-        trades_to_execute.append({'type': 'call', 'direction': hedge_dir, 'strike_price': hedge_strike_call, 'entry_premium': self._get_option_price(mid_price_hedge_call, hedge_dir == 'long')})
-        mid_price_hedge_put, _, _ = self._get_option_details(self.current_price, hedge_strike_put, days_to_expiry, 'put')
-        trades_to_execute.append({'type': 'put', 'direction': hedge_dir, 'strike_price': hedge_strike_put, 'entry_premium': self._get_option_price(mid_price_hedge_put, hedge_dir == 'long')})
-        
-        net_premium_straddle = trades_to_execute[0]['entry_premium'] + trades_to_execute[1]['entry_premium']
-        net_premium_hedge = trades_to_execute[2]['entry_premium'] + trades_to_execute[3]['entry_premium']
-        net_premium = net_premium_straddle - net_premium_hedge
-        
-        if direction == 'short':
-            max_profit = net_premium * self.lot_size
-            max_loss = -((hedge_strike_call - atm_price) * self.lot_size - max_profit)
-        else:
-            max_loss = -net_premium * self.lot_size
-            max_profit = ((hedge_strike_call - atm_price) * self.lot_size) + max_loss
+        legs = self._get_trade_legs(action_name)
+        if not legs: return
+        width = abs(legs[2]['strike_price'] - legs[0]['strike_price'])
+        pnl = self._calculate_strategy_pnl(legs, 'IRON_FLY', width, width)
+        self._execute_trades(legs, pnl)
 
-        strategy_id = self.next_creation_id
-        self.next_creation_id += 1
-        for trade in trades_to_execute:
-            trade['creation_id'] = self.next_creation_id
-            self.next_creation_id += 1
-            trade['strategy_id'] = strategy_id
-            trade['strategy_max_profit'] = max_profit
-            trade['strategy_max_loss'] = max_loss
-            
-        if trades_to_execute:
-            new_positions_df = pd.DataFrame(trades_to_execute)
-            self.portfolio = pd.concat([self.portfolio, new_positions_df], ignore_index=True)
-
-    # <<< FIX 3: Iron Condor Strike Selection Fix
     def _open_iron_condor(self, action_name: str) -> None:
         if len(self.portfolio) > self.max_positions - 4: return
+        legs = self._get_trade_legs(action_name)
+        if not legs: return
+        call_width = abs(legs[2]['strike_price'] - legs[0]['strike_price'])
+        put_width = abs(legs[3]['strike_price'] - legs[1]['strike_price'])
+        pnl = self._calculate_strategy_pnl(legs, 'IRON_CONDOR', call_width, put_width)
+        self._execute_trades(legs, pnl)
+
+    def _get_trade_legs(self, action_name: str) -> List[Dict]:
         current_trading_day = self.current_step // self.steps_per_day
         trading_days_left = self.time_to_expiry_days - current_trading_day
         days_to_expiry = trading_days_left * (self.total_days_in_week / self.trading_days_in_week)
         atm_price = int(self.current_price / self.strike_distance + 0.5) * self.strike_distance
         direction = 'long' if 'LONG' in action_name else 'short'
         
-        call_strikes = []
-        for offset in range(1, 15):
-            strike = atm_price + offset * self.strike_distance
-            _, signed_delta, _ = self._get_option_details(self.current_price, strike, days_to_expiry, 'call')
-            if 0.15 < signed_delta < 0.35:
-                call_strikes.append(strike)
-            if len(call_strikes) >= 2: break
-        if len(call_strikes) < 2:
-            call_strikes = [atm_price + 2 * self.strike_distance, atm_price + 3 * self.strike_distance]
+        legs = []
+        if 'STRADDLE' in action_name:
+            legs.append({'type': 'call', 'direction': direction, 'strike_price': atm_price})
+            legs.append({'type': 'put', 'direction': direction, 'strike_price': atm_price})
+        elif 'STRANGLE' in action_name:
+            legs.append({'type': 'call', 'direction': direction, 'strike_price': atm_price + self.strike_distance})
+            legs.append({'type': 'put', 'direction': direction, 'strike_price': atm_price - self.strike_distance})
+        elif 'IRON_FLY' in action_name:
+            straddle_dir = 'long' if direction == 'long' else 'short'
+            hedge_dir = 'short' if direction == 'long' else 'long'
+            mid_price_call_atm, _, _ = self._get_option_details(self.current_price, atm_price, days_to_expiry, 'call')
+            premium_call_atm = self._get_option_price(mid_price_call_atm, is_buy=(straddle_dir == 'long'))
+            mid_price_put_atm, _, _ = self._get_option_details(self.current_price, atm_price, days_to_expiry, 'put')
+            premium_put_atm = self._get_option_price(mid_price_put_atm, is_buy=(straddle_dir == 'long'))
+            net_premium = premium_call_atm + premium_put_atm
+            upper_breakeven = atm_price + net_premium
+            lower_breakeven = atm_price - net_premium
+            hedge_strike_call = int(upper_breakeven / self.strike_distance + 0.5) * self.strike_distance
+            hedge_strike_put = int(lower_breakeven / self.strike_distance + 0.5) * self.strike_distance
+            legs.append({'type': 'call', 'direction': straddle_dir, 'strike_price': atm_price, 'entry_premium': premium_call_atm})
+            legs.append({'type': 'put', 'direction': straddle_dir, 'strike_price': atm_price, 'entry_premium': premium_put_atm})
+            mid_price_hedge_call, _, _ = self._get_option_details(self.current_price, hedge_strike_call, days_to_expiry, 'call')
+            legs.append({'type': 'call', 'direction': hedge_dir, 'strike_price': hedge_strike_call, 'entry_premium': self._get_option_price(mid_price_hedge_call, hedge_dir == 'long')})
+            mid_price_hedge_put, _, _ = self._get_option_details(self.current_price, hedge_strike_put, days_to_expiry, 'put')
+            legs.append({'type': 'put', 'direction': hedge_dir, 'strike_price': hedge_strike_put, 'entry_premium': self._get_option_price(mid_price_hedge_put, hedge_dir == 'long')})
+            return legs # Return early as premiums are already calculated
+        elif 'IRON_CONDOR' in action_name:
+            call_strikes = []
+            for offset in range(1, 15):
+                strike = atm_price + offset * self.strike_distance
+                _, signed_delta, _ = self._get_option_details(self.current_price, strike, days_to_expiry, 'call')
+                if 0.15 < signed_delta < 0.35: call_strikes.append(strike)
+                if len(call_strikes) >= 2: break
+            if len(call_strikes) < 2: call_strikes = [atm_price + 2 * self.strike_distance, atm_price + 3 * self.strike_distance]
+            put_strikes = []
+            for offset in range(1, 15):
+                strike = atm_price - offset * self.strike_distance
+                _, signed_delta, _ = self._get_option_details(self.current_price, strike, days_to_expiry, 'put')
+                if -0.35 < signed_delta < -0.15: put_strikes.append(strike)
+                if len(put_strikes) >= 2: break
+            if len(put_strikes) < 2: put_strikes = [atm_price - 2 * self.strike_distance, atm_price - 3 * self.strike_distance]
+            short_call_strike = min(call_strikes)
+            long_call_strike = max(call_strikes)
+            short_put_strike = max(put_strikes)
+            long_put_strike = min(put_strikes)
+            if not (long_put_strike < short_put_strike <= atm_price <= short_call_strike < long_call_strike): return []
+            inner_dir = 'long' if direction == 'long' else 'short'
+            outer_dir = 'short' if direction == 'long' else 'long'
+            legs.append({'type': 'call', 'direction': inner_dir, 'strike_price': short_call_strike})
+            legs.append({'type': 'put', 'direction': inner_dir, 'strike_price': short_put_strike})
+            legs.append({'type': 'call', 'direction': outer_dir, 'strike_price': long_call_strike})
+            legs.append({'type': 'put', 'direction': outer_dir, 'strike_price': long_put_strike})
 
-        put_strikes = []
-        for offset in range(1, 15):
-            strike = atm_price - offset * self.strike_distance
-            _, signed_delta, _ = self._get_option_details(self.current_price, strike, days_to_expiry, 'put')
-            if -0.35 < signed_delta < -0.15:
-                put_strikes.append(strike)
-            if len(put_strikes) >= 2: break
-        if len(put_strikes) < 2:
-            put_strikes = [atm_price - 2 * self.strike_distance, atm_price - 3 * self.strike_distance]
-
-        short_call_strike = min(call_strikes)
-        long_call_strike = max(call_strikes)
-        short_put_strike = max(put_strikes)
-        long_put_strike = min(put_strikes)
-        
-        if not (long_put_strike < short_put_strike <= atm_price <= short_call_strike < long_call_strike):
-            return
-
-        trades_to_execute = []
-        inner_dir = 'long' if direction == 'long' else 'short'
-        outer_dir = 'short' if direction == 'long' else 'long'
-        mid_price_call_inner, _, _ = self._get_option_details(self.current_price, short_call_strike, days_to_expiry, 'call')
-        trades_to_execute.append({'type': 'call', 'direction': inner_dir, 'strike_price': short_call_strike, 'entry_premium': self._get_option_price(mid_price_call_inner, inner_dir == 'long')})
-        mid_price_put_inner, _, _ = self._get_option_details(self.current_price, short_put_strike, days_to_expiry, 'put')
-        trades_to_execute.append({'type': 'put', 'direction': inner_dir, 'strike_price': short_put_strike, 'entry_premium': self._get_option_price(mid_price_put_inner, inner_dir == 'long')})
-        mid_price_call_outer, _, _ = self._get_option_details(self.current_price, long_call_strike, days_to_expiry, 'call')
-        trades_to_execute.append({'type': 'call', 'direction': outer_dir, 'strike_price': long_call_strike, 'entry_premium': self._get_option_price(mid_price_call_outer, outer_dir == 'long')})
-        mid_price_put_outer, _, _ = self._get_option_details(self.current_price, long_put_strike, days_to_expiry, 'put')
-        trades_to_execute.append({'type': 'put', 'direction': outer_dir, 'strike_price': long_put_strike, 'entry_premium': self._get_option_price(mid_price_put_outer, outer_dir == 'long')})
-        
-        net_premium = sum(t['entry_premium'] * (1 if t['direction'] == inner_dir else -1) for t in trades_to_execute)
-        
-        call_spread_width = long_call_strike - short_call_strike
-        put_spread_width = short_put_strike - long_put_strike
-        
-        if direction == 'short':
-            max_profit = net_premium * self.lot_size
-            max_loss = - (max(call_spread_width, put_spread_width) * self.lot_size - max_profit)
-        else:
-            max_loss = -net_premium * self.lot_size
-            max_profit = (max(call_spread_width, put_spread_width) * self.lot_size) + max_loss
-
-        strategy_id = self.next_creation_id
-        self.next_creation_id += 1
-        for trade in trades_to_execute:
-            trade['creation_id'] = self.next_creation_id
-            self.next_creation_id += 1
-            trade['strategy_id'] = strategy_id
-            trade['strategy_max_profit'] = max_profit
-            trade['strategy_max_loss'] = max_loss
-            
-        if trades_to_execute:
-            new_positions_df = pd.DataFrame(trades_to_execute)
-            self.portfolio = pd.concat([self.portfolio, new_positions_df], ignore_index=True)
+        for leg in legs:
+            is_buy = leg['direction'] == 'long'
+            mid_price, _, _ = self._get_option_details(self.current_price, leg['strike_price'], days_to_expiry, leg['type'])
+            leg['entry_premium'] = self._get_option_price(mid_price, is_buy)
+            leg['days_to_expiry'] = days_to_expiry
+            leg['entry_step'] = self.current_step
+        return legs
 
     def _get_true_action_mask(self) -> np.ndarray:
         action_mask = np.zeros(self.action_space_size, dtype=np.int8)
@@ -667,11 +602,10 @@ class OptionsZeroGameEnv(gym.Env):
                 for option_type in ['call', 'put']:
                     _, signed_delta, _ = self._get_option_details(self.current_price, strike_price, days_to_expiry, option_type)
                     
-                    # <<< FIX 6: Delta Threshold Fix
                     if option_type == 'call':
                         is_far_otm = signed_delta < self.otm_threshold
                         is_far_itm = signed_delta > self.itm_threshold
-                    else: # put
+                    else:
                         is_far_otm = signed_delta > -self.otm_threshold
                         is_far_itm = signed_delta < -self.itm_threshold
                     
