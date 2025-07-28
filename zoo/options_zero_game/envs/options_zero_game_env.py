@@ -214,25 +214,45 @@ class OptionsZeroGameEnv(gym.Env):
             return 0.0, 0.0, 0.0
         t = days_to_expiry / 365.25
         is_call = option_type == 'call'
-        if t < 1e-6:
+
+        # Handle near-expiry cases
+        if t <= 1e-6:
             intrinsic = max(0.0, underlying_price - strike_price) if is_call else max(0.0, strike_price - underlying_price)
-            delta_val = 1.0 if intrinsic > 0 else 0.0
-            return intrinsic, delta_val, 0.0
+            return intrinsic, 1.0 if intrinsic > 0 else 0.0, 0.0
+
         try:
             atm_price = int(underlying_price / self.strike_distance + 0.5) * self.strike_distance
             offset = round((strike_price - atm_price) / self.strike_distance)
             vol = self._get_implied_volatility(offset, option_type)
-            price = _numba_black_scholes(underlying_price, strike_price, t, self.risk_free_rate, vol, is_call)
-            signed_delta = _numba_delta(underlying_price, strike_price, t, self.risk_free_rate, vol, is_call)
+
+            # Handle near-zero volatility cases
+            if vol <= 1e-6:
+                intrinsic = max(0.0, underlying_price - strike_price) if is_call else max(0.0, strike_price - underlying_price)
+                return intrinsic, 1.0 if intrinsic > 0 else 0.0, 0.0
+
+            # Calculate with fallback to intrinsic value on numerical errors
+            try:
+                price = _numba_black_scholes(underlying_price, strike_price, t, self.risk_free_rate, vol, is_call)
+                signed_delta = _numba_delta(underlying_price, strike_price, t, self.risk_free_rate, vol, is_call)
+            except (ValueError, ZeroDivisionError):
+                intrinsic = max(0.0, underlying_price - strike_price) if is_call else max(0.0, strike_price - underlying_price)
+                return intrinsic, 1.0 if intrinsic > 0 else 0.0, 0.0
+
+            # Ensure finite values
+            if not (math.isfinite(price) and math.isfinite(signed_delta)):
+                intrinsic = max(0.0, underlying_price - strike_price) if is_call else max(0.0, strike_price - underlying_price)
+                return intrinsic, 1.0 if intrinsic > 0 else 0.0, 0.0
+
+            # Calculate d2 safely
             d2 = 0.0
             if vol > 1e-6:
                 d1_denominator = vol * math.sqrt(t)
-                if d1_denominator < 1e-8: return 0.0, 0.0, 0.0
-                d1 = (math.log(underlying_price / strike_price) + (self.risk_free_rate + 0.5 * vol ** 2) * t) / d1_denominator
-                d2 = d1 - vol * math.sqrt(t)
-            assert math.isfinite(price) and math.isfinite(signed_delta)
+                if d1_denominator >= 1e-8:
+                    d1 = (math.log(underlying_price / strike_price) + (self.risk_free_rate + 0.5 * vol ** 2) * t) / d1_denominator
+                    d2 = d1 - vol * math.sqrt(t)
+
             return price, signed_delta, d2
-        except (ValueError, ZeroDivisionError):
+        except Exception:
             return 0.0, 0.0, 0.0
 
     def _get_option_price(self, mid_price: float, is_buy: bool) -> float:
