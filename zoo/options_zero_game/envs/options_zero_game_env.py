@@ -572,7 +572,7 @@ class OptionsZeroGameEnv(gym.Env):
         if is_expiry_day:
             return action_mask
         
-        if len(self.portfolio) == self.max_positions
+        if len(self.portfolio) == self.max_positions:
             return action_mask
 
         # Check for 4-leg strategies.
