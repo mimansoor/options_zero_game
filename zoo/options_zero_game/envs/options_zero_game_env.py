@@ -38,7 +38,7 @@ def _numba_cdf(x):
 
 @jit(nopython=True)
 def _numba_black_scholes(S: float, K: float, T: float, r: float, sigma: float, is_call: bool) -> float:
-    if T <= 1e-6:
+    if T <= 1e-6 or K <= 1e-6 or S <= 1e-6:
         if is_call: return max(0.0, S - K)
         else: return max(0.0, K - S)
     if sigma <= 1e-6:
@@ -58,7 +58,7 @@ def _numba_black_scholes(S: float, K: float, T: float, r: float, sigma: float, i
 
 @jit(nopython=True)
 def _numba_delta(S: float, K: float, T: float, r: float, sigma: float, is_call: bool) -> float:
-    if T <= 1e-6 or sigma <= 1e-6:
+    if T <= 1e-6 or sigma <= 1e-6 or K <= 1e-6 or S <= 1e-6:
         if is_call: return 1.0 if S > K else 0.0
         else: return -1.0 if S < K else 0.0
     
@@ -337,6 +337,11 @@ class OptionsZeroGameEnv(gym.Env):
         if not self.portfolio.empty:
             self.portfolio['days_to_expiry'] = (self.portfolio['days_to_expiry'] - time_decay_days).clip(lower=0)
             
+            expired_indices = self.portfolio[self.portfolio['days_to_expiry'] <= 1e-6].index
+            if not expired_indices.empty:
+                for idx in sorted(expired_indices, reverse=True):
+                    self._close_position(idx)
+            
         if self.current_step >= 1:
             window_size = self.rolling_vol_window * self.steps_per_day
             start_idx = max(0, self.current_step - window_size + 1)
@@ -400,7 +405,6 @@ class OptionsZeroGameEnv(gym.Env):
         }
         return BaseEnvTimestep(obs, final_reward, done, info)
 
-    # <<< MODULARIZATION: A clean dispatcher
     def _handle_open_action(self, action_name: str) -> None:
         if 'IRON_CONDOR' in action_name: self._open_iron_condor(action_name)
         elif 'IRON_FLY' in action_name: self._open_iron_fly(action_name)
@@ -408,7 +412,6 @@ class OptionsZeroGameEnv(gym.Env):
         elif 'STRADDLE' in action_name: self._open_straddle(action_name)
         else: self._open_single_leg(action_name)
 
-    # <<< MODULARIZATION: Helper function to execute trades
     def _execute_trades(self, trades_to_execute: List[Dict], strategy_pnl: Dict) -> None:
         if not trades_to_execute: return
         
@@ -425,70 +428,26 @@ class OptionsZeroGameEnv(gym.Env):
         new_positions_df = pd.DataFrame(trades_to_execute)
         self.portfolio = pd.concat([self.portfolio, new_positions_df], ignore_index=True)
 
-    # <<< MODULARIZATION: Helper function to calculate PnL for multi-leg strategies
     def _calculate_strategy_pnl(self, legs: List[Dict], strategy_type: str, width1: float = 0, width2: float = 0) -> Dict:
-        direction = legs[0]['direction']
-        net_premium = sum(t['entry_premium'] * (1 if t['direction'] == 'long' else -1) for t in legs)
+        net_premium = sum(leg['entry_premium'] * (1 if leg['direction'] == 'long' else -1) for leg in legs)
         
         if strategy_type in ['STRADDLE', 'STRANGLE']:
+            direction = legs[0]['direction']
             max_profit = self.undefined_risk_cap if direction == 'long' else net_premium * self.lot_size
             max_loss = -net_premium * self.lot_size if direction == 'long' else -self.undefined_risk_cap
         elif strategy_type in ['IRON_FLY', 'IRON_CONDOR']:
+            direction = 'short' if 'SHORT' in legs[0].get('action_name', '') else 'long'
+            max_width = max(width1, width2) * self.lot_size
             if direction == 'short':
                 max_profit = net_premium * self.lot_size
-                max_loss = - (max(width1, width2) * self.lot_size - max_profit)
-            else: # long
+                max_loss = -max_width + max_profit
+            else:
                 max_loss = -net_premium * self.lot_size
-                max_profit = (max(width1, width2) * self.lot_size) + max_loss
+                max_profit = max_width + max_loss
         else:
             max_profit, max_loss = 0.0, 0.0
             
         return {'max_profit': max_profit, 'max_loss': max_loss}
-
-    def _open_single_leg(self, action_name: str) -> None:
-        if len(self.portfolio) >= self.max_positions: return
-        current_trading_day = self.current_step // self.steps_per_day
-        trading_days_left = self.time_to_expiry_days - current_trading_day
-        days_to_expiry = trading_days_left * (self.total_days_in_week / self.trading_days_in_week)
-        atm_price = int(self.current_price / self.strike_distance + 0.5) * self.strike_distance
-        _, direction, type, strike_str = action_name.split('_')
-        offset = int(strike_str.replace('ATM', ''))
-        strike_price = atm_price + (offset * self.strike_distance)
-        is_buy = (direction == 'LONG')
-        mid_price, _, _ = self._get_option_details(self.current_price, strike_price, days_to_expiry, type.lower())
-        entry_premium = self._get_option_price(mid_price, is_buy)
-        new_position = pd.DataFrame([{'type': type.lower(), 'direction': direction.lower(), 'entry_step': self.current_step, 'strike_price': strike_price, 'entry_premium': entry_premium, 'days_to_expiry': days_to_expiry, 'creation_id': self.next_creation_id, 'strategy_id': -1, 'strategy_max_profit': 0.0, 'strategy_max_loss': 0.0}])
-        self.next_creation_id += 1
-        self.portfolio = pd.concat([self.portfolio, new_position], ignore_index=True)
-
-    def _open_straddle(self, action_name: str) -> None:
-        if len(self.portfolio) > self.max_positions - 2: return
-        legs = self._get_trade_legs(action_name)
-        pnl = self._calculate_strategy_pnl(legs, 'STRADDLE')
-        self._execute_trades(legs, pnl)
-
-    def _open_strangle(self, action_name: str) -> None:
-        if len(self.portfolio) > self.max_positions - 2: return
-        legs = self._get_trade_legs(action_name)
-        pnl = self._calculate_strategy_pnl(legs, 'STRANGLE')
-        self._execute_trades(legs, pnl)
-
-    def _open_iron_fly(self, action_name: str) -> None:
-        if len(self.portfolio) > self.max_positions - 4: return
-        legs = self._get_trade_legs(action_name)
-        if not legs: return
-        width = abs(legs[2]['strike_price'] - legs[0]['strike_price'])
-        pnl = self._calculate_strategy_pnl(legs, 'IRON_FLY', width, width)
-        self._execute_trades(legs, pnl)
-
-    def _open_iron_condor(self, action_name: str) -> None:
-        if len(self.portfolio) > self.max_positions - 4: return
-        legs = self._get_trade_legs(action_name)
-        if not legs: return
-        call_width = abs(legs[2]['strike_price'] - legs[0]['strike_price'])
-        put_width = abs(legs[3]['strike_price'] - legs[1]['strike_price'])
-        pnl = self._calculate_strategy_pnl(legs, 'IRON_CONDOR', call_width, put_width)
-        self._execute_trades(legs, pnl)
 
     def _get_trade_legs(self, action_name: str) -> List[Dict]:
         current_trading_day = self.current_step // self.steps_per_day
@@ -514,15 +473,20 @@ class OptionsZeroGameEnv(gym.Env):
             net_premium = premium_call_atm + premium_put_atm
             upper_breakeven = atm_price + net_premium
             lower_breakeven = atm_price - net_premium
-            hedge_strike_call = int(upper_breakeven / self.strike_distance + 0.5) * self.strike_distance
-            hedge_strike_put = int(lower_breakeven / self.strike_distance + 0.5) * self.strike_distance
+            
+            max_strike = atm_price + 5 * self.strike_distance
+            min_strike = atm_price - 5 * self.strike_distance
+            hedge_strike_call = min(max_strike, max(0, int(upper_breakeven / self.strike_distance + 0.5) * self.strike_distance))
+            hedge_strike_put = max(min_strike, max(0, int(lower_breakeven / self.strike_distance + 0.5) * self.strike_distance))
+            if hedge_strike_put <= 0: return []
+
             legs.append({'type': 'call', 'direction': straddle_dir, 'strike_price': atm_price, 'entry_premium': premium_call_atm})
             legs.append({'type': 'put', 'direction': straddle_dir, 'strike_price': atm_price, 'entry_premium': premium_put_atm})
             mid_price_hedge_call, _, _ = self._get_option_details(self.current_price, hedge_strike_call, days_to_expiry, 'call')
             legs.append({'type': 'call', 'direction': hedge_dir, 'strike_price': hedge_strike_call, 'entry_premium': self._get_option_price(mid_price_hedge_call, hedge_dir == 'long')})
             mid_price_hedge_put, _, _ = self._get_option_details(self.current_price, hedge_strike_put, days_to_expiry, 'put')
             legs.append({'type': 'put', 'direction': hedge_dir, 'strike_price': hedge_strike_put, 'entry_premium': self._get_option_price(mid_price_hedge_put, hedge_dir == 'long')})
-            return legs # Return early as premiums are already calculated
+            return legs
         elif 'IRON_CONDOR' in action_name:
             call_strikes = []
             for offset in range(1, 15):
@@ -558,6 +522,40 @@ class OptionsZeroGameEnv(gym.Env):
             leg['entry_step'] = self.current_step
         return legs
 
+    def _open_single_leg(self, action_name: str) -> None:
+        if len(self.portfolio) >= self.max_positions: return
+        legs = self._get_trade_legs(action_name)
+        self._execute_trades(legs, {})
+
+    def _open_straddle(self, action_name: str) -> None:
+        if len(self.portfolio) > self.max_positions - 2: return
+        legs = self._get_trade_legs(action_name)
+        pnl = self._calculate_strategy_pnl(legs, 'STRADDLE')
+        self._execute_trades(legs, pnl)
+
+    def _open_strangle(self, action_name: str) -> None:
+        if len(self.portfolio) > self.max_positions - 2: return
+        legs = self._get_trade_legs(action_name)
+        pnl = self._calculate_strategy_pnl(legs, 'STRANGLE')
+        self._execute_trades(legs, pnl)
+
+    def _open_iron_fly(self, action_name: str) -> None:
+        if len(self.portfolio) > self.max_positions - 4: return
+        legs = self._get_trade_legs(action_name)
+        if not legs: return
+        width = abs(legs[2]['strike_price'] - legs[0]['strike_price'])
+        pnl = self._calculate_strategy_pnl(legs, 'IRON_FLY', width, width)
+        self._execute_trades(legs, pnl)
+
+    def _open_iron_condor(self, action_name: str) -> None:
+        if len(self.portfolio) > self.max_positions - 4: return
+        legs = self._get_trade_legs(action_name)
+        if not legs: return
+        call_width = abs(legs[2]['strike_price'] - legs[0]['strike_price'])
+        put_width = abs(legs[3]['strike_price'] - legs[1]['strike_price'])
+        pnl = self._calculate_strategy_pnl(legs, 'IRON_CONDOR', call_width, put_width)
+        self._execute_trades(legs, pnl)
+
     def _get_true_action_mask(self) -> np.ndarray:
         action_mask = np.zeros(self.action_space_size, dtype=np.int8)
         current_trading_day = self.current_step // self.steps_per_day
@@ -574,13 +572,21 @@ class OptionsZeroGameEnv(gym.Env):
         if is_expiry_day:
             return action_mask
         
-        if len(self.portfolio) <= self.max_positions - 4:
+        if len(self.portfolio) == self.max_positions
+            return action_mask
+
+        # Check for 4-leg strategies.
+        # This is only possible if there are 4 or more empty slots.
+        # Since max_positions is 4, this is only true if len(self.portfolio) == 0.
+        if len(self.portfolio) <= (self.max_positions - 4):
             action_mask[self.actions_to_indices['OPEN_LONG_IRON_FLY']] = 1
             action_mask[self.actions_to_indices['OPEN_SHORT_IRON_FLY']] = 1
             action_mask[self.actions_to_indices['OPEN_LONG_IRON_CONDOR']] = 1
             action_mask[self.actions_to_indices['OPEN_SHORT_IRON_CONDOR']] = 1
-        
-        if len(self.portfolio) <= self.max_positions - 2:
+
+        # Check for 2-leg strategies.
+        # This is only possible if there are 2 or more empty slots.
+        if len(self.portfolio) <= (self.max_positions - 2):
             action_mask[self.actions_to_indices['OPEN_LONG_STRADDLE_ATM']] = 1
             action_mask[self.actions_to_indices['OPEN_SHORT_STRADDLE_ATM']] = 1
             action_mask[self.actions_to_indices['OPEN_LONG_STRANGLE_ATM_1']] = 1
