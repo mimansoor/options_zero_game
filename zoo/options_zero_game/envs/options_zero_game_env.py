@@ -82,7 +82,7 @@ class OptionsZeroGameEnv(gym.Env):
             {'name': 'Developed_Market', 'mu': 0.00005, 'omega': 0.000005, 'alpha': 0.09, 'beta': 0.90},
         ],
         time_to_expiry_days=30,
-        steps_per_day=75,
+        steps_per_day=1,
         rolling_vol_window=5,
         iv_skew_table={
             'call': {'-5': (13.5, 16.0), '-4': (13.3, 15.8), '-3': (13.2, 15.7), '-2': (13.1, 15.5), '-1': (13.0, 15.4), '0': (13.0, 15.3), '1': (13.0, 15.4), '2': (13.1, 15.6), '3': (13.2, 15.7), '4': (13.3, 15.8), '5': (13.5, 16.0)},
@@ -96,7 +96,7 @@ class OptionsZeroGameEnv(gym.Env):
         pnl_scaling_factor=1000,
         drawdown_penalty_weight=0.1,
         illegal_action_penalty=-1.0,
-        ignore_legal_actions=False,
+        ignore_legal_actions=True,
         otm_delta_threshold=0.15,
         itm_delta_threshold=0.85,
         TRADING_DAYS_IN_WEEK=5,
