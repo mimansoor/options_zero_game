@@ -7,8 +7,8 @@ import random
 # ==============================================================
 collector_env_num = 4
 evaluator_env_num = 2
-batch_size = 256
-num_simulations = 100
+batch_size = 128
+num_simulations = 25
 update_per_collect = 200
 max_env_step = int(5e6)
 reanalyze_ratio = 0.
@@ -95,7 +95,7 @@ create_config = dict(
         type='options_zero_game',
         import_names=['zoo.options_zero_game.envs'],
     ),
-    env_manager=dict(type='subprocess'),
+    env_manager=dict(type='base'),
     policy=dict(
         type='muzero',
         import_names=['lzero.policy.muzero'],

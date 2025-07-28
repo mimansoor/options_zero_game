@@ -1,16 +1,15 @@
 import copy
 import math
 import random
-import logging
 from typing import Tuple, Dict, Any, List
 
-import gymnasium as gym
-from gym import spaces
+import gym
 import numpy as np
 import pandas as pd
 from arch import arch_model
 from easydict import EasyDict
-from gym.utils import seeding
+from gym import spaces
+from gymnasium.utils import seeding
 
 from ding.envs import BaseEnvTimestep
 from ding.utils import ENV_REGISTRY
@@ -100,7 +99,7 @@ class OptionsZeroGameEnv(gym.Env):
         pnl_scaling_factor=1000,
         drawdown_penalty_weight=0.1,
         illegal_action_penalty=-1.0,
-        ignore_legal_actions=True,
+        ignore_legal_actions=False,
         otm_delta_threshold=0.15,
         itm_delta_threshold=0.85,
         TRADING_DAYS_IN_WEEK=5,
@@ -148,7 +147,11 @@ class OptionsZeroGameEnv(gym.Env):
         self.action_space_size: int = len(self.actions_to_indices)
 
         self._action_space: spaces.Discrete = spaces.Discrete(self.action_space_size)
-        self._observation_space: spaces.Dict = self._create_observation_space()
+        # <<< MODIFIED: The observation_space is now a simple Box, as per Gym standard.
+        self.market_and_portfolio_state_size = 5 + self.max_positions * 9
+        self.obs_vector_size = self.market_and_portfolio_state_size + self.action_space_size
+        self._observation_space: spaces.Box = spaces.Box(low=-np.inf, high=np.inf, shape=(self.obs_vector_size,), dtype=np.float32)
+        
         self._reward_range: spaces.Box = spaces.Box(low=-1.0, high=1.0, shape=(1,), dtype=np.float32)
         
         self.np_random: Any = None
@@ -185,11 +188,6 @@ class OptionsZeroGameEnv(gym.Env):
         actions['CLOSE_ALL'] = i
         return actions
 
-    def _create_observation_space(self) -> spaces.Dict:
-        self.market_and_portfolio_state_size = 5 + self.max_positions * 9
-        self.obs_vector_size = self.market_and_portfolio_state_size + self.action_space_size
-        return spaces.Dict({'observation': spaces.Box(low=-np.inf, high=np.inf, shape=(self.obs_vector_size,), dtype=np.float32),'action_mask': spaces.Box(low=0, high=1, shape=(self.action_space_size,), dtype=np.int8),'to_play': spaces.Box(low=-1, high=-1, shape=(1,), dtype=np.int8)})
-
     def seed(self, seed: int, dynamic_seed: int = None) -> List[int]:
         self.np_random, seed = seeding.np_random(seed)
         random.seed(seed)
@@ -205,25 +203,25 @@ class OptionsZeroGameEnv(gym.Env):
         """
         trading_days_per_year = 252
         steps_per_year = trading_days_per_year * self.steps_per_day
-        
+
         # Scale daily parameters to the per-step frequency for realism
         mu_step = self.trend / steps_per_year
         omega_step = self.omega / steps_per_year
         alpha_step = self.alpha / steps_per_year # Use the safer, scaled alpha
         beta_step = self.beta # Beta is a persistence coefficient and is not scaled
-            
+
         garch_spec = arch_model(None, mean='Constant', vol='GARCH', p=1, q=1, dist='normal')
         params = np.array([mu_step, omega_step, alpha_step, beta_step], dtype=np.float32)
-        
+
         # Simulate the returns for the entire episode
         sim_result = garch_spec.simulate(params, nobs=self.total_steps)
         simulated_returns = sim_result.data.to_numpy(dtype=np.float32)
-        
+
         # Build the price path efficiently from the simulated returns
         cumulative_returns = np.cumsum(np.concatenate([np.array([0.0], dtype=np.float32), simulated_returns]))
         price_path = self.start_price * np.exp(cumulative_returns)
         self.price_path = price_path.astype(np.float32)
-        
+
         # Compute the realized volatility series
         log_returns = np.diff(np.log(self.price_path))
         returns_series = pd.Series(log_returns, dtype=np.float32)
@@ -364,7 +362,7 @@ class OptionsZeroGameEnv(gym.Env):
 
         action_name = self.indices_to_actions.get(action, 'INVALID')
         equity_before = self._get_current_equity()
-        
+
         portfolio_changed = False
         if action_name.startswith('OPEN_'):
             self._handle_open_action(action_name)
@@ -759,7 +757,6 @@ class OptionsZeroGameEnv(gym.Env):
     def render(self, mode: str = 'human') -> None:
         total_pnl = self._get_total_pnl()
         print(f"Step: {self.current_step:04d} | Day: {self.current_step // self.steps_per_day + 1:02d} | Price: ${self.current_price:9.2f} | Positions: {len(self.portfolio):1d} | Total PnL: ${total_pnl:9.2f}")
-        # <<< NEW: Add detailed portfolio rendering
         if not self.portfolio.empty:
             print(self.portfolio.to_string())
     
