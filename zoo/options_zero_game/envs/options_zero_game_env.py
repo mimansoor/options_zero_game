@@ -3,13 +3,13 @@ import math
 import random
 from typing import Tuple, Dict, Any, List
 
-import gymnasium as gym # Using the correct, modern library
+import gymnasium as gym
 import numpy as np
 import pandas as pd
 from arch import arch_model
 from easydict import EasyDict
 from gym import spaces
-from gymnasium.utils import seeding # Using the correct, modern library
+from gymnasium.utils import seeding
 
 from ding.envs import BaseEnvTimestep
 from ding.utils import ENV_REGISTRY
@@ -113,9 +113,7 @@ class OptionsZeroGameEnv(gym.Env):
 
         self.start_price: float = self._cfg.start_price
         self.initial_cash: float = self._cfg.initial_cash
-        # <<< MODIFIED: Store the curriculum of regimes passed from the config
         self.market_regimes: List[Dict[str, Any]] = self._cfg.market_regimes
-        
         self.rolling_vol_window: int = self._cfg.rolling_vol_window
         self.time_to_expiry_days: int = self._cfg.time_to_expiry_days
         self.steps_per_day: int = self._cfg.steps_per_day
@@ -213,6 +211,7 @@ class OptionsZeroGameEnv(gym.Env):
         clamped_offset = max(-5, min(5, offset))
         return self.iv_bins[option_type][str(clamped_offset)][self.iv_bin_index]
 
+    # <<< MODIFIED: Added robust error handling
     def _get_option_details(self, underlying_price: float, strike_price: float, days_to_expiry: float, option_type: str) -> Tuple[float, float, float]:
         t = days_to_expiry / 365.25
         is_call = option_type == 'call'
@@ -220,16 +219,24 @@ class OptionsZeroGameEnv(gym.Env):
             intrinsic = max(0.0, underlying_price - strike_price) if is_call else max(0.0, strike_price - underlying_price)
             delta_val = 1.0 if intrinsic > 0 else 0.0
             return intrinsic, delta_val, 0.0
-        atm_price = int(underlying_price / self.strike_distance + 0.5) * self.strike_distance
-        offset = round((strike_price - atm_price) / self.strike_distance)
-        vol = self._get_implied_volatility(offset, option_type)
-        price = _numba_black_scholes(underlying_price, strike_price, t, self.risk_free_rate, vol, is_call)
-        signed_delta = _numba_delta(underlying_price, strike_price, t, self.risk_free_rate, vol, is_call)
-        d2 = 0.0
-        if vol > 1e-6:
-            d1 = (math.log(underlying_price / strike_price) + (self.risk_free_rate + 0.5 * vol ** 2) * t) / (vol * math.sqrt(t))
-            d2 = d1 - vol * math.sqrt(t)
-        return price, signed_delta, d2
+        
+        try:
+            atm_price = int(underlying_price / self.strike_distance + 0.5) * self.strike_distance
+            offset = round((strike_price - atm_price) / self.strike_distance)
+            vol = self._get_implied_volatility(offset, option_type)
+            price = _numba_black_scholes(underlying_price, strike_price, t, self.risk_free_rate, vol, is_call)
+            signed_delta = _numba_delta(underlying_price, strike_price, t, self.risk_free_rate, vol, is_call)
+            d2 = 0.0
+            if vol > 1e-6:
+                d1 = (math.log(underlying_price / strike_price) + (self.risk_free_rate + 0.5 * vol ** 2) * t) / (vol * math.sqrt(t))
+                d2 = d1 - vol * math.sqrt(t)
+            
+            # <<< NEW: Add assert to catch NaN/Inf inside the calculation
+            assert math.isfinite(price) and math.isfinite(signed_delta), "NaN detected in B-S calculation"
+            return price, signed_delta, d2
+        except (ValueError, ZeroDivisionError):
+            # If any math error occurs, gracefully return zeros
+            return 0.0, 0.0, 0.0
 
     def _get_option_price(self, mid_price: float, is_buy: bool) -> float:
         if is_buy: return mid_price * (1 + self.bid_ask_spread_pct)
@@ -253,7 +260,6 @@ class OptionsZeroGameEnv(gym.Env):
         if seed is not None: self.seed(seed)
         elif self.np_random is None: self.seed(0)
 
-        # <<< MODIFIED: The "Teacher" selects a new lesson for each episode
         chosen_regime = random.choice(self.market_regimes)
         self.current_regime_name = chosen_regime['name']
         self.trend: float = chosen_regime['mu']
@@ -267,7 +273,11 @@ class OptionsZeroGameEnv(gym.Env):
             self.beta = self.beta / (total + 0.01)
 
         unconditional_variance = self.omega / (1 - self.alpha - self.beta)
+        assert math.isfinite(unconditional_variance) and unconditional_variance > 0, f"GARCH unconditional_variance is invalid: {unconditional_variance}"
+        
         self.garch_implied_vol: float = math.sqrt(unconditional_variance * 252)
+        assert math.isfinite(self.garch_implied_vol), f"GARCH garch_implied_vol is invalid: {self.garch_implied_vol}"
+
         self.iv_bin_index: int = random.randint(0, 4)
         self._generate_price_path()
         self.current_step: int = 0
@@ -296,12 +306,17 @@ class OptionsZeroGameEnv(gym.Env):
 
     def _calculate_shaped_reward(self, equity_before: float, equity_after: float) -> Tuple[float, float]:
         raw_reward = equity_after - equity_before
+        assert math.isfinite(raw_reward), f"Generated a NaN or Inf raw_reward! Equity Before: {equity_before}, Equity After: {equity_after}"
+        
         pnl_component = math.tanh(raw_reward / self.pnl_scaling_factor)
         self.high_water_mark = max(self.high_water_mark, equity_after)
         drawdown = self.high_water_mark - equity_after
         drawdown_penalty_component = -self.drawdown_penalty_weight * math.tanh(drawdown / self.initial_cash)
         combined_score = pnl_component + drawdown_penalty_component
         final_reward = math.tanh(combined_score / 2)
+        
+        assert math.isfinite(final_reward), f"Generated a NaN or Inf reward! Raw: {raw_reward}, PnL Comp: {pnl_component}, DD Comp: {drawdown_penalty_component}"
+        
         return final_reward, raw_reward
 
     def _enforce_legal_action(self, action: int) -> int:
@@ -340,15 +355,11 @@ class OptionsZeroGameEnv(gym.Env):
             self._handle_open_action(action_name)
             portfolio_changed = True
         elif action_name.startswith('CLOSE_POSITION_'):
-            try:
-                pos_index = int(action_name.split('_')[-1])
-                self._close_position(pos_index)
-                portfolio_changed = True
-            except (ValueError, IndexError):
-                logging.warning(f"Attempted to close an invalid position index from action: {action_name}")
+            pos_index = int(action_name.split('_')[-1])
+            self._close_position(pos_index)
+            portfolio_changed = True
         elif action_name == 'CLOSE_ALL':
-            if not self.portfolio.empty:
-                portfolio_changed = True
+            portfolio_changed = True
             while not self.portfolio.empty:
                 self._close_position(-1)
 
