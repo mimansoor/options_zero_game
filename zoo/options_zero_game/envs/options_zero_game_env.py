@@ -13,7 +13,7 @@ from gymnasium.utils import seeding
 from ding.envs import BaseEnvTimestep
 from ding.utils import ENV_REGISTRY
 
-# <<< FIX 2: Robust, JIT-compiled financial math functions
+# Numba JIT compilation for performance-critical math
 try:
     from numba import jit
 except ImportError:
@@ -36,6 +36,7 @@ def _numba_erf(x):
 def _numba_cdf(x):
     return 0.5 * (1 + _numba_erf(x / math.sqrt(2.0)))
 
+# <<< FIX 2: Option Pricing and Delta Calculation
 @jit(nopython=True)
 def _numba_black_scholes(S: float, K: float, T: float, r: float, sigma: float, is_call: bool) -> float:
     if T <= 1e-6:
@@ -165,7 +166,7 @@ class OptionsZeroGameEnv(gym.Env):
     # <<< FIX 3: Standardized Action Space
     def _build_action_space(self) -> Dict[str, int]:
         actions = {'HOLD': 0}; i = 1
-        for offset in range(-5, 6): # Standardized from -5 to +5
+        for offset in range(-5, 6):
             sign = '+' if offset >= 0 else ''
             actions[f'OPEN_LONG_CALL_ATM{sign}{offset}'] = i; i+=1
             actions[f'OPEN_SHORT_CALL_ATM{sign}{offset}'] = i; i+=1
@@ -189,27 +190,22 @@ class OptionsZeroGameEnv(gym.Env):
         random.seed(seed)
         return [seed]
 
-    # <<< FIX 1: Manual GARCH Simulation
+    # <<< FIX 1: GARCH Simulation Fix
     def _generate_price_path(self) -> None:
         returns = np.zeros(self.total_steps + 1, dtype=np.float32)
         variances = np.zeros(self.total_steps + 1, dtype=np.float32)
         
-        # Initial variance
-        variances[0] = self.omega / (1 - self.alpha - self.beta)
+        initial_variance = self.omega / max(1e-9, (1 - self.alpha - self.beta))
+        variances[0] = initial_variance
         
         for t in range(1, self.total_steps + 1):
             shock = self.np_random.normal(0, 1)
-            variances[t] = self.omega + self.alpha * (returns[t-1]**2) + self.beta * variances[t-1]
-            variances[t] = max(1e-9, variances[t]) # Ensure positive variance
-            returns[t] = self.trend + math.sqrt(variances[t]) * shock
+            returns[t] = self.trend + math.sqrt(variances[t-1]) * shock
+            variances[t] = self.omega + self.alpha * (returns[t]**2) + self.beta * variances[t-1]
+            variances[t] = max(1e-9, variances[t])
         
-        # Convert returns to price path
-        price_path = np.zeros(self.total_steps + 1, dtype=np.float32)
-        price_path[0] = self.start_price
-        for i in range(1, self.total_steps + 1):
-            price_path[i] = price_path[i-1] * math.exp(returns[i])
-        
-        self.price_path = price_path
+        cumulative_returns = np.cumsum(returns)
+        self.price_path = self.start_price * np.exp(cumulative_returns)
 
     def _simulate_price_step(self) -> None:
         self.current_price = self.price_path[self.current_step]
@@ -281,11 +277,12 @@ class OptionsZeroGameEnv(gym.Env):
             total = self.alpha + self.beta
             self.alpha = self.alpha / (total + 0.01)
             self.beta = self.beta / (total + 0.01)
-
-        self.iv_bin_index: int = random.randint(0, 4)
+        
+        # <<< FIX 8 & 9: Proper Initialization
+        self.price_path = np.zeros(self.total_steps + 1, dtype=np.float32)
+        self.realized_vol_series = np.zeros(self.total_steps + 1, dtype=np.float32)
         self._generate_price_path()
         
-        # <<< FIX 9: Proper Initialization
         self.current_step: int = 0
         self.day_of_week: int = 0
         self.current_price: float = self.price_path[0]
@@ -295,28 +292,28 @@ class OptionsZeroGameEnv(gym.Env):
         self.high_water_mark: float = self.initial_cash
         self.illegal_action_count: int = 0
         self.next_creation_id: int = 0
-        self.realized_vol_series = np.zeros(self.total_steps + 1, dtype=np.float32)
-        
         return self._get_observation()
 
+    # <<< FIX 4: Position Closing Logic Fix
     def _close_position(self, position_index: int) -> None:
         if position_index < 0:
             position_index = len(self.portfolio) + position_index
         if 0 <= position_index < len(self.portfolio):
             pos_to_close = self.portfolio.iloc[position_index]
             mid_price, _, _ = self._get_option_details(self.current_price, pos_to_close['strike_price'], pos_to_close['days_to_expiry'], pos_to_close['type'])
-            exit_premium = self._get_option_price(mid_price, is_buy=(pos_to_close['direction'] == 'short'))
+            is_short = pos_to_close['direction'] == 'short'
+            exit_premium = self._get_option_price(mid_price, is_buy=is_short)
             entry_premium = pos_to_close['entry_premium']
-            if pos_to_close['direction'] == 'long': pnl = (exit_premium - entry_premium) * self.lot_size
-            else: pnl = (entry_premium - exit_premium) * self.lot_size
+            if pos_to_close['direction'] == 'long':
+                pnl = (exit_premium - entry_premium) * self.lot_size
+            else:
+                pnl = (entry_premium - exit_premium) * self.lot_size
             self.realized_pnl += pnl
             self.portfolio = self.portfolio.drop(self.portfolio.index[position_index]).reset_index(drop=True)
 
     def _calculate_shaped_reward(self, equity_before: float, equity_after: float) -> Tuple[float, float]:
-        # <<< FIX 7: Edge Case Handling
         if not math.isfinite(equity_before) or not math.isfinite(equity_after):
             return 0.0, 0.0
-            
         raw_reward = equity_after - equity_before
         pnl_component = math.tanh(raw_reward / self.pnl_scaling_factor)
         self.high_water_mark = max(self.high_water_mark, equity_after)
@@ -324,7 +321,6 @@ class OptionsZeroGameEnv(gym.Env):
         drawdown_penalty_component = -self.drawdown_penalty_weight * math.tanh(drawdown / self.initial_cash)
         combined_score = pnl_component + drawdown_penalty_component
         final_reward = math.tanh(combined_score / 2)
-        
         assert math.isfinite(final_reward)
         return final_reward, raw_reward
 
@@ -335,29 +331,32 @@ class OptionsZeroGameEnv(gym.Env):
         else:
             return self.actions_to_indices['HOLD']
 
-    # <<< FIX 5 & 8: Correct Volatility and Time Calculation
+    # <<< FIX 5 & 8: Time Decay and Volatility Calculation Fix
     def _advance_time_and_market(self) -> None:
         self.current_step += 1
         time_decay_days = 1.0 / self.steps_per_day
         
-        if (self.current_step % self.steps_per_day) == 0:
+        is_end_of_day = (self.current_step % self.steps_per_day) == 0
+        if is_end_of_day:
             self.day_of_week = (self.day_of_week + 1) % self.total_days_in_week
             if self.day_of_week >= self.trading_days_in_week:
                 time_decay_days += (self.total_days_in_week - self.trading_days_in_week)
         
         self._simulate_price_step()
         if not self.portfolio.empty:
-            self.portfolio['days_to_expiry'] -= time_decay_days
+            self.portfolio['days_to_expiry'] = (self.portfolio['days_to_expiry'] - time_decay_days).clip(lower=0)
             
-        # Update realized volatility
         if self.current_step >= 1:
-            window = min(self.current_step, self.rolling_vol_window * self.steps_per_day)
-            start_idx = max(0, self.current_step - window)
-            if self.current_step > start_idx:
-                returns = np.diff(np.log(self.price_path[start_idx:self.current_step+1]))
-                if len(returns) > 1:
-                    ann_factor = math.sqrt(252 * self.steps_per_day)
-                    self.realized_vol_series[self.current_step] = returns.std() * ann_factor
+            window_size = self.rolling_vol_window * self.steps_per_day
+            start_idx = max(0, self.current_step - window_size + 1)
+            prices = self.price_path[start_idx:self.current_step+1]
+            if len(prices) > 1:
+                log_returns = np.diff(np.log(prices))
+                ann_factor = math.sqrt(252 * self.steps_per_day)
+                vol = log_returns.std() * ann_factor
+                self.realized_vol_series[self.current_step] = vol
+            else:
+                self.realized_vol_series[self.current_step] = 0.0
 
     def step(self, action: int) -> BaseEnvTimestep:
         true_legal_actions_mask = self._get_true_action_mask()
@@ -429,8 +428,6 @@ class OptionsZeroGameEnv(gym.Env):
         is_buy = (direction == 'LONG')
         mid_price, _, _ = self._get_option_details(self.current_price, strike_price, days_to_expiry, type.lower())
         entry_premium = self._get_option_price(mid_price, is_buy)
-        
-        # <<< FIX 6: Strategy ID Handling
         new_position = pd.DataFrame([{'type': type.lower(), 'direction': direction.lower(), 'entry_step': self.current_step, 'strike_price': strike_price, 'entry_premium': entry_premium, 'days_to_expiry': days_to_expiry, 'creation_id': self.next_creation_id, 'strategy_id': -1, 'strategy_max_profit': 0.0, 'strategy_max_loss': 0.0}])
         self.next_creation_id += 1
         self.portfolio = pd.concat([self.portfolio, new_position], ignore_index=True)
@@ -453,13 +450,15 @@ class OptionsZeroGameEnv(gym.Env):
         max_profit = self.undefined_risk_cap if direction == 'long' else net_premium * self.lot_size
         max_loss = -net_premium * self.lot_size if direction == 'long' else -self.undefined_risk_cap
         
+        # <<< FIX 7: Strategy ID Conflict Fix
         strategy_id = self.next_creation_id
+        self.next_creation_id += 1
         for trade in trades_to_execute:
             trade['creation_id'] = self.next_creation_id
+            self.next_creation_id += 1
             trade['strategy_id'] = strategy_id
             trade['strategy_max_profit'] = max_profit
             trade['strategy_max_loss'] = max_loss
-            self.next_creation_id += 1
             
         if trades_to_execute:
             new_positions_df = pd.DataFrame(trades_to_execute)
@@ -486,12 +485,13 @@ class OptionsZeroGameEnv(gym.Env):
         max_loss = -net_premium * self.lot_size if direction == 'long' else -self.undefined_risk_cap
         
         strategy_id = self.next_creation_id
+        self.next_creation_id += 1
         for trade in trades_to_execute:
             trade['creation_id'] = self.next_creation_id
+            self.next_creation_id += 1
             trade['strategy_id'] = strategy_id
             trade['strategy_max_profit'] = max_profit
             trade['strategy_max_loss'] = max_loss
-            self.next_creation_id += 1
             
         if trades_to_execute:
             new_positions_df = pd.DataFrame(trades_to_execute)
@@ -535,12 +535,13 @@ class OptionsZeroGameEnv(gym.Env):
             max_profit = ((hedge_strike_call - atm_price) * self.lot_size) + max_loss
 
         strategy_id = self.next_creation_id
+        self.next_creation_id += 1
         for trade in trades_to_execute:
             trade['creation_id'] = self.next_creation_id
+            self.next_creation_id += 1
             trade['strategy_id'] = strategy_id
             trade['strategy_max_profit'] = max_profit
             trade['strategy_max_loss'] = max_loss
-            self.next_creation_id += 1
             
         if trades_to_execute:
             new_positions_df = pd.DataFrame(trades_to_execute)
@@ -555,23 +556,21 @@ class OptionsZeroGameEnv(gym.Env):
         atm_price = int(self.current_price / self.strike_distance + 0.5) * self.strike_distance
         direction = 'long' if 'LONG' in action_name else 'short'
         
-        # Find call strikes with fallback
         call_strikes = []
         for offset in range(1, 15):
             strike = atm_price + offset * self.strike_distance
             _, signed_delta, _ = self._get_option_details(self.current_price, strike, days_to_expiry, 'call')
-            if signed_delta < 0.3: # Target delta for short leg
+            if 0.15 < signed_delta < 0.35:
                 call_strikes.append(strike)
             if len(call_strikes) >= 2: break
         if len(call_strikes) < 2:
             call_strikes = [atm_price + 2 * self.strike_distance, atm_price + 3 * self.strike_distance]
 
-        # Find put strikes with fallback
         put_strikes = []
         for offset in range(1, 15):
             strike = atm_price - offset * self.strike_distance
             _, signed_delta, _ = self._get_option_details(self.current_price, strike, days_to_expiry, 'put')
-            if abs(signed_delta) < 0.3: # Target delta for short leg
+            if -0.35 < signed_delta < -0.15:
                 put_strikes.append(strike)
             if len(put_strikes) >= 2: break
         if len(put_strikes) < 2:
@@ -581,9 +580,9 @@ class OptionsZeroGameEnv(gym.Env):
         long_call_strike = max(call_strikes)
         short_put_strike = max(put_strikes)
         long_put_strike = min(put_strikes)
-
-        if not (long_put_strike < short_put_strike < self.current_price < short_call_strike < long_call_strike):
-            return # Fallback if strikes are illogical
+        
+        if not (long_put_strike < short_put_strike <= atm_price <= short_call_strike < long_call_strike):
+            return
 
         trades_to_execute = []
         inner_dir = 'long' if direction == 'long' else 'short'
@@ -610,12 +609,13 @@ class OptionsZeroGameEnv(gym.Env):
             max_profit = (max(call_spread_width, put_spread_width) * self.lot_size) + max_loss
 
         strategy_id = self.next_creation_id
+        self.next_creation_id += 1
         for trade in trades_to_execute:
             trade['creation_id'] = self.next_creation_id
+            self.next_creation_id += 1
             trade['strategy_id'] = strategy_id
             trade['strategy_max_profit'] = max_profit
             trade['strategy_max_loss'] = max_loss
-            self.next_creation_id += 1
             
         if trades_to_execute:
             new_positions_df = pd.DataFrame(trades_to_execute)
@@ -664,9 +664,14 @@ class OptionsZeroGameEnv(gym.Env):
                 strike_price = atm_price + (offset * self.strike_distance)
                 for option_type in ['call', 'put']:
                     _, signed_delta, _ = self._get_option_details(self.current_price, strike_price, days_to_expiry, option_type)
-                    abs_delta = abs(signed_delta)
-                    is_far_otm = abs_delta < self.otm_threshold
-                    is_far_itm = abs_delta > self.itm_threshold
+                    
+                    # <<< FIX 6: Delta Threshold Fix
+                    if option_type == 'call':
+                        is_far_otm = signed_delta < self.otm_threshold
+                        is_far_itm = signed_delta > self.itm_threshold
+                    else: # put
+                        is_far_otm = signed_delta > -self.otm_threshold
+                        is_far_itm = signed_delta < -self.itm_threshold
                     
                     action_name_long = f'OPEN_LONG_{option_type.upper()}_ATM{"+" if offset >=0 else ""}{offset}'
                     is_legal_long = True

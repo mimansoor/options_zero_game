@@ -12,12 +12,15 @@ num_simulations = 25
 update_per_collect = 200
 max_env_step = int(5e6)
 reanalyze_ratio = 0.
-action_space_size = 42
 n_episode = 8
 
+# <<< MODIFIED: The final, correct action space size
+# 1 HOLD + (11 strikes * 4 types) + 8 combos + 4 CLOSE_i + 1 CLOSE_ALL = 1 + 44 + 8 + 4 + 1 = 58
+action_space_size = 58
+
 # <<< MODIFIED: The final, correct observation shape
-# 5 (global) + 4 slots * 9 features/slot + 42 (action mask) = 5 + 36 + 42 = 83
-observation_shape = 83
+# 5 (global) + 4 slots * 9 features/slot + 58 (action mask) = 5 + 36 + 58 = 99
+observation_shape = 99
 
 market_regimes = [
     {'name': 'Developed_Markets', 'mu': 0.00006, 'omega': 0.000005, 'alpha': 0.08, 'beta': 0.90},
@@ -51,6 +54,8 @@ options_zero_game_muzero_config = dict(
         illegal_action_penalty=-1.0,
         rolling_vol_window=5,
         steps_per_day=75,
+        # Pass the full config to the env
+        **EasyDict(copy.deepcopy(OptionsZeroGameEnv.config))
     ),
     policy=dict(
         model=dict(
@@ -63,9 +68,9 @@ options_zero_game_muzero_config = dict(
             discrete_action_encoding_type='one_hot',
             norm_type='BN',
         ),
-        model_path = None, # Set to None for a fresh training run
+        model_path = None,
         cuda=True,
-        game_segment_length=30,
+        game_segment_length=30 * 75, # 30 days * 75 steps/day
         update_per_collect=update_per_collect,
         batch_size=batch_size,
         td_steps=10,
@@ -93,7 +98,7 @@ main_config = EasyDict(options_zero_game_muzero_config)
 create_config = dict(
     env=dict(
         type='options_zero_game',
-        import_names=['zoo.options_zero_game.envs'],
+        import_names=['zoo.options_zero_game.envs.options_zero_game_env'],
     ),
     env_manager=dict(type='base'),
     policy=dict(
@@ -104,5 +109,7 @@ create_config = dict(
 create_config = EasyDict(create_config)
 
 if __name__ == "__main__":
+    # We need to import the env file to register it
+    from zoo.options_zero_game.envs.options_zero_game_env import OptionsZeroGameEnv
     from lzero.entry import train_muzero
     train_muzero([main_config, create_config], seed=0, max_env_step=max_env_step)
