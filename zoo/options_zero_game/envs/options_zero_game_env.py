@@ -36,7 +36,6 @@ def _numba_erf(x):
 def _numba_cdf(x):
     return 0.5 * (1 + _numba_erf(x / math.sqrt(2.0)))
 
-# <<< FIX 2: Option Pricing and Delta Calculation
 @jit(nopython=True)
 def _numba_black_scholes(S: float, K: float, T: float, r: float, sigma: float, is_call: bool) -> float:
     if T <= 1e-6:
@@ -163,7 +162,6 @@ class OptionsZeroGameEnv(gym.Env):
                 binned_ivs[option_type][offset_str] = np.linspace(min_iv, max_iv, num_bins, dtype=np.float32) / 100.0
         return binned_ivs
 
-    # <<< FIX 3: Standardized Action Space
     def _build_action_space(self) -> Dict[str, int]:
         actions = {'HOLD': 0}; i = 1
         for offset in range(-5, 6):
@@ -215,7 +213,6 @@ class OptionsZeroGameEnv(gym.Env):
         return self.iv_bins[option_type][str(clamped_offset)][self.iv_bin_index]
 
     def _get_option_details(self, underlying_price: float, strike_price: float, days_to_expiry: float, option_type: str) -> Tuple[float, float, float]:
-        # <<< FIX 7: Edge Case Handling
         if underlying_price <= 0 or strike_price <= 0 or days_to_expiry < 0:
             return 0.0, 0.0, 0.0
             
@@ -278,11 +275,16 @@ class OptionsZeroGameEnv(gym.Env):
             self.alpha = self.alpha / (total + 0.01)
             self.beta = self.beta / (total + 0.01)
         
-        # <<< FIX 8 & 9: Proper Initialization
+        # <<< FIX 1: GARCH Implied Volatility Calculation
+        unconditional_variance = self.omega / (1 - self.alpha - self.beta)
+        self.garch_implied_vol: float = math.sqrt(unconditional_variance * 252)
+        
+        # <<< FIX 8: Price Path Initialization Fix
         self.price_path = np.zeros(self.total_steps + 1, dtype=np.float32)
         self.realized_vol_series = np.zeros(self.total_steps + 1, dtype=np.float32)
         self._generate_price_path()
         
+        # <<< FIX 9: Proper Initialization
         self.current_step: int = 0
         self.day_of_week: int = 0
         self.current_price: float = self.price_path[0]
@@ -339,7 +341,7 @@ class OptionsZeroGameEnv(gym.Env):
         is_end_of_day = (self.current_step % self.steps_per_day) == 0
         if is_end_of_day:
             self.day_of_week = (self.day_of_week + 1) % self.total_days_in_week
-            if self.day_of_week >= self.trading_days_in_week:
+            if self.day_of_week == self.trading_days_in_week:
                 time_decay_days += (self.total_days_in_week - self.trading_days_in_week)
         
         self._simulate_price_step()
@@ -547,7 +549,7 @@ class OptionsZeroGameEnv(gym.Env):
             new_positions_df = pd.DataFrame(trades_to_execute)
             self.portfolio = pd.concat([self.portfolio, new_positions_df], ignore_index=True)
 
-    # <<< FIX 4: Robust Iron Condor Strike Selection
+    # <<< FIX 3: Iron Condor Strike Selection Fix
     def _open_iron_condor(self, action_name: str) -> None:
         if len(self.portfolio) > self.max_positions - 4: return
         current_trading_day = self.current_step // self.steps_per_day
@@ -713,7 +715,7 @@ class OptionsZeroGameEnv(gym.Env):
             market_portfolio_vec[current_idx + 0] = 1.0
             market_portfolio_vec[current_idx + 1] = 1.0 if pos['type'] == 'call' else -1.0
             market_portfolio_vec[current_idx + 2] = 1.0 if pos['direction'] == 'long' else -1.0
-            market_portfolio_vec[current_idx + 3] = (pos['strike_price'] - atm_price) / (5 * self.strike_distance) # Normalize by max offset
+            market_portfolio_vec[current_idx + 3] = (pos['strike_price'] - atm_price) / (5 * self.strike_distance)
             market_portfolio_vec[current_idx + 4] = (self.current_step - pos['entry_step']) / self.total_steps
             
             _, signed_delta, d2 = self._get_option_details(self.current_price, pos['strike_price'], pos['days_to_expiry'], pos['type'])
