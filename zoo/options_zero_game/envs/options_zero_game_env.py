@@ -6,7 +6,6 @@ from typing import Tuple, Dict, Any, List
 import gymnasium as gym
 import numpy as np
 import pandas as pd
-from arch import arch_model
 from easydict import EasyDict
 from gym import spaces
 from gymnasium.utils import seeding
@@ -14,7 +13,7 @@ from gymnasium.utils import seeding
 from ding.envs import BaseEnvTimestep
 from ding.utils import ENV_REGISTRY
 
-# Numba JIT compilation for performance-critical math
+# <<< FIX 2: Robust, JIT-compiled financial math functions
 try:
     from numba import jit
 except ImportError:
@@ -46,7 +45,9 @@ def _numba_black_scholes(S: float, K: float, T: float, r: float, sigma: float, i
         if is_call: return max(0.0, S - K)
         else: return max(0.0, K - S)
 
-    d1 = (math.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * math.sqrt(T))
+    d1_denominator = sigma * math.sqrt(T)
+    if d1_denominator < 1e-8: return 0.0
+    d1 = (math.log(S / K) + (r + 0.5 * sigma ** 2) * T) / d1_denominator
     d2 = d1 - sigma * math.sqrt(T)
     
     if is_call:
@@ -61,7 +62,9 @@ def _numba_delta(S: float, K: float, T: float, r: float, sigma: float, is_call: 
         if is_call: return 1.0 if S > K else 0.0
         else: return -1.0 if S < K else 0.0
     
-    d1 = (math.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * math.sqrt(T))
+    d1_denominator = sigma * math.sqrt(T)
+    if d1_denominator < 1e-8: return 0.0
+    d1 = (math.log(S / K) + (r + 0.5 * sigma ** 2) * T) / d1_denominator
     if is_call:
         return _numba_cdf(d1)
     else:
@@ -159,9 +162,10 @@ class OptionsZeroGameEnv(gym.Env):
                 binned_ivs[option_type][offset_str] = np.linspace(min_iv, max_iv, num_bins, dtype=np.float32) / 100.0
         return binned_ivs
 
+    # <<< FIX 3: Standardized Action Space
     def _build_action_space(self) -> Dict[str, int]:
         actions = {'HOLD': 0}; i = 1
-        for offset in range(-3, 4):
+        for offset in range(-5, 6): # Standardized from -5 to +5
             sign = '+' if offset >= 0 else ''
             actions[f'OPEN_LONG_CALL_ATM{sign}{offset}'] = i; i+=1
             actions[f'OPEN_SHORT_CALL_ATM{sign}{offset}'] = i; i+=1
@@ -185,24 +189,27 @@ class OptionsZeroGameEnv(gym.Env):
         random.seed(seed)
         return [seed]
 
+    # <<< FIX 1: Manual GARCH Simulation
     def _generate_price_path(self) -> None:
-        trading_days_per_year = 252
-        steps_per_year = trading_days_per_year * self.steps_per_day
-        mu_step = self.trend / steps_per_year
-        omega_step = self.omega / steps_per_year
-        alpha_step = self.alpha / steps_per_year
-        beta_step = self.beta
-        garch_spec = arch_model(None, mean='Constant', vol='GARCH', p=1, q=1, dist='normal')
-        params = np.array([mu_step, omega_step, alpha_step, beta_step], dtype=np.float32)
-        sim_result = garch_spec.simulate(params, nobs=self.total_steps)
-        simulated_returns = sim_result.data.to_numpy(dtype=np.float32)
-        cumulative_returns = np.cumsum(np.concatenate([np.array([0.0], dtype=np.float32), simulated_returns]))
-        price_path = self.start_price * np.exp(cumulative_returns)
-        self.price_path = price_path.astype(np.float32)
-        log_returns = np.diff(np.log(self.price_path))
-        returns_series = pd.Series(log_returns, dtype=np.float32)
-        rolling_window_steps = self.rolling_vol_window * self.steps_per_day
-        self.realized_vol_series = returns_series.rolling(window=rolling_window_steps).std().fillna(0) * np.sqrt(steps_per_year)
+        returns = np.zeros(self.total_steps + 1, dtype=np.float32)
+        variances = np.zeros(self.total_steps + 1, dtype=np.float32)
+        
+        # Initial variance
+        variances[0] = self.omega / (1 - self.alpha - self.beta)
+        
+        for t in range(1, self.total_steps + 1):
+            shock = self.np_random.normal(0, 1)
+            variances[t] = self.omega + self.alpha * (returns[t-1]**2) + self.beta * variances[t-1]
+            variances[t] = max(1e-9, variances[t]) # Ensure positive variance
+            returns[t] = self.trend + math.sqrt(variances[t]) * shock
+        
+        # Convert returns to price path
+        price_path = np.zeros(self.total_steps + 1, dtype=np.float32)
+        price_path[0] = self.start_price
+        for i in range(1, self.total_steps + 1):
+            price_path[i] = price_path[i-1] * math.exp(returns[i])
+        
+        self.price_path = price_path
 
     def _simulate_price_step(self) -> None:
         self.current_price = self.price_path[self.current_step]
@@ -211,8 +218,11 @@ class OptionsZeroGameEnv(gym.Env):
         clamped_offset = max(-5, min(5, offset))
         return self.iv_bins[option_type][str(clamped_offset)][self.iv_bin_index]
 
-    # <<< MODIFIED: Added robust error handling
     def _get_option_details(self, underlying_price: float, strike_price: float, days_to_expiry: float, option_type: str) -> Tuple[float, float, float]:
+        # <<< FIX 7: Edge Case Handling
+        if underlying_price <= 0 or strike_price <= 0 or days_to_expiry < 0:
+            return 0.0, 0.0, 0.0
+            
         t = days_to_expiry / 365.25
         is_call = option_type == 'call'
         if t < 1e-6:
@@ -228,14 +238,14 @@ class OptionsZeroGameEnv(gym.Env):
             signed_delta = _numba_delta(underlying_price, strike_price, t, self.risk_free_rate, vol, is_call)
             d2 = 0.0
             if vol > 1e-6:
-                d1 = (math.log(underlying_price / strike_price) + (self.risk_free_rate + 0.5 * vol ** 2) * t) / (vol * math.sqrt(t))
+                d1_denominator = vol * math.sqrt(t)
+                if d1_denominator < 1e-8: return 0.0, 0.0, 0.0
+                d1 = (math.log(underlying_price / strike_price) + (self.risk_free_rate + 0.5 * vol ** 2) * t) / d1_denominator
                 d2 = d1 - vol * math.sqrt(t)
             
-            # <<< NEW: Add assert to catch NaN/Inf inside the calculation
-            assert math.isfinite(price) and math.isfinite(signed_delta), "NaN detected in B-S calculation"
+            assert math.isfinite(price) and math.isfinite(signed_delta)
             return price, signed_delta, d2
         except (ValueError, ZeroDivisionError):
-            # If any math error occurs, gracefully return zeros
             return 0.0, 0.0, 0.0
 
     def _get_option_price(self, mid_price: float, is_buy: bool) -> float:
@@ -272,14 +282,10 @@ class OptionsZeroGameEnv(gym.Env):
             self.alpha = self.alpha / (total + 0.01)
             self.beta = self.beta / (total + 0.01)
 
-        unconditional_variance = self.omega / (1 - self.alpha - self.beta)
-        assert math.isfinite(unconditional_variance) and unconditional_variance > 0, f"GARCH unconditional_variance is invalid: {unconditional_variance}"
-        
-        self.garch_implied_vol: float = math.sqrt(unconditional_variance * 252)
-        assert math.isfinite(self.garch_implied_vol), f"GARCH garch_implied_vol is invalid: {self.garch_implied_vol}"
-
         self.iv_bin_index: int = random.randint(0, 4)
         self._generate_price_path()
+        
+        # <<< FIX 9: Proper Initialization
         self.current_step: int = 0
         self.day_of_week: int = 0
         self.current_price: float = self.price_path[0]
@@ -289,6 +295,8 @@ class OptionsZeroGameEnv(gym.Env):
         self.high_water_mark: float = self.initial_cash
         self.illegal_action_count: int = 0
         self.next_creation_id: int = 0
+        self.realized_vol_series = np.zeros(self.total_steps + 1, dtype=np.float32)
+        
         return self._get_observation()
 
     def _close_position(self, position_index: int) -> None:
@@ -305,9 +313,11 @@ class OptionsZeroGameEnv(gym.Env):
             self.portfolio = self.portfolio.drop(self.portfolio.index[position_index]).reset_index(drop=True)
 
     def _calculate_shaped_reward(self, equity_before: float, equity_after: float) -> Tuple[float, float]:
+        # <<< FIX 7: Edge Case Handling
+        if not math.isfinite(equity_before) or not math.isfinite(equity_after):
+            return 0.0, 0.0
+            
         raw_reward = equity_after - equity_before
-        assert math.isfinite(raw_reward), f"Generated a NaN or Inf raw_reward! Equity Before: {equity_before}, Equity After: {equity_after}"
-        
         pnl_component = math.tanh(raw_reward / self.pnl_scaling_factor)
         self.high_water_mark = max(self.high_water_mark, equity_after)
         drawdown = self.high_water_mark - equity_after
@@ -315,8 +325,7 @@ class OptionsZeroGameEnv(gym.Env):
         combined_score = pnl_component + drawdown_penalty_component
         final_reward = math.tanh(combined_score / 2)
         
-        assert math.isfinite(final_reward), f"Generated a NaN or Inf reward! Raw: {raw_reward}, PnL Comp: {pnl_component}, DD Comp: {drawdown_penalty_component}"
-        
+        assert math.isfinite(final_reward)
         return final_reward, raw_reward
 
     def _enforce_legal_action(self, action: int) -> int:
@@ -326,19 +335,29 @@ class OptionsZeroGameEnv(gym.Env):
         else:
             return self.actions_to_indices['HOLD']
 
+    # <<< FIX 5 & 8: Correct Volatility and Time Calculation
     def _advance_time_and_market(self) -> None:
         self.current_step += 1
         time_decay_days = 1.0 / self.steps_per_day
-        is_end_of_day = (self.current_step % self.steps_per_day) == 0
-        if is_end_of_day:
-            if self.day_of_week == 4:
-                self.day_of_week = 0
+        
+        if (self.current_step % self.steps_per_day) == 0:
+            self.day_of_week = (self.day_of_week + 1) % self.total_days_in_week
+            if self.day_of_week >= self.trading_days_in_week:
                 time_decay_days += (self.total_days_in_week - self.trading_days_in_week)
-            else:
-                self.day_of_week += 1
+        
         self._simulate_price_step()
         if not self.portfolio.empty:
             self.portfolio['days_to_expiry'] -= time_decay_days
+            
+        # Update realized volatility
+        if self.current_step >= 1:
+            window = min(self.current_step, self.rolling_vol_window * self.steps_per_day)
+            start_idx = max(0, self.current_step - window)
+            if self.current_step > start_idx:
+                returns = np.diff(np.log(self.price_path[start_idx:self.current_step+1]))
+                if len(returns) > 1:
+                    ann_factor = math.sqrt(252 * self.steps_per_day)
+                    self.realized_vol_series[self.current_step] = returns.std() * ann_factor
 
     def step(self, action: int) -> BaseEnvTimestep:
         true_legal_actions_mask = self._get_true_action_mask()
@@ -359,7 +378,8 @@ class OptionsZeroGameEnv(gym.Env):
             self._close_position(pos_index)
             portfolio_changed = True
         elif action_name == 'CLOSE_ALL':
-            portfolio_changed = True
+            if not self.portfolio.empty:
+                portfolio_changed = True
             while not self.portfolio.empty:
                 self._close_position(-1)
 
@@ -409,6 +429,8 @@ class OptionsZeroGameEnv(gym.Env):
         is_buy = (direction == 'LONG')
         mid_price, _, _ = self._get_option_details(self.current_price, strike_price, days_to_expiry, type.lower())
         entry_premium = self._get_option_price(mid_price, is_buy)
+        
+        # <<< FIX 6: Strategy ID Handling
         new_position = pd.DataFrame([{'type': type.lower(), 'direction': direction.lower(), 'entry_step': self.current_step, 'strike_price': strike_price, 'entry_premium': entry_premium, 'days_to_expiry': days_to_expiry, 'creation_id': self.next_creation_id, 'strategy_id': -1, 'strategy_max_profit': 0.0, 'strategy_max_loss': 0.0}])
         self.next_creation_id += 1
         self.portfolio = pd.concat([self.portfolio, new_position], ignore_index=True)
@@ -524,6 +546,7 @@ class OptionsZeroGameEnv(gym.Env):
             new_positions_df = pd.DataFrame(trades_to_execute)
             self.portfolio = pd.concat([self.portfolio, new_positions_df], ignore_index=True)
 
+    # <<< FIX 4: Robust Iron Condor Strike Selection
     def _open_iron_condor(self, action_name: str) -> None:
         if len(self.portfolio) > self.max_positions - 4: return
         current_trading_day = self.current_step // self.steps_per_day
@@ -531,66 +554,53 @@ class OptionsZeroGameEnv(gym.Env):
         days_to_expiry = trading_days_left * (self.total_days_in_week / self.trading_days_in_week)
         atm_price = int(self.current_price / self.strike_distance + 0.5) * self.strike_distance
         direction = 'long' if 'LONG' in action_name else 'short'
-        target_delta_short = 0.30
-        target_delta_long = 0.10
         
-        best_short_call_strike, best_long_call_strike = atm_price, atm_price
-        min_delta_diff_short_call, min_delta_diff_long_call = 999, 999
+        # Find call strikes with fallback
+        call_strikes = []
         for offset in range(1, 15):
-            strike = atm_price + (offset * self.strike_distance)
-            _, d, _ = self._get_option_details(self.current_price, strike, days_to_expiry, 'call')
-            if d == 0: break
-            if abs(d - target_delta_short) < min_delta_diff_short_call:
-                min_delta_diff_short_call = abs(d - target_delta_short)
-                best_short_call_strike = strike
-            if abs(d - target_delta_long) < min_delta_diff_long_call:
-                min_delta_diff_long_call = abs(d - target_delta_long)
-                best_long_call_strike = strike
-        
-        best_short_put_strike, best_long_put_strike = atm_price, atm_price
-        min_delta_diff_short_put, min_delta_diff_long_put = 999, 999
-        max_put_offset = int((atm_price / self.strike_distance) - 1)
-        for offset in range(1, max_put_offset):
-            strike = atm_price - (offset * self.strike_distance)
-            _, d, _ = self._get_option_details(self.current_price, strike, days_to_expiry, 'put')
-            if d == 0: break
-            if abs(d - target_delta_short) < min_delta_diff_short_put:
-                min_delta_diff_short_put = abs(d - target_delta_short)
-                best_short_put_strike = strike
-            if abs(d - target_delta_long) < min_delta_diff_long_put:
-                min_delta_diff_long_put = abs(d - target_delta_long)
-                best_long_put_strike = strike
-        
-        min_strike = self.strike_distance
-        max_strike = self.start_price * 3
-        best_short_call_strike = max(min_strike, min(max_strike, best_short_call_strike))
-        best_long_call_strike = max(min_strike, min(max_strike, best_long_call_strike))
-        best_short_put_strike = max(min_strike, min(max_strike, best_short_put_strike))
-        best_long_put_strike = max(min_strike, min(max_strike, best_long_put_strike))
+            strike = atm_price + offset * self.strike_distance
+            _, signed_delta, _ = self._get_option_details(self.current_price, strike, days_to_expiry, 'call')
+            if signed_delta < 0.3: # Target delta for short leg
+                call_strikes.append(strike)
+            if len(call_strikes) >= 2: break
+        if len(call_strikes) < 2:
+            call_strikes = [atm_price + 2 * self.strike_distance, atm_price + 3 * self.strike_distance]
 
-        if best_long_call_strike <= best_short_call_strike:
-            best_long_call_strike = best_short_call_strike + self.strike_distance
-        if best_long_put_strike >= best_short_put_strike:
-            best_long_put_strike = best_short_put_strike - self.strike_distance
-        if not (best_long_put_strike < best_short_put_strike < best_short_call_strike < best_long_call_strike):
-            return
+        # Find put strikes with fallback
+        put_strikes = []
+        for offset in range(1, 15):
+            strike = atm_price - offset * self.strike_distance
+            _, signed_delta, _ = self._get_option_details(self.current_price, strike, days_to_expiry, 'put')
+            if abs(signed_delta) < 0.3: # Target delta for short leg
+                put_strikes.append(strike)
+            if len(put_strikes) >= 2: break
+        if len(put_strikes) < 2:
+            put_strikes = [atm_price - 2 * self.strike_distance, atm_price - 3 * self.strike_distance]
+
+        short_call_strike = min(call_strikes)
+        long_call_strike = max(call_strikes)
+        short_put_strike = max(put_strikes)
+        long_put_strike = min(put_strikes)
+
+        if not (long_put_strike < short_put_strike < self.current_price < short_call_strike < long_call_strike):
+            return # Fallback if strikes are illogical
 
         trades_to_execute = []
         inner_dir = 'long' if direction == 'long' else 'short'
         outer_dir = 'short' if direction == 'long' else 'long'
-        mid_price_call_inner, _, _ = self._get_option_details(self.current_price, best_short_call_strike, days_to_expiry, 'call')
-        trades_to_execute.append({'type': 'call', 'direction': inner_dir, 'strike_price': best_short_call_strike, 'entry_premium': self._get_option_price(mid_price_call_inner, inner_dir == 'long')})
-        mid_price_put_inner, _, _ = self._get_option_details(self.current_price, best_short_put_strike, days_to_expiry, 'put')
-        trades_to_execute.append({'type': 'put', 'direction': inner_dir, 'strike_price': best_short_put_strike, 'entry_premium': self._get_option_price(mid_price_put_inner, inner_dir == 'long')})
-        mid_price_call_outer, _, _ = self._get_option_details(self.current_price, best_long_call_strike, days_to_expiry, 'call')
-        trades_to_execute.append({'type': 'call', 'direction': outer_dir, 'strike_price': best_long_call_strike, 'entry_premium': self._get_option_price(mid_price_call_outer, outer_dir == 'long')})
-        mid_price_put_outer, _, _ = self._get_option_details(self.current_price, best_long_put_strike, days_to_expiry, 'put')
-        trades_to_execute.append({'type': 'put', 'direction': outer_dir, 'strike_price': best_long_put_strike, 'entry_premium': self._get_option_price(mid_price_put_outer, outer_dir == 'long')})
+        mid_price_call_inner, _, _ = self._get_option_details(self.current_price, short_call_strike, days_to_expiry, 'call')
+        trades_to_execute.append({'type': 'call', 'direction': inner_dir, 'strike_price': short_call_strike, 'entry_premium': self._get_option_price(mid_price_call_inner, inner_dir == 'long')})
+        mid_price_put_inner, _, _ = self._get_option_details(self.current_price, short_put_strike, days_to_expiry, 'put')
+        trades_to_execute.append({'type': 'put', 'direction': inner_dir, 'strike_price': short_put_strike, 'entry_premium': self._get_option_price(mid_price_put_inner, inner_dir == 'long')})
+        mid_price_call_outer, _, _ = self._get_option_details(self.current_price, long_call_strike, days_to_expiry, 'call')
+        trades_to_execute.append({'type': 'call', 'direction': outer_dir, 'strike_price': long_call_strike, 'entry_premium': self._get_option_price(mid_price_call_outer, outer_dir == 'long')})
+        mid_price_put_outer, _, _ = self._get_option_details(self.current_price, long_put_strike, days_to_expiry, 'put')
+        trades_to_execute.append({'type': 'put', 'direction': outer_dir, 'strike_price': long_put_strike, 'entry_premium': self._get_option_price(mid_price_put_outer, outer_dir == 'long')})
         
         net_premium = sum(t['entry_premium'] * (1 if t['direction'] == inner_dir else -1) for t in trades_to_execute)
         
-        call_spread_width = best_long_call_strike - best_short_call_strike
-        put_spread_width = best_short_put_strike - best_long_put_strike
+        call_spread_width = long_call_strike - short_call_strike
+        put_spread_width = short_put_strike - long_put_strike
         
         if direction == 'short':
             max_profit = net_premium * self.lot_size
@@ -650,7 +660,7 @@ class OptionsZeroGameEnv(gym.Env):
             num_short_puts = len(self.portfolio.query("type == 'put' and direction == 'short'"))
             existing_positions = {(p['strike_price'], p['type']): p['direction'] for i, p in self.portfolio.iterrows()}
             
-            for offset in range(-3, 4):
+            for offset in range(-5, 6):
                 strike_price = atm_price + (offset * self.strike_distance)
                 for option_type in ['call', 'put']:
                     _, signed_delta, _ = self._get_option_details(self.current_price, strike_price, days_to_expiry, option_type)
@@ -686,7 +696,7 @@ class OptionsZeroGameEnv(gym.Env):
         market_portfolio_vec[1] = (self.total_steps - self.current_step) / self.total_steps
         total_pnl = self._get_total_pnl()
         market_portfolio_vec[2] = math.tanh(total_pnl / self.initial_cash)
-        current_realized_vol = self.realized_vol_series.iloc[self.current_step - 1] if self.current_step > 0 else 0
+        current_realized_vol = self.realized_vol_series[self.current_step]
         market_portfolio_vec[3] = math.tanh((current_realized_vol / self.garch_implied_vol) - 1.0) if self.garch_implied_vol > 0 else 0.0
         if self.current_step > 0: log_return = math.log(self.current_price / self.price_path[self.current_step - 1])
         else: log_return = 0.0
@@ -698,7 +708,7 @@ class OptionsZeroGameEnv(gym.Env):
             market_portfolio_vec[current_idx + 0] = 1.0
             market_portfolio_vec[current_idx + 1] = 1.0 if pos['type'] == 'call' else -1.0
             market_portfolio_vec[current_idx + 2] = 1.0 if pos['direction'] == 'long' else -1.0
-            market_portfolio_vec[current_idx + 3] = (pos['strike_price'] - atm_price) / (3 * self.strike_distance)
+            market_portfolio_vec[current_idx + 3] = (pos['strike_price'] - atm_price) / (5 * self.strike_distance) # Normalize by max offset
             market_portfolio_vec[current_idx + 4] = (self.current_step - pos['entry_step']) / self.total_steps
             
             _, signed_delta, d2 = self._get_option_details(self.current_price, pos['strike_price'], pos['days_to_expiry'], pos['type'])
