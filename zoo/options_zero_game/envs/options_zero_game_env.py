@@ -3,13 +3,13 @@ import math
 import random
 from typing import Tuple, Dict, Any, List
 
-import gymnasium as gym
+import gymnasium as gym # Using the correct, modern library
 import numpy as np
 import pandas as pd
 from arch import arch_model
 from easydict import EasyDict
 from gym import spaces
-from gym.utils import seeding
+from gymnasium.utils import seeding # Using the correct, modern library
 
 from ding.envs import BaseEnvTimestep
 from ding.utils import ENV_REGISTRY
@@ -69,13 +69,6 @@ def _numba_delta(S: float, K: float, T: float, r: float, sigma: float, is_call: 
 
 @ENV_REGISTRY.register('options_zero_game')
 class OptionsZeroGameEnv(gym.Env):
-    """
-    Options-Zero-Game: A Reinforcement Learning Environment for Options Trading.
-
-    This environment simulates a realistic options trading scenario where an RL agent
-    can learn to manage a portfolio of options under a variety of market conditions
-    and a strict set of professional trading rules.
-    """
     metadata = {'render.modes': ['human']}
 
     config = dict(
@@ -120,7 +113,9 @@ class OptionsZeroGameEnv(gym.Env):
 
         self.start_price: float = self._cfg.start_price
         self.initial_cash: float = self._cfg.initial_cash
+        # <<< MODIFIED: Store the curriculum of regimes passed from the config
         self.market_regimes: List[Dict[str, Any]] = self._cfg.market_regimes
+        
         self.rolling_vol_window: int = self._cfg.rolling_vol_window
         self.time_to_expiry_days: int = self._cfg.time_to_expiry_days
         self.steps_per_day: int = self._cfg.steps_per_day
@@ -147,7 +142,6 @@ class OptionsZeroGameEnv(gym.Env):
         self.action_space_size: int = len(self.actions_to_indices)
 
         self._action_space: spaces.Discrete = spaces.Discrete(self.action_space_size)
-        # <<< MODIFIED: The observation_space is now a simple Box, as per Gym standard.
         self.market_and_portfolio_state_size = 5 + self.max_positions * 9
         self.obs_vector_size = self.market_and_portfolio_state_size + self.action_space_size
         self._observation_space: spaces.Box = spaces.Box(low=-np.inf, high=np.inf, shape=(self.obs_vector_size,), dtype=np.float32)
@@ -194,35 +188,19 @@ class OptionsZeroGameEnv(gym.Env):
         return [seed]
 
     def _generate_price_path(self) -> None:
-        """
-        Generates a realistic, GARCH(1,1)-based price path for an entire episode.
-
-        This function scales annualized, daily GARCH parameters to an intra-day,
-        per-step level. It then uses the arch library to simulate a path of log returns,
-        which is efficiently converted to a price path using vectorized NumPy operations.
-        """
         trading_days_per_year = 252
         steps_per_year = trading_days_per_year * self.steps_per_day
-
-        # Scale daily parameters to the per-step frequency for realism
         mu_step = self.trend / steps_per_year
         omega_step = self.omega / steps_per_year
-        alpha_step = self.alpha / steps_per_year # Use the safer, scaled alpha
-        beta_step = self.beta # Beta is a persistence coefficient and is not scaled
-
+        alpha_step = self.alpha / steps_per_year
+        beta_step = self.beta
         garch_spec = arch_model(None, mean='Constant', vol='GARCH', p=1, q=1, dist='normal')
         params = np.array([mu_step, omega_step, alpha_step, beta_step], dtype=np.float32)
-
-        # Simulate the returns for the entire episode
         sim_result = garch_spec.simulate(params, nobs=self.total_steps)
         simulated_returns = sim_result.data.to_numpy(dtype=np.float32)
-
-        # Build the price path efficiently from the simulated returns
         cumulative_returns = np.cumsum(np.concatenate([np.array([0.0], dtype=np.float32), simulated_returns]))
         price_path = self.start_price * np.exp(cumulative_returns)
         self.price_path = price_path.astype(np.float32)
-
-        # Compute the realized volatility series
         log_returns = np.diff(np.log(self.price_path))
         returns_series = pd.Series(log_returns, dtype=np.float32)
         rolling_window_steps = self.rolling_vol_window * self.steps_per_day
@@ -238,24 +216,19 @@ class OptionsZeroGameEnv(gym.Env):
     def _get_option_details(self, underlying_price: float, strike_price: float, days_to_expiry: float, option_type: str) -> Tuple[float, float, float]:
         t = days_to_expiry / 365.25
         is_call = option_type == 'call'
-        
         if t < 1e-6:
             intrinsic = max(0.0, underlying_price - strike_price) if is_call else max(0.0, strike_price - underlying_price)
             delta_val = 1.0 if intrinsic > 0 else 0.0
             return intrinsic, delta_val, 0.0
-
         atm_price = int(underlying_price / self.strike_distance + 0.5) * self.strike_distance
         offset = round((strike_price - atm_price) / self.strike_distance)
         vol = self._get_implied_volatility(offset, option_type)
-
         price = _numba_black_scholes(underlying_price, strike_price, t, self.risk_free_rate, vol, is_call)
         signed_delta = _numba_delta(underlying_price, strike_price, t, self.risk_free_rate, vol, is_call)
-        
         d2 = 0.0
         if vol > 1e-6:
             d1 = (math.log(underlying_price / strike_price) + (self.risk_free_rate + 0.5 * vol ** 2) * t) / (vol * math.sqrt(t))
             d2 = d1 - vol * math.sqrt(t)
-            
         return price, signed_delta, d2
 
     def _get_option_price(self, mid_price: float, is_buy: bool) -> float:
@@ -265,13 +238,11 @@ class OptionsZeroGameEnv(gym.Env):
     def _get_total_pnl(self) -> float:
         if self.portfolio.empty:
             return self.realized_pnl
-        
         def calculate_pnl(row):
             mid_price, _, _ = self._get_option_details(self.current_price, row['strike_price'], row['days_to_expiry'], row['type'])
             current_price = self._get_option_price(mid_price, row['direction'] == 'short')
             price_diff = current_price - row['entry_premium']
             return price_diff * self.lot_size * (1 if row['direction'] == 'long' else -1)
-        
         unrealized_pnl = self.portfolio.apply(calculate_pnl, axis=1).sum()
         return self.realized_pnl + unrealized_pnl
 
@@ -282,6 +253,7 @@ class OptionsZeroGameEnv(gym.Env):
         if seed is not None: self.seed(seed)
         elif self.np_random is None: self.seed(0)
 
+        # <<< MODIFIED: The "Teacher" selects a new lesson for each episode
         chosen_regime = random.choice(self.market_regimes)
         self.current_regime_name = chosen_regime['name']
         self.trend: float = chosen_regime['mu']
@@ -380,7 +352,6 @@ class OptionsZeroGameEnv(gym.Env):
             while not self.portfolio.empty:
                 self._close_position(-1)
 
-        # <<< MODIFIED: Only sort the portfolio when its structure has changed
         if portfolio_changed and not self.portfolio.empty:
             self.portfolio = self.portfolio.sort_values(by=['strike_price', 'type', 'creation_id']).reset_index(drop=True)
 
@@ -427,7 +398,7 @@ class OptionsZeroGameEnv(gym.Env):
         is_buy = (direction == 'LONG')
         mid_price, _, _ = self._get_option_details(self.current_price, strike_price, days_to_expiry, type.lower())
         entry_premium = self._get_option_price(mid_price, is_buy)
-        new_position = pd.DataFrame([{'type': type.lower(), 'direction': direction.lower(), 'entry_step': self.current_step, 'strike_price': strike_price, 'entry_premium': entry_premium, 'days_to_expiry': days_to_expiry, 'creation_id': self.next_creation_id, 'strategy_id': self.next_creation_id, 'strategy_max_profit': 0.0, 'strategy_max_loss': 0.0}])
+        new_position = pd.DataFrame([{'type': type.lower(), 'direction': direction.lower(), 'entry_step': self.current_step, 'strike_price': strike_price, 'entry_premium': entry_premium, 'days_to_expiry': days_to_expiry, 'creation_id': self.next_creation_id, 'strategy_id': -1, 'strategy_max_profit': 0.0, 'strategy_max_loss': 0.0}])
         self.next_creation_id += 1
         self.portfolio = pd.concat([self.portfolio, new_position], ignore_index=True)
 
@@ -671,8 +642,8 @@ class OptionsZeroGameEnv(gym.Env):
             for offset in range(-3, 4):
                 strike_price = atm_price + (offset * self.strike_distance)
                 for option_type in ['call', 'put']:
-                    _, delta, _ = self._get_option_details(self.current_price, strike_price, days_to_expiry, option_type)
-                    abs_delta = abs(delta)
+                    _, signed_delta, _ = self._get_option_details(self.current_price, strike_price, days_to_expiry, option_type)
+                    abs_delta = abs(signed_delta)
                     is_far_otm = abs_delta < self.otm_threshold
                     is_far_itm = abs_delta > self.itm_threshold
                     
