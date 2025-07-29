@@ -17,10 +17,8 @@ max_env_step = int(5e6)
 reanalyze_ratio = 0.
 n_episode = 8
 
-# <<< MODIFIED: The final, correct action space size from the v1.0 env
 action_space_size = 58
 
-# <<< MODIFIED: The final, correct observation shape from the v1.0 env
 observation_shape = 99
 
 market_regimes = [
@@ -55,7 +53,6 @@ options_zero_game_muzero_config = dict(
         market_regimes=market_regimes,
         illegal_action_penalty=-1.0,
         rolling_vol_window=5,
-        steps_per_day=75,
     ),
     policy=dict(
         model=dict(
