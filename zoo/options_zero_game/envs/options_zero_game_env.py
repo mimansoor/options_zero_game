@@ -71,7 +71,7 @@ class OptionsZeroGameEnv(gym.Env): # <<< FIX: Inherit from gym.Env (gymnasium as
     config = dict(
         start_price=20000.0, initial_cash=100000.0,
         market_regimes = [{'name': 'Developed_Market', 'mu': 0.00005, 'omega': 0.000005, 'alpha': 0.09, 'beta': 0.90}],
-        time_to_expiry_days=30, steps_per_day=75, rolling_vol_window=5,
+        time_to_expiry_days=20, steps_per_day=1, rolling_vol_window=5,
         iv_skew_table={'call': {'-5': (13.5, 16.0), '-4': (13.3, 15.8), '-3': (13.2, 15.7), '-2': (13.1, 15.5), '-1': (13.0, 15.4), '0': (13.0, 15.3), '1': (13.0, 15.4), '2': (13.1, 15.6), '3': (13.2, 15.7), '4': (13.3, 15.8), '5': (13.5, 16.0)},'put':  {'-5': (14.0, 16.5), '-4': (13.8, 16.3), '-3': (13.8, 16.1), '-2': (13.6, 16.0), '-1': (13.5, 15.8), '0': (13.5, 15.8), '1': (13.5, 15.8), '2': (13.6, 16.0), '3': (13.8, 16.1), '4': (13.8, 16.3), '5': (14.0, 16.5)}},
         strike_distance=50.0, lot_size=75, max_positions=4, bid_ask_spread_pct=0.002, risk_free_rate=0.10,
         pnl_scaling_factor=1000, drawdown_penalty_weight=0.1, illegal_action_penalty=-1.0,
