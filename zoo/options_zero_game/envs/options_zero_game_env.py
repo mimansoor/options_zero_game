@@ -275,7 +275,13 @@ class OptionsZeroGameEnv(gym.Env): # <<< FIX: Inherit from gym.Env (gymnasium as
         if self.render_mode is not None:
             self.render(self.render_mode)
 
-        return BaseEnvTimestep(obs, np.float32(0.0), False, {})
+        if self.ignore_legal_actions:
+            mcts_action_mask = np.ones(self.action_space_size, dtype=np.int8)
+        else:
+            mcts_action_mask = self._get_true_action_mask()
+
+        observation = {'observation': obs, 'action_mask': mcts_action_mask, 'to_play': -1}
+        return BaseEnvTimestep(observation, np.float32(0.0), False, {})
 
     def _close_position(self, position_index: int) -> None:
         if position_index < 0:
@@ -373,8 +379,13 @@ class OptionsZeroGameEnv(gym.Env): # <<< FIX: Inherit from gym.Env (gymnasium as
             final_reward = shaped_reward
         self._final_eval_reward += raw_reward
         obs = self._get_observation()
+        if self.ignore_legal_actions:
+            mcts_action_mask = np.ones(self.action_space_size, dtype=np.int8)
+        else:
+            mcts_action_mask = true_legal_actions_mask
         info = {'price': self.current_price, 'eval_episode_return': self._final_eval_reward, 'illegal_actions_in_episode': self.illegal_action_count}
-        return BaseEnvTimestep(obs, final_reward, terminated, info)
+        observation = {'observation': obs, 'action_mask': mcts_action_mask, 'to_play': -1}
+        return BaseEnvTimestep(observation, final_reward, terminated, info)
 
     def _handle_open_action(self, action_name: str) -> None:
         if 'IRON_CONDOR' in action_name: self._open_iron_condor(action_name)
@@ -617,11 +628,7 @@ class OptionsZeroGameEnv(gym.Env): # <<< FIX: Inherit from gym.Env (gymnasium as
             current_idx += 9
         true_action_mask = self._get_true_action_mask()
         final_obs_vec = np.concatenate((market_portfolio_vec, true_action_mask.astype(np.float32)))
-        if self.ignore_legal_actions:
-            mcts_action_mask = np.ones(self.action_space_size, dtype=np.int8)
-        else:
-            mcts_action_mask = true_action_mask
-        return {'observation': final_obs_vec, 'action_mask': mcts_action_mask, 'to_play': -1}
+        return final_obs_vec
 
     def render(self, mode: str = 'human') -> None:
         total_pnl = self._get_total_pnl()
