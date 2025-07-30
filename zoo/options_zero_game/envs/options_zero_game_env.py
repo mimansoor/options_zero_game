@@ -240,7 +240,7 @@ class OptionsZeroGameEnv(gym.Env): # <<< FIX: Inherit from gym.Env (gymnasium as
     def _get_current_equity(self) -> float:
         return self.initial_cash + self._get_total_pnl()
 
-    def reset(self, seed: int = None, **kwargs) -> BaseEnvTimestep:
+    def reset(self, seed: int = None, **kwargs):
         if seed is not None: self.seed(seed)
         elif self.np_random is None: self.seed(0)
         chosen_regime = random.choice(self.market_regimes)
@@ -281,7 +281,7 @@ class OptionsZeroGameEnv(gym.Env): # <<< FIX: Inherit from gym.Env (gymnasium as
             mcts_action_mask = self._get_true_action_mask()
 
         observation = {'observation': obs, 'action_mask': mcts_action_mask, 'to_play': -1}
-        return BaseEnvTimestep(observation, np.float32(0.0), False, {})
+        return observation
 
     def _close_position(self, position_index: int) -> None:
         if position_index < 0:
@@ -298,6 +298,7 @@ class OptionsZeroGameEnv(gym.Env): # <<< FIX: Inherit from gym.Env (gymnasium as
                 pnl = (entry_premium - exit_premium) * self.lot_size
             self.realized_pnl += pnl
             self.portfolio = self.portfolio.drop(self.portfolio.index[position_index]).reset_index(drop=True)
+
     def _calculate_shaped_reward(self, equity_before: float, equity_after: float) -> Tuple[float, float]:
         if not math.isfinite(equity_before) or not math.isfinite(equity_after):
             return 0.0, 0.0
@@ -310,27 +311,44 @@ class OptionsZeroGameEnv(gym.Env): # <<< FIX: Inherit from gym.Env (gymnasium as
         final_reward = math.tanh(combined_score / 2)
         assert math.isfinite(final_reward)
         return final_reward, raw_reward
+
     def _enforce_legal_action(self, action: int) -> int:
         true_legal_actions_mask = self._get_true_action_mask()
         if true_legal_actions_mask[action] == 1:
             return action
         else:
             return self.actions_to_indices['HOLD']
+
     def _advance_time_and_market(self) -> None:
-        self.current_step += 1
+        # <<< MODIFIED: Final, robust time decay logic
+
+        # 1. Calculate the decay for the current trading step
         time_decay_days = 1.0 / self.steps_per_day
-        is_end_of_day = (self.current_step % self.steps_per_day) == 0
+
+        # 2. Check if this step is the *last* step of a trading day
+        is_end_of_day = (self.current_step + 1) % self.steps_per_day == 0
         if is_end_of_day:
+            # If it's the end of a Friday, add the weekend decay
+            if self.day_of_week == 4: # 4 = Friday
+                time_decay_days += (self.total_days_in_week - self.trading_days_in_week) # Add 2 days
+
+            # Increment the day of the week only at the end of the day
             self.day_of_week = (self.day_of_week + 1) % self.total_days_in_week
-            if self.day_of_week == self.trading_days_in_week:
-                time_decay_days += (self.total_days_in_week - self.trading_days_in_week)
+
+        # 3. Advance the master step counter and the market price
+        self.current_step += 1
         self._simulate_price_step()
+
+        # 4. Apply the calculated decay to all open positions
         if not self.portfolio.empty:
             self.portfolio['days_to_expiry'] = (self.portfolio['days_to_expiry'] - time_decay_days).clip(lower=0)
+
             expired_indices = self.portfolio[self.portfolio['days_to_expiry'] <= 1e-6].index
             if not expired_indices.empty:
                 for idx in sorted(expired_indices, reverse=True):
                     self._close_position(idx)
+
+        # 5. Update realized volatility (logic is correct from baseline)
         if self.current_step >= 1:
             window_size = self.rolling_vol_window * self.steps_per_day
             start_idx = max(0, self.current_step - window_size + 1)
@@ -343,7 +361,7 @@ class OptionsZeroGameEnv(gym.Env): # <<< FIX: Inherit from gym.Env (gymnasium as
             else:
                 self.realized_vol_series[self.current_step] = 0.0
 
-    def step(self, action: int) -> BaseEnvTimestep:
+    def step(self, action: int):
         true_legal_actions_mask = self._get_true_action_mask()
         was_illegal_action = true_legal_actions_mask[action] == 0
         if was_illegal_action:
@@ -371,19 +389,25 @@ class OptionsZeroGameEnv(gym.Env): # <<< FIX: Inherit from gym.Env (gymnasium as
         if terminated:
             while not self.portfolio.empty:
                 self._close_position(-1)
+
         equity_after = self._get_current_equity()
         shaped_reward, raw_reward = self._calculate_shaped_reward(equity_before, equity_after)
+
         if was_illegal_action:
             final_reward = self.illegal_action_penalty
         else:
             final_reward = shaped_reward
-        self._final_eval_reward += raw_reward
+
         obs = self._get_observation()
+        self._final_eval_reward += raw_reward
+
         if self.ignore_legal_actions:
             mcts_action_mask = np.ones(self.action_space_size, dtype=np.int8)
         else:
             mcts_action_mask = true_legal_actions_mask
+
         info = {'price': self.current_price, 'eval_episode_return': self._final_eval_reward, 'illegal_actions_in_episode': self.illegal_action_count}
+
         observation = {'observation': obs, 'action_mask': mcts_action_mask, 'to_play': -1}
         return BaseEnvTimestep(observation, final_reward, terminated, info)
 
