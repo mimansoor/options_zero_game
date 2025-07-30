@@ -1,8 +1,8 @@
-from easydict import EasyDict
 import copy
 import random
+from easydict import EasyDict
 
-# <<< NEW: Import the environment to get its version and default parameters
+# Import the environment to get its version and default parameters
 from zoo.options_zero_game.envs.options_zero_game_env import OptionsZeroGameEnv
 
 # ==============================================================
@@ -17,8 +17,12 @@ max_env_step = int(5e6)
 reanalyze_ratio = 0.
 n_episode = 8
 
+# <<< MODIFIED: The final, correct action space size derived from the environment
+# 1 HOLD + (11 strikes * 4 types) + 8 Combos + 4 CLOSE_i + 1 CLOSE_ALL = 1 + 44 + 8 + 4 + 1 = 58
 action_space_size = 58
 
+# <<< MODIFIED: The final, correct observation shape from the environment
+# 5 (global) + 4 slots * 9 features/slot + 58 (action mask) = 5 + 36 + 58 = 99
 observation_shape = 99
 
 market_regimes = [
@@ -41,7 +45,7 @@ market_regimes = [
 #                    Main Config (The Parameters)
 # ==============================================================
 options_zero_game_muzero_config = dict(
-    exp_name=f'options_zero_game_muzero_env_v{OptionsZeroGameEnv.VERSION}_ns{num_simulations}_upc{update_per_collect}_bs{batch_size}',
+    exp_name=f'options_zero_game_muzero_final_agent_v{OptionsZeroGameEnv.VERSION}_ns{num_simulations}_upc{update_per_collect}_bs{batch_size}',
     env=dict(
         env_id='OptionsZeroGame-v0',
         env_version=OptionsZeroGameEnv.VERSION,
@@ -49,6 +53,7 @@ options_zero_game_muzero_config = dict(
         evaluator_env_num=evaluator_env_num,
         n_evaluator_episode=evaluator_env_num,
         manager=dict(shared_memory=False, ),
+        # Pass all necessary parameters to the environment
         drawdown_penalty_weight=0.1,
         market_regimes=market_regimes,
         illegal_action_penalty=-1.0,
@@ -67,7 +72,6 @@ options_zero_game_muzero_config = dict(
         ),
         model_path = None,
         cuda=True,
-        # <<< MODIFIED: game_segment_length is now derived dynamically
         game_segment_length=OptionsZeroGameEnv.config['time_to_expiry_days'] * OptionsZeroGameEnv.config['steps_per_day'],
         update_per_collect=update_per_collect,
         batch_size=batch_size,

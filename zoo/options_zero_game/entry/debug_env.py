@@ -42,30 +42,34 @@ def run_random_agent_test():
         while not done:
             action_mask = obs['action_mask']
             legal_actions = np.where(action_mask == 1)[0]
-            
+
             if len(legal_actions) == 0:
                 action = env.actions_to_indices['HOLD']
             else:
                 action = random.choice(legal_actions)
 
-            # <<< NEW: Set a conditional breakpoint to pause only at the problematic step
-            if step_count == 104:
-                print(f"\n--- Pausing at Step {step_count} right before the error ---")
-                import pdb; pdb.set_trace()
-            
-            timestep = env.step(action)
-            obs, reward, done, info = timestep.obs, timestep.reward, timestep.done, timestep.info
-            
-            # Print the observation before the assertion
-            print(f"\n--- Debugging Step {step_count} ---")
-            print(f"Observation['observation'] shape: {obs['observation'].shape}")
-            
+            true_legal_actions_mask = env.legal_actions
+            was_illegal_action = true_legal_actions_mask[action] == 0
+            if was_illegal_action:
+                action = env.actions_to_indices['HOLD']
+
+            # <<< NEW: Get and print the action name for clarity
+            action_name = env.indices_to_actions.get(action, "INVALID_ACTION")
+            print(f"\n--- Taking Action: {action_name} (Index: {action}) at Step {step_count} ---")
+
+            # The step function now returns a 5-tuple
+            obs, reward, terminated, info = env.step(action)
+            done = terminated
+
+            #print(f"Observation['observation'] shape: {obs['observation'].shape}")
+            #print(f"PnL: {info.get('eval_episode_return', 'N/A')}")
+
             assert env.observation_space.contains(obs['observation']), f"Observation at step {step_count} is not in the defined space!"
             assert np.isfinite(reward), f"Reward at step {step_count} is not finite! Value: {reward}"
-            
+
             env.render()
             step_count += 1
-            
+
             if done:
                 print(f"\nEpisode finished after {step_count} steps.")
                 print(f"Final PnL: {info.get('eval_episode_return', 'N/A')}")
