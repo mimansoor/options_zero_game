@@ -208,7 +208,7 @@ class OptionsZeroGameEnv(gym.Env):
         # Scale daily GARCH params to per-step
         daily_ann_factor = math.sqrt(252)
         step_ann_factor = math.sqrt(252 * self.steps_per_day)
-        
+
         mu_step = self.trend / (252 * self.steps_per_day)
         omega_step = self.omega / (252 * self.steps_per_day)
         alpha_step = self.alpha / self.steps_per_day
@@ -216,21 +216,33 @@ class OptionsZeroGameEnv(gym.Env):
 
         returns = np.zeros(self.total_steps + 1, dtype=np.float32)
         variances = np.zeros(self.total_steps + 1, dtype=np.float32)
-        initial_variance = omega_step / max(1e-9, (1 - alpha_step - beta_step))
+
+        # <<< FIX: Calculate unconditional variance and a cap to prevent explosion >>>
+        initial_variance_denominator = 1 - alpha_step - beta_step
+        # Ensure denominator is positive to avoid issues with unstable parameters
+        if initial_variance_denominator <= 1e-9:
+            initial_variance = omega_step / 1e-9
+        else:
+            initial_variance = omega_step / initial_variance_denominator
+
         variances[0] = initial_variance
+        # Define a generous but finite cap for the variance
+        variance_cap = initial_variance * 200.0
 
         trading_day = 0
         for t in range(1, self.total_steps + 1):
             is_end_of_day = t % self.steps_per_day == 0
 
             # GARCH variance equation
-            variances[t] = omega_step + alpha_step * (returns[t-1]**2) + beta_step * variances[t-1]
-            variances[t] = max(1e-9, variances[t])
-            
+            new_variance = omega_step + alpha_step * (returns[t-1]**2) + beta_step * variances[t-1]
+
+            # <<< FIX: Apply the cap to the variance calculation >>>
+            variances[t] = min(max(1e-9, new_variance), variance_cap)
+
             # Simulate the normal intra-step return
             shock = self.np_random.normal(0, 1)
             step_return = mu_step + math.sqrt(variances[t]) * shock
-            
+
             # If it's the end of the day, add the overnight/weekend gap
             if is_end_of_day:
                 day_of_week = trading_day % self.TRADING_DAYS_IN_WEEK
@@ -240,24 +252,25 @@ class OptionsZeroGameEnv(gym.Env):
                 overnight_steps = (self.MINS_IN_DAY - self.TRADING_DAY_IN_MINS) / self.mins_per_step
                 if is_friday:
                     overnight_steps += (self.MINS_IN_DAY * 2) / self.mins_per_step
-                
+
                 # 2. Calculate the variance of the entire overnight period
-                # We scale the *current* step's variance by the number of steps and the regime multiplier
                 overnight_variance = variances[t] * overnight_steps * (self.overnight_vol_multiplier ** 2)
 
                 # 3. Simulate the return for the entire overnight period
                 overnight_shock = self.np_random.normal(0, 1)
                 overnight_return = (mu_step * overnight_steps) + (math.sqrt(overnight_variance) * overnight_shock)
-                
+
                 # 4. Add the gap return to the current step's return
                 step_return += overnight_return
-                
+
                 trading_day += 1
 
             returns[t] = step_return
-        
+
         # Convert returns to price path (vectorized for speed)
         cumulative_returns = np.cumsum(returns)
+        # Clip cumulative returns to prevent np.exp from overflowing
+        cumulative_returns = np.clip(cumulative_returns, a_min=None, a_max=700)
         self.price_path = self.start_price * np.exp(cumulative_returns)
 
     def _simulate_price_step(self) -> None:
@@ -276,7 +289,9 @@ class OptionsZeroGameEnv(gym.Env):
             intrinsic = max(0.0, underlying_price - strike_price) if is_call else max(0.0, strike_price - underlying_price)
             return intrinsic, 1.0 if intrinsic > 0 else 0.0, 0.0
         try:
-            atm_price = int(underlying_price / self.strike_distance + 0.5) * self.strike_distance
+            atm_price = 0
+            if np.isfinite(self.current_price) and np.isfinite(self.strike_distance) and self.strike_distance > 0:
+                atm_price = int(self.current_price / self.strike_distance + 0.5) * self.strike_distance
             offset = round((strike_price - atm_price) / self.strike_distance)
             vol = self._get_implied_volatility(offset, option_type)
             if vol <= 1e-6:
@@ -534,7 +549,9 @@ class OptionsZeroGameEnv(gym.Env):
         current_trading_day = self.current_step // self.steps_per_day
         trading_days_left = self.time_to_expiry_days - current_trading_day
         days_to_expiry = trading_days_left * (self.TOTAL_DAYS_IN_WEEK / self.TRADING_DAYS_IN_WEEK)
-        atm_price = int(self.current_price / self.strike_distance + 0.5) * self.strike_distance
+        atm_price = 0
+        if np.isfinite(self.current_price) and np.isfinite(self.strike_distance) and self.strike_distance > 0:
+            atm_price = int(self.current_price / self.strike_distance + 0.5) * self.strike_distance
         direction = 'long' if 'LONG' in action_name else 'short'
         legs = []
         if 'STRADDLE' in action_name:
@@ -642,7 +659,9 @@ class OptionsZeroGameEnv(gym.Env):
             action_mask[self.actions_to_indices['OPEN_LONG_STRANGLE_ATM_1']] = 1
             action_mask[self.actions_to_indices['OPEN_SHORT_STRANGLE_ATM_1']] = 1
         if len(self.portfolio) < self.max_positions:
-            atm_price = int(self.current_price / self.strike_distance + 0.5) * self.strike_distance
+            atm_price = 0
+            if np.isfinite(self.current_price) and np.isfinite(self.strike_distance) and self.strike_distance > 0:
+                atm_price = int(self.current_price / self.strike_distance + 0.5) * self.strike_distance
             trading_days_left = self.time_to_expiry_days - current_trading_day
             days_to_expiry = trading_days_left * (self.TOTAL_DAYS_IN_WEEK / self.TRADING_DAYS_IN_WEEK)
             num_long_calls = len(self.portfolio.query("type == 'call' and direction == 'long'"))
@@ -692,7 +711,9 @@ class OptionsZeroGameEnv(gym.Env):
 
         market_portfolio_vec[4] = np.clip(log_return, -0.1, 0.1) * 10
         current_idx = 5
-        atm_price = int(self.current_price / self.strike_distance + 0.5) * self.strike_distance
+        atm_price = 0
+        if np.isfinite(self.current_price) and np.isfinite(self.strike_distance) and self.strike_distance > 0:
+            atm_price = int(self.current_price / self.strike_distance + 0.5) * self.strike_distance
         for i, pos in self.portfolio.iterrows():
             if i >= self.max_positions: break
             market_portfolio_vec[current_idx + 0] = 1.0
@@ -712,7 +733,9 @@ class OptionsZeroGameEnv(gym.Env):
         else: log_return = 0.0
         market_portfolio_vec[4] = np.clip(log_return, -0.1, 0.1) * 10
         current_idx = 5
-        atm_price = int(self.current_price / self.strike_distance + 0.5) * self.strike_distance
+        atm_price = 0
+        if np.isfinite(self.current_price) and np.isfinite(self.strike_distance) and self.strike_distance > 0:
+            atm_price = int(self.current_price / self.strike_distance + 0.5) * self.strike_distance
         for i, pos in self.portfolio.iterrows():
             if i >= self.max_positions: break
             market_portfolio_vec[current_idx + 0] = 1.0
