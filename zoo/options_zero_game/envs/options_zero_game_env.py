@@ -81,7 +81,7 @@ class OptionsZeroGameEnv(gym.Env):
         market_regimes = [
             {'name': 'Developed_Market', 'mu': 0.00005, 'omega': 0.000005, 'alpha': 0.09, 'beta': 0.90},
         ],
-        time_to_expiry_days=20,
+        time_to_expiry_days=5,
         steps_per_day=1,
         trading_day_in_mins=375,
         rolling_vol_window=5,
@@ -97,7 +97,7 @@ class OptionsZeroGameEnv(gym.Env):
         pnl_scaling_factor=1000,
         drawdown_penalty_weight=0.1,
         illegal_action_penalty=-1.0,
-        ignore_legal_actions=False,
+        ignore_legal_actions=True,
         otm_delta_threshold=0.15,
         itm_delta_threshold=0.85,
     )
