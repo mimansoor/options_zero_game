@@ -103,7 +103,7 @@ create_config = dict(
         type='options_zero_game',
         import_names=['zoo.options_zero_game.envs.options_zero_game_env'],
     ),
-    env_manager=dict(type='base'),
+    env_manager=dict(type='subprocess'),
     policy=dict(
         type='muzero',
         import_names=['lzero.policy.muzero'],

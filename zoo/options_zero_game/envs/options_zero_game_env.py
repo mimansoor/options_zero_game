@@ -81,8 +81,8 @@ class OptionsZeroGameEnv(gym.Env):
         market_regimes = [
             {'name': 'Developed_Market', 'mu': 0.00005, 'omega': 0.000005, 'alpha': 0.09, 'beta': 0.90},
         ],
-        time_to_expiry_days=5,
-        steps_per_day=75,
+        time_to_expiry_days=20,
+        steps_per_day=1,
         trading_day_in_mins=375,
         rolling_vol_window=5,
         iv_skew_table={
@@ -684,7 +684,8 @@ class OptionsZeroGameEnv(gym.Env):
         current_realized_vol = self.realized_vol_series[self.current_step]
         garch_vol = self.garch_implied_vol if hasattr(self, 'garch_implied_vol') else 0
         market_portfolio_vec[3] = math.tanh((current_realized_vol / garch_vol) - 1.0) if garch_vol > 0 else 0.0
-        if self.current_step > 0: log_return = math.log(self.current_price / self.price_path[self.current_step - 1])
+        epsilon = 1e-8
+        if self.current_step > 0: log_return = math.log(self.current_price / (self.price_path[self.current_step - 1] + epsilon)
         else: log_return = 0.0
         market_portfolio_vec[4] = np.clip(log_return, -0.1, 0.1) * 10
         current_idx = 5
