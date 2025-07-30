@@ -685,8 +685,11 @@ class OptionsZeroGameEnv(gym.Env):
         garch_vol = self.garch_implied_vol if hasattr(self, 'garch_implied_vol') else 0
         market_portfolio_vec[3] = math.tanh((current_realized_vol / garch_vol) - 1.0) if garch_vol > 0 else 0.0
         epsilon = 1e-8
-        if self.current_step > 0: log_return = math.log(self.current_price / (self.price_path[self.current_step - 1] + epsilon)
-        else: log_return = 0.0
+        if self.current_step > 0:
+            log_return = math.log(self.current_price / (self.price_path[self.current_step - 1] + epsilon))
+        else:
+            log_return = 0.0
+
         market_portfolio_vec[4] = np.clip(log_return, -0.1, 0.1) * 10
         current_idx = 5
         atm_price = int(self.current_price / self.strike_distance + 0.5) * self.strike_distance
