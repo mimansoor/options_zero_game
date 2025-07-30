@@ -82,7 +82,7 @@ class OptionsZeroGameEnv(gym.Env):
             {'name': 'Developed_Market', 'mu': 0.00005, 'omega': 0.000005, 'alpha': 0.09, 'beta': 0.90},
         ],
         time_to_expiry_days=5,
-        steps_per_day=1,
+        steps_per_day=75,
         trading_day_in_mins=375,
         rolling_vol_window=5,
         iv_skew_table={
@@ -205,35 +205,58 @@ class OptionsZeroGameEnv(gym.Env):
         return [seed]
 
     def _generate_price_path(self) -> None:
+        # Scale daily GARCH params to per-step
         daily_ann_factor = math.sqrt(252)
         step_ann_factor = math.sqrt(252 * self.steps_per_day)
+        
         mu_step = self.trend / (252 * self.steps_per_day)
         omega_step = self.omega / (252 * self.steps_per_day)
         alpha_step = self.alpha / self.steps_per_day
         beta_step = self.beta ** (1/self.steps_per_day)
+
         returns = np.zeros(self.total_steps + 1, dtype=np.float32)
         variances = np.zeros(self.total_steps + 1, dtype=np.float32)
         initial_variance = omega_step / max(1e-9, (1 - alpha_step - beta_step))
         variances[0] = initial_variance
+
         trading_day = 0
         for t in range(1, self.total_steps + 1):
             is_end_of_day = t % self.steps_per_day == 0
+
+            # GARCH variance equation
             variances[t] = omega_step + alpha_step * (returns[t-1]**2) + beta_step * variances[t-1]
             variances[t] = max(1e-9, variances[t])
+            
+            # Simulate the normal intra-step return
             shock = self.np_random.normal(0, 1)
             step_return = mu_step + math.sqrt(variances[t]) * shock
+            
+            # If it's the end of the day, add the overnight/weekend gap
             if is_end_of_day:
                 day_of_week = trading_day % self.TRADING_DAYS_IN_WEEK
                 is_friday = day_of_week == 4
+
+                # 1. Calculate the number of "steps" in the non-trading period
                 overnight_steps = (self.MINS_IN_DAY - self.TRADING_DAY_IN_MINS) / self.mins_per_step
                 if is_friday:
                     overnight_steps += (self.MINS_IN_DAY * 2) / self.mins_per_step
+                
+                # 2. Calculate the variance of the entire overnight period
+                # We scale the *current* step's variance by the number of steps and the regime multiplier
+                overnight_variance = variances[t] * overnight_steps * (self.overnight_vol_multiplier ** 2)
+
+                # 3. Simulate the return for the entire overnight period
                 overnight_shock = self.np_random.normal(0, 1)
-                overnight_variance = variances[t] * overnight_steps
-                overnight_return = mu_step * overnight_steps + math.sqrt(overnight_variance) * overnight_shock
+                overnight_return = (mu_step * overnight_steps) + (math.sqrt(overnight_variance) * overnight_shock)
+                
+                # 4. Add the gap return to the current step's return
                 step_return += overnight_return
+                
                 trading_day += 1
+
             returns[t] = step_return
+        
+        # Convert returns to price path (vectorized for speed)
         cumulative_returns = np.cumsum(returns)
         self.price_path = self.start_price * np.exp(cumulative_returns)
 
@@ -308,6 +331,7 @@ class OptionsZeroGameEnv(gym.Env):
         self.omega: float = chosen_regime['omega']
         self.alpha: float = chosen_regime['alpha']
         self.beta: float = chosen_regime['beta']
+        self.overnight_vol_multiplier: float = chosen_regime['overnight_vol_multiplier']
 
         if self.alpha + self.beta >= 1.0:
             total = self.alpha + self.beta
