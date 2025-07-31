@@ -1,12 +1,15 @@
 import React, { useState, useEffect } from 'react';
 import './App.css';
 
-// <<< MODIFIED: The MetricsDashboard now accepts and displays the market regime and illegal actions
-function MetricsDashboard({ day, price, pnl, actionName, startPrice, marketRegime, illegalActions }) {
+// <<< MODIFIED: The MetricsDashboard now accepts and displays the price change
+function MetricsDashboard({ day, price, pnl, actionName, startPrice, marketRegime, illegalActions, lastPriceChangePct }) {
   const pnlColor = pnl > 0 ? '#4CAF50' : pnl < 0 ? '#F44336' : 'white';
   const cumulativeChange = price && startPrice ? ((price / startPrice) - 1) * 100 : 0;
   const cumulativeChangeColor = cumulativeChange > 0 ? '#4CAF50' : cumulativeChange < 0 ? '#F44336' : 'white';
   
+  // <<< NEW: Color logic for the last price change
+  const lastChangeColor = lastPriceChangePct > 0 ? '#4CAF50' : lastPriceChangePct < 0 ? '#F44336' : 'white';
+
   return (
     <div className="metrics-dashboard">
       <div className="metric-item">
@@ -20,13 +23,17 @@ function MetricsDashboard({ day, price, pnl, actionName, startPrice, marketRegim
       <div className="metric-item">
         <h2>EOD Price</h2>
         <p>${price ? price.toFixed(2) : '0.00'}</p>
-        <p style={{ fontSize: '0.8em', color: cumulativeChangeColor, fontWeight: 'bold' }}>
-          {cumulativeChange.toFixed(2)}% vs Day 0
+        {/* <<< NEW: Display for the last price change */}
+        <p style={{ fontSize: '0.8em', color: lastChangeColor }}>
+          {lastPriceChangePct ? lastPriceChangePct.toFixed(2) : '0.00'}% vs last step
         </p>
       </div>
       <div className="metric-item">
         <h2>EOD Total PnL</h2>
         <p style={{ color: pnlColor }}>${pnl ? pnl.toFixed(2) : '0.00'}</p>
+        <p style={{ fontSize: '0.8em', color: cumulativeChangeColor, fontWeight: 'bold' }}>
+          {cumulativeChange.toFixed(2)}% vs Day 0
+        </p>
       </div>
       <div className="metric-item">
         <h2>Action Taken</h2>
@@ -34,7 +41,6 @@ function MetricsDashboard({ day, price, pnl, actionName, startPrice, marketRegim
           {(actionName || 'N/A').replace(/_/g, ' ')}
         </p>
       </div>
-      {/* <<< NEW: Display the illegal action count */}
       <div className="metric-item">
         <h2>Illegal Attempts</h2>
         <p style={{color: illegalActions > 0 ? '#FFC107' : 'white'}}>{illegalActions}</p>
@@ -81,12 +87,10 @@ function PortfolioTable({ portfolio }) {
   );
 }
 
-// <<< MODIFIED: The data processing logic is now much simpler
 function processReplayData(rawHistory) {
   if (!rawHistory || rawHistory.length === 0) {
     return [];
   }
-  // The log now contains one entry per step, so we can use it directly.
   return rawHistory;
 }
 
@@ -142,6 +146,7 @@ function App() {
                   startPrice={stepData.info.start_price}
                   marketRegime={stepData.info.market_regime}
                   illegalActions={stepData.info.illegal_actions_in_episode}
+                  lastPriceChangePct={stepData.info.last_price_change_pct} // <<< Pass the new prop
                 />
                 <h2 style={{marginTop: '40px'}}>Positions at Step {currentStep}</h2>
                 <PortfolioTable portfolio={stepData.portfolio} />

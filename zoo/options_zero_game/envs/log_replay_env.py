@@ -1,7 +1,8 @@
 import json
-import gym
+import gymnasium as gym
 from easydict import EasyDict
 import copy
+import numpy as np
 
 from ding.utils import ENV_REGISTRY
 from .options_zero_game_env import OptionsZeroGameEnv
@@ -19,7 +20,7 @@ class LogReplayEnv(gym.Wrapper):
         super().__init__(base_env)
         self.log_file_path = cfg.log_file_path
         self._episode_history = []
-        self._last_eod_price = None # Use End-of-Day price for daily change
+        self._last_price = None # <<< NEW: Track the last price for change calculation
         print(f"LogReplayEnv initialized. Replay will be saved to: {self.log_file_path}")
 
     def seed(self, seed: int, dynamic_seed: int = None):
@@ -28,21 +29,28 @@ class LogReplayEnv(gym.Wrapper):
     def reset(self, **kwargs):
         self._episode_history = []
         obs = self.env.reset(**kwargs)
-        self._last_eod_price = self.env.start_price
-        self._log_step(obs, is_initial_state=True)
+        self._last_price = self.env.start_price # Initialize last price
         return obs
 
     def step(self, action):
-        action_name = self.env.indices_to_actions.get(action, 'INVALID')
+        # <<< MODIFIED: Check for illegal action *before* logging
+        true_legal_actions_mask = self.env._get_true_action_mask()
+        was_illegal_action = true_legal_actions_mask[action] == 0
         
-        # Log the state *before* the action is taken
-        self._log_step(self.env._get_observation(), action=action, info_override={'action_name': action_name})
+        # Get the name of the action the agent *intended* to take
+        intended_action_name = self.env.indices_to_actions.get(action, 'INVALID')
+        
+        # If the action was illegal, we log it as HOLD, as per the new rule
+        final_action_name = 'HOLD' if was_illegal_action else intended_action_name
 
-        # Execute the step in the real environment
+        if self.env.current_step == 0:
+            self._log_step(self.env._get_observation(), is_initial_state=True)
+
+        self._log_step(self.env._get_observation(), action=action, info_override={'action_name': final_action_name})
+
         timestep = self.env.step(action)
         
-        # Log the state *after* the action and market move
-        self._log_step(timestep.obs, action=None, reward=timestep.reward, done=timestep.done, info=timestep.info)
+        self._log_step(timestep.obs, reward=timestep.reward, done=timestep.done, info=timestep.info)
         
         if timestep.done:
             self.save_log()
@@ -70,33 +78,43 @@ class LogReplayEnv(gym.Wrapper):
         if info_override:
             log_info.update(info_override)
             
-        # Ensure all necessary info fields are present
-        log_info.setdefault('price', self.env.current_price)
-        log_info.setdefault('eval_episode_return', self.env._get_total_pnl())
-        log_info.setdefault('start_price', self.env.start_price)
-        log_info.setdefault('volatility', self.env.garch_implied_vol)
-        log_info.setdefault('risk_free_rate', self.env.risk_free_rate)
-        log_info.setdefault('market_regime', self.env.current_regime_name)
-        # <<< NEW: Add illegal action count to the log
-        log_info.setdefault('illegal_actions_in_episode', self.env.illegal_action_count)
+        # <<< NEW: Calculate and add the last price change percentage
+        current_price = self.env.current_price
+        last_price_change_pct = ((current_price / self._last_price) - 1) * 100 if self._last_price else 0.0
+        self._last_price = current_price # Update for the next step
+        log_info['last_price_change_pct'] = last_price_change_pct
+
+        log_info['price'] = float(current_price)
+        log_info['eval_episode_return'] = float(self._get_safe_pnl())
+        log_info['start_price'] = float(self.env.start_price)
+        log_info['volatility'] = float(getattr(self.env, 'garch_implied_vol', 0.0))
+        log_info['risk_free_rate'] = float(self.env.risk_free_rate)
+        log_info['market_regime'] = str(getattr(self.env, 'current_regime_name', 'N/A'))
+        log_info['illegal_actions_in_episode'] = int(self.env.illegal_action_count)
 
         log_entry = {
-            'step': self.env.current_step,
-            'day': self.env.current_step // self.env.steps_per_day + 1,
+            'step': int(self.env.current_step),
+            'day': int(self.env.current_step // self.env.steps_per_day + 1),
             'portfolio': serializable_portfolio,
             'action': int(action) if action is not None else None,
             'reward': float(reward) if reward is not None else None,
-            'done': done,
+            'done': bool(done),
             'info': log_info,
         }
         
         self._episode_history.append(log_entry)
 
+    def _get_safe_pnl(self):
+        try:
+            return self.env._get_total_pnl()
+        except Exception:
+            return 0.0
+
     def save_log(self):
         print(f"Episode finished. Saving replay log with {len(self._episode_history)} steps...")
         try:
             with open(self.log_file_path, 'w') as f:
-                json.dump(self._episode_history, f, indent=2) # Use indent=2 for smaller files
+                json.dump(self._episode_history, f, indent=2)
             print(f"Successfully saved replay log to {self.log_file_path}")
         except Exception as e:
             print(f"Error saving replay log: {e}")
