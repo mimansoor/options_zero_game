@@ -27,16 +27,16 @@ SYMBOLS_TO_CACHE = [
     'SOL-USD',
 ]
 
+# Use a path relative to the script's location
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 CACHE_DIRECTORY = os.path.join(SCRIPT_DIR, "market_data_cache")
-DATA_PERIOD = "10y" # Download 10 years of historical data
-DATA_INTERVAL = "1d" # Use daily data
+DATA_PERIOD = "10y"
+DATA_INTERVAL = "1d"
 
 def create_market_data_cache():
     """
-    Downloads historical daily price data for a list of symbols and saves
-    each to a CSV file in a cache directory. This only needs to be run once,
-    or whenever you want to refresh the historical data.
+    Downloads historical daily price data, cleans it by removing non-positive prices,
+    and saves it to a CSV file in a cache directory.
     """
     print(f"--- Creating Market Data Cache in '{CACHE_DIRECTORY}' ---")
     os.makedirs(CACHE_DIRECTORY, exist_ok=True)
@@ -52,10 +52,25 @@ def create_market_data_cache():
 
             # We only need the closing price for our simulation
             price_data = data[['Close']].dropna()
+
+            # <<< --- MODIFICATION START --- >>>
+            # Filter out any non-positive prices to prevent numerical errors in the environment.
+            original_rows = len(price_data)
+            price_data = price_data[price_data['Close'] > 0]
+            cleaned_rows = len(price_data)
+
+            if original_rows > cleaned_rows:
+                print(f"-> Filtered out {original_rows - cleaned_rows} rows with non-positive prices for {ticker}.")
+            # <<< --- MODIFICATION END --- >>>
             
+            # If after cleaning, the data is empty, skip.
+            if price_data.empty:
+                print(f"Warning: No valid data remains for ticker {ticker} after cleaning. Skipping.")
+                continue
+
             output_path = os.path.join(CACHE_DIRECTORY, f"{ticker}.csv")
             price_data.to_csv(output_path)
-            print(f"Successfully saved data for {ticker} to {output_path}")
+            print(f"Successfully saved {cleaned_rows} rows of data for {ticker} to {output_path}")
 
         except Exception as e:
             print(f"An error occurred while downloading data for {ticker}: {e}")

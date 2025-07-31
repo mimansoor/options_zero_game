@@ -17,11 +17,9 @@ max_env_step = int(5e6)
 reanalyze_ratio = 0.
 n_episode = 8
 
-# <<< MODIFIED: The final, correct action space size derived from the environment
 # 1 HOLD + (11 strikes * 4 types) + 8 Combos + 4 CLOSE_i + 1 CLOSE_ALL = 1 + 44 + 8 + 4 + 1 = 58
 action_space_size = 58
 
-# <<< MODIFIED: The final, correct observation shape from the environment
 # 5 (global) + 4 slots * 9 features/slot + 58 (action mask) = 5 + 36 + 58 = 99
 observation_shape = 99
 
@@ -122,7 +120,7 @@ create_config = dict(
         type='options_zero_game',
         import_names=['zoo.options_zero_game.envs.options_zero_game_env'],
     ),
-    env_manager=dict(type='subprocess'),
+    env_manager=dict(type='base'),
     policy=dict(
         type='muzero',
         import_names=['lzero.policy.muzero'],
