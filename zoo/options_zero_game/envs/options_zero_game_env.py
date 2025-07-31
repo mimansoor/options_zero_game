@@ -399,7 +399,6 @@ class OptionsZeroGameEnv(gym.Env):
     # In the OptionsZeroGameEnv class...
 
     def reset(self, seed: int = None, **kwargs):
-        print(f"Entered Reset with seed: {seed}")
         if seed is not None: self.seed(seed)
         elif self.np_random is None: self.seed(0)
 
