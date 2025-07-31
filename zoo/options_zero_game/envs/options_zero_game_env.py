@@ -113,6 +113,23 @@ class OptionsZeroGameEnv(gym.Env):
         if cfg is not None:
             self._cfg.update(cfg)
 
+        # <<< NEW: Handle price source configuration >>>
+        self.price_source = self._cfg.price_source
+        self.historical_data_path = self._cfg.historical_data_path
+        self._available_tickers = []
+        if self.price_source in ['historical', 'mixed']:
+            if not os.path.isdir(self.historical_data_path):
+                raise FileNotFoundError(
+                    f"Historical data path not found: {self.historical_data_path}. "
+                    "Please run the cache_builder.py script first."
+                )
+            self._available_tickers = [f.replace('.csv', '') for f in os.listdir(self.historical_data_path) if f.endswith('.csv')]
+            if not self._available_tickers:
+                 raise FileNotFoundError(
+                    f"No CSV files found in {self.historical_data_path}. "
+                    "Please run the cache_builder.py script first."
+                )
+
         # Time Constants
         self.TRADING_DAY_IN_MINS = self._cfg.trading_day_in_mins
         self.MINS_IN_DAY = 24 * 60
@@ -203,6 +220,49 @@ class OptionsZeroGameEnv(gym.Env):
         self.np_random, seed = seeding.np_random(seed)
         random.seed(seed)
         return [seed]
+
+    def _generate_historical_price_path(self) -> None:
+        """
+        Loads a random ticker from the cache and samples a random segment of its
+        price history to serve as the price_path for the episode.
+        """
+        if not self._available_tickers:
+            raise RuntimeError("Historical mode selected but no tickers are available.")
+
+        # 1. Select a random ticker and load its data
+        selected_ticker = random.choice(self._available_tickers)
+        file_path = os.path.join(self.historical_data_path, f"{selected_ticker}.csv")
+        data = pd.read_csv(file_path, index_col=0, parse_dates=True)
+
+        # 2. Ensure data is long enough for an episode
+        if len(data) <= self.total_steps:
+            # Fallback to GARCH if this specific file is too short
+            print(f"Warning: {selected_ticker} data is too short. Falling back to GARCH for this episode.")
+            self._generate_price_path() # This calls the original synthetic generator
+            return
+
+        # 3. Sample a random continuous segment for the episode
+        start_index = random.randint(0, len(data) - self.total_steps - 1)
+        end_index = start_index + self.total_steps + 1
+        price_segment = data['Close'].iloc[start_index:end_index]
+        
+        # 4. Set the price path and episode parameters
+        self.price_path = price_segment.to_numpy(dtype=np.float32)
+        
+        # --- CRITICAL: Update environment state to match the historical data ---
+        self.start_price = self.price_path[0]
+        self.current_regime_name = f"Historical: {selected_ticker}"
+        
+        # Emulate GARCH parameters based on the sampled historical data
+        # for consistency in the observation space.
+        log_returns = np.log(self.price_path[1:] / self.price_path[:-1])
+        
+        # Calculate annualized volatility for the segment
+        annualized_vol = np.std(log_returns) * np.sqrt(252 * self.steps_per_day)
+        self.garch_implied_vol = annualized_vol if np.isfinite(annualized_vol) else 0.2
+
+        # Calculate drift/trend for the segment
+        self.trend = np.mean(log_returns) * (252 * self.steps_per_day)
 
     def _generate_price_path(self) -> None:
         # Scale daily GARCH params to per-step
@@ -340,28 +400,37 @@ class OptionsZeroGameEnv(gym.Env):
         if seed is not None: self.seed(seed)
         elif self.np_random is None: self.seed(0)
 
-        chosen_regime = random.choice(self.market_regimes)
-        self.current_regime_name = chosen_regime['name']
-        self.trend: float = chosen_regime['mu']
-        self.omega: float = chosen_regime['omega']
-        self.alpha: float = chosen_regime['alpha']
-        self.beta: float = chosen_regime['beta']
-        self.overnight_vol_multiplier: float = chosen_regime['overnight_vol_multiplier']
+        source_to_use = self.price_source
+        if self.price_source == 'mixed':
+            source_to_use = random.choice(['garch', 'historical'])
 
-        if self.alpha + self.beta >= 1.0:
-            total = self.alpha + self.beta
-            self.alpha = self.alpha / (total + 0.01)
-            self.beta = self.beta / (total + 0.01)
+        if source_to_use == 'garch':
+            chosen_regime = random.choice(self.market_regimes)
+            self.current_regime_name = chosen_regime['name']
 
-        unconditional_variance = self.omega / (1 - self.alpha - self.beta)
-        assert math.isfinite(unconditional_variance) and unconditional_variance > 0, f"GARCH unconditional_variance is invalid: {unconditional_variance}"
-        self.garch_implied_vol: float = math.sqrt(unconditional_variance * 252)
-        assert math.isfinite(self.garch_implied_vol), f"GARCH garch_implied_vol is invalid: {self.garch_implied_vol}"
+            self.trend: float = chosen_regime['mu']
+            self.omega: float = chosen_regime['omega']
+            self.alpha: float = chosen_regime['alpha']
+            self.beta: float = chosen_regime['beta']
+            self.overnight_vol_multiplier: float = chosen_regime['overnight_vol_multiplier']
+
+            if self.alpha + self.beta >= 1.0:
+                total = self.alpha + self.beta
+                self.alpha = self.alpha / (total + 0.01)
+                self.beta = self.beta / (total + 0.01)
+
+            unconditional_variance = self.omega / (1 - self.alpha - self.beta)
+            assert math.isfinite(unconditional_variance) and unconditional_variance > 0, f"GARCH unconditional_variance is invalid: {unconditional_variance}"
+            self.garch_implied_vol: float = math.sqrt(unconditional_variance * 252)
+            assert math.isfinite(self.garch_implied_vol), f"GARCH garch_implied_vol is invalid: {self.garch_implied_vol}"
+            self._generate_price_path() # Generate synthetic path
+        else: # source_to_use == 'historical'
+            # --- This is the new logic for historical data ---
+            self._generate_historical_price_path()
 
         self.iv_bin_index: int = random.randint(0, 4)
         self.price_path = np.zeros(self.total_steps + 1, dtype=np.float32)
         self.realized_vol_series = np.zeros(self.total_steps + 1, dtype=np.float32)
-        self._generate_price_path()
 
         self.current_step: int = 0
         self.day_of_week: int = 0
@@ -375,17 +444,12 @@ class OptionsZeroGameEnv(gym.Env):
 
         obs = self._get_observation()
 
-        # Render the beginning state of the game.
-        if self.render_mode is not None:
-            self.render(self.render_mode)
-
         if self.ignore_legal_actions:
             mcts_action_mask = np.ones(self.action_space_size, dtype=np.int8)
         else:
             mcts_action_mask = self._get_true_action_mask()
 
-        observation = {'observation': obs, 'action_mask': mcts_action_mask, 'to_play': -1}
-        return observation
+        return {'observation': obs, 'action_mask': mcts_action_mask, 'to_play': -1}
 
     def _close_position(self, position_index: int) -> None:
         if position_index < 0:

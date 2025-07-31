@@ -27,7 +27,8 @@ SYMBOLS_TO_CACHE = [
     'SOL-USD',
 ]
 
-CACHE_DIRECTORY = "market_data_cache"
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+CACHE_DIRECTORY = os.path.join(SCRIPT_DIR, "market_data_cache")
 DATA_PERIOD = "10y" # Download 10 years of historical data
 DATA_INTERVAL = "1d" # Use daily data
 

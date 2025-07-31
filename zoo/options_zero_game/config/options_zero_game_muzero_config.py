@@ -8,14 +8,14 @@ from zoo.options_zero_game.envs.options_zero_game_env import OptionsZeroGameEnv
 # ==============================================================
 #                 Options-Zero-Game Config
 # ==============================================================
-collector_env_num = 20
-evaluator_env_num = 20
+collector_env_num = 8
+evaluator_env_num = 8
 batch_size = 256
-num_simulations = 100
-update_per_collect = 1000
+num_simulations = 25
+update_per_collect = 200
 max_env_step = int(5e6)
 reanalyze_ratio = 0.
-n_episode = 20
+n_episode = 8
 
 # <<< MODIFIED: The final, correct action space size derived from the environment
 # 1 HOLD + (11 strikes * 4 types) + 8 Combos + 4 CLOSE_i + 1 CLOSE_ALL = 1 + 44 + 8 + 4 + 1 = 58
@@ -71,6 +71,8 @@ options_zero_game_muzero_config = dict(
         n_evaluator_episode=evaluator_env_num,
         manager=dict(shared_memory=False, ),
         # Pass all necessary parameters to the environment
+        price_source='mixed',
+        historical_data_path='zoo/options_zero_game/data/market_data_cache',
         drawdown_penalty_weight=0.1,
         market_regimes=market_regimes,
         illegal_action_penalty=-1.0,
