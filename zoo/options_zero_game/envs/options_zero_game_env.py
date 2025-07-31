@@ -198,20 +198,38 @@ class OptionsZeroGameEnv(gym.Env):
 
     def _build_action_space(self) -> Dict[str, int]:
         actions = {'HOLD': 0}; i = 1
+
+        # --- Single Legs ---
         for offset in range(-5, 6):
             sign = '+' if offset >= 0 else ''
             actions[f'OPEN_LONG_CALL_ATM{sign}{offset}'] = i; i+=1
             actions[f'OPEN_SHORT_CALL_ATM{sign}{offset}'] = i; i+=1
             actions[f'OPEN_LONG_PUT_ATM{sign}{offset}'] = i; i+=1
             actions[f'OPEN_SHORT_PUT_ATM{sign}{offset}'] = i; i+=1
+
+        # --- Multi-Leg Spreads ---
         actions['OPEN_LONG_STRADDLE_ATM'] = i; i+=1
         actions['OPEN_SHORT_STRADDLE_ATM'] = i; i+=1
-        actions['OPEN_LONG_STRANGLE_ATM_1'] = i; i+=1
-        actions['OPEN_SHORT_STRANGLE_ATM_1'] = i; i+=1
+
+        for width in [1, 2]:
+            actions[f'OPEN_LONG_STRANGLE_ATM_{width}'] = i; i+=1
+            actions[f'OPEN_SHORT_STRANGLE_ATM_{width}'] = i; i+=1
+
+        # VERTICAL SPREADS ---
+        for width in [1, 2]: # For spreads 1 or 2 strikes wide
+            # Call Spreads (Debit/Credit)
+            actions[f'OPEN_LONG_VERTICAL_CALL_{width}'] = i; i+=1 # Bull Call / Debit Spread
+            actions[f'OPEN_SHORT_VERTICAL_CALL_{width}'] = i; i+=1 # Bear Call / Credit Spread
+            # Put Spreads (Debit/Credit)
+            actions[f'OPEN_LONG_VERTICAL_PUT_{width}'] = i; i+=1 # Bear Put / Debit Spread
+            actions[f'OPEN_SHORT_VERTICAL_PUT_{width}'] = i; i+=1 # Bull Put / Credit Spread
+
         actions['OPEN_LONG_IRON_FLY'] = i; i+=1
         actions['OPEN_SHORT_IRON_FLY'] = i; i+=1
         actions['OPEN_LONG_IRON_CONDOR'] = i; i+=1
         actions['OPEN_SHORT_IRON_CONDOR'] = i; i+=1
+
+        # --- Closing Actions ---
         for j in range(self.max_positions):
             actions[f'CLOSE_POSITION_{j}'] = i; i+=1
         actions['CLOSE_ALL'] = i
@@ -582,6 +600,7 @@ class OptionsZeroGameEnv(gym.Env):
     def _handle_open_action(self, action_name: str) -> None:
         if 'IRON_CONDOR' in action_name: self._open_iron_condor(action_name)
         elif 'IRON_FLY' in action_name: self._open_iron_fly(action_name)
+        elif 'VERTICAL' in action_name: self._open_vertical_spread(action_name)
         elif 'STRANGLE' in action_name: self._open_strangle(action_name)
         elif 'STRADDLE' in action_name: self._open_straddle(action_name)
         else: self._open_single_leg(action_name)
@@ -639,9 +658,6 @@ class OptionsZeroGameEnv(gym.Env):
         if 'STRADDLE' in action_name:
             legs.append({'type': 'call', 'direction': direction, 'strike_price': atm_price})
             legs.append({'type': 'put', 'direction': direction, 'strike_price': atm_price})
-        elif 'STRANGLE' in action_name:
-            legs.append({'type': 'call', 'direction': direction, 'strike_price': atm_price + self.strike_distance})
-            legs.append({'type': 'put', 'direction': direction, 'strike_price': atm_price - self.strike_distance})
         elif 'IRON_FLY' in action_name:
             straddle_dir = 'long' if direction == 'long' else 'short'
             hedge_dir = 'short' if direction == 'long' else 'long'
@@ -685,15 +701,49 @@ class OptionsZeroGameEnv(gym.Env):
         strategy_name = f"{direction}_STRADDLE"
         pnl = self._calculate_strategy_pnl(legs, strategy_name)
         self._execute_trades(legs, pnl)
+
     def _open_strangle(self, action_name: str) -> None:
         if len(self.portfolio) > self.max_positions - 2: return
-        legs = self._get_trade_legs(action_name)
-        for leg in legs:
-            leg['entry_premium'] = self._get_option_price(self._get_option_details(self.current_price, leg['strike_price'], leg['days_to_expiry'], leg['type'])[0], leg['direction'] == 'long')
-        direction = legs[0]['direction'].upper()
-        strategy_name = f"{direction}_STRANGLE"
-        pnl = self._calculate_strategy_pnl(legs, strategy_name)
-        self._execute_trades(legs, pnl)
+        # --- 1. Parse action name to get the width ---
+        parts = action_name.split('_')
+        width_in_strikes = int(parts[-1])
+        width_in_price = width_in_strikes * self.strike_distance
+        
+        # --- 2. Validation (already implemented, now more important) ---
+        max_offset = max(int(k) for k in self._cfg.iv_skew_table['call'].keys())
+        min_offset = min(int(k) for k in self._cfg.iv_skew_table['call'].keys())
+
+        call_offset = +width_in_strikes
+        put_offset = -width_in_strikes
+        
+        if not (min_offset <= call_offset <= max_offset and min_offset <= put_offset <= max_offset):
+            return
+
+        # --- 3. Define the legs of the strangle ---
+        atm_price = int(self.current_price / self.strike_distance + 0.5) * self.strike_distance
+        direction = 'long' if 'LONG' in action_name else 'short'
+        
+        legs_to_trade = [
+            {'type': 'call', 'direction': direction, 'strike_price': atm_price + width_in_price},
+            {'type': 'put',  'direction': direction, 'strike_price': atm_price - width_in_price},
+        ]
+
+        # --- 4. Get DTE, price the legs, and prepare for execution ---
+        current_trading_day = self.current_step // self.steps_per_day
+        trading_days_left = self.time_to_expiry_days - current_trading_day
+        days_to_expiry = trading_days_left * (self.TOTAL_DAYS_IN_WEEK / self.TRADING_DAYS_IN_WEEK)
+
+        for leg in legs_to_trade:
+            leg['entry_step'] = self.current_step
+            leg['days_to_expiry'] = days_to_expiry
+            mid_price, _, _ = self._get_option_details(self.current_price, leg['strike_price'], leg['days_to_expiry'], leg['type'])
+            leg['entry_premium'] = self._get_option_price(mid_price, is_buy=(leg['direction'] == 'long'))
+
+        # --- 5. Calculate strategy PnL and execute ---
+        strategy_name = f"{direction.upper()}_STRANGLE"
+        pnl = self._calculate_strategy_pnl(legs_to_trade, strategy_name)
+        self._execute_trades(legs_to_trade, pnl)
+
     def _open_iron_fly(self, action_name: str) -> None:
         if len(self.portfolio) > self.max_positions - 4: return
         legs = self._get_trade_legs(action_name)
@@ -718,6 +768,95 @@ class OptionsZeroGameEnv(gym.Env):
         pnl = self._calculate_strategy_pnl(legs, strategy_name, call_width, put_width)
         self._execute_trades(legs, pnl)
 
+    def _open_vertical_spread(self, action_name: str) -> None:
+        """Opens a two-leg vertical spread, with validation for strike limits."""
+        if len(self.portfolio) > self.max_positions - 2:
+            return
+
+        # --- 1. Parse the action name ---
+        parts = action_name.split('_')
+        direction = parts[1]
+        option_type = parts[3].lower()
+        width_in_strikes = int(parts[4]) # This is the width in strike units (e.g., 1 or 2)
+        width_in_price = width_in_strikes * self.strike_distance
+
+        # --- 2. Define ATM and potential strike prices ---
+        atm_price = int(self.current_price / self.strike_distance + 0.5) * self.strike_distance
+        
+        # We need to determine the strikes BEFORE creating the legs.
+        strike1 = atm_price
+        strike2 = 0
+        
+        if option_type == 'call': # Spreads go up
+            strike2 = atm_price + width_in_price
+        else: # Puts, spreads go down
+            strike2 = atm_price - width_in_price
+            
+        # Calculate the offsets of both strikes from ATM.
+        # Note: atm_price is the center, so strike1's offset is always 0.
+        offset1 = round((strike1 - atm_price) / self.strike_distance)
+        offset2 = round((strike2 - atm_price) / self.strike_distance)
+        
+        # Check if either leg is outside our defined limits (e.g., +/- 5 strikes)
+        # We get the limit from the iv_skew_table keys.
+        max_offset = max(int(k) for k in self._cfg.iv_skew_table['call'].keys())
+        min_offset = min(int(k) for k in self._cfg.iv_skew_table['call'].keys())
+
+        if not (min_offset <= offset1 <= max_offset and min_offset <= offset2 <= max_offset):
+            # This action would create a leg outside the defined strike range.
+            # Treat it as an invalid action and do nothing.
+            # We'll also mask this in _get_true_action_mask.
+            # print(f"DEBUG: Invalid spread action '{action_name}'. Offset {offset2} is out of bounds [{min_offset}, {max_offset}].")
+            return
+
+        # --- 3. Define the legs of the spread ---
+        legs_to_trade = []
+        if direction == 'LONG':
+            if option_type == 'call': # Bull Call
+                legs_to_trade.append({'type': 'call', 'direction': 'long', 'strike_price': strike1})
+                legs_to_trade.append({'type': 'call', 'direction': 'short', 'strike_price': strike2})
+            else: # Bear Put
+                legs_to_trade.append({'type': 'put', 'direction': 'long', 'strike_price': strike1})
+                legs_to_trade.append({'type': 'put', 'direction': 'short', 'strike_price': strike2})
+        else: # SHORT
+            if option_type == 'call': # Bear Call
+                legs_to_trade.append({'type': 'call', 'direction': 'short', 'strike_price': strike1})
+                legs_to_trade.append({'type': 'call', 'direction': 'long', 'strike_price': strike2})
+            else: # Bull Put
+                legs_to_trade.append({'type': 'put', 'direction': 'short', 'strike_price': strike1})
+                legs_to_trade.append({'type': 'put', 'direction': 'long', 'strike_price': strike2})
+
+        # --- 3. Get current trading day and DTE ---
+        current_trading_day = self.current_step // self.steps_per_day
+        trading_days_left = self.time_to_expiry_days - current_trading_day
+        days_to_expiry = trading_days_left * (self.TOTAL_DAYS_IN_WEEK / self.TRADING_DAYS_IN_WEEK)
+
+        # --- 4. Price the legs and prepare for execution ---
+        for leg in legs_to_trade:
+            leg['entry_step'] = self.current_step
+            leg['days_to_expiry'] = days_to_expiry
+            mid_price, _, _ = self._get_option_details(self.current_price, leg['strike_price'], leg['days_to_expiry'], leg['type'])
+            leg['entry_premium'] = self._get_option_price(mid_price, is_buy=(leg['direction'] == 'long'))
+
+        # --- 5. Calculate strategy PnL and execute ---
+        # For all vertical spreads, max profit/loss is related to the width and net premium
+        net_premium = sum(leg['entry_premium'] * (1 if leg['direction'] == 'long' else -1) for leg in legs_to_trade)
+        
+        if net_premium > 0: # Debit spread (paid to open)
+            max_loss = -net_premium * self.lot_size
+            max_profit = (width * self.lot_size) + max_loss
+        else: # Credit spread (received credit)
+            max_profit = -net_premium * self.lot_size
+            max_loss = -(width * self.lot_size) + max_profit
+
+        strategy_pnl = {
+            'max_profit': max_profit,
+            'max_loss': max_loss,
+            'strategy_id': self.strategy_name_to_id.get(action_name, -1) # Use a unique ID later if needed
+        }
+        
+        self._execute_trades(legs_to_trade, strategy_pnl)
+
     def _get_true_action_mask(self) -> np.ndarray:
         action_mask = np.zeros(self.action_space_size, dtype=np.int8)
         current_trading_day = self.current_step // self.steps_per_day
@@ -730,17 +869,62 @@ class OptionsZeroGameEnv(gym.Env):
                     action_mask[self.actions_to_indices[f'CLOSE_POSITION_{i}']] = 1
         if is_expiry_day:
             return action_mask
-        if len(self.portfolio) <= self.max_positions - 4:
+
+        # --- Get common parameters for validation ---
+        available_slots = self.max_positions - len(self.portfolio)
+        atm_price = int(self.current_price / self.strike_distance + 0.5) * self.strike_distance
+        max_offset = max(int(k) for k in self._cfg.iv_skew_table['call'].keys())
+        min_offset = min(int(k) for k in self._cfg.iv_skew_table['call'].keys())
+
+        # --- Multi-leg strategy rules based on available slots ---
+        available_slots = self.max_positions - len(self.portfolio)
+
+        if available_slots >= 4:
             action_mask[self.actions_to_indices['OPEN_LONG_IRON_FLY']] = 1
             action_mask[self.actions_to_indices['OPEN_SHORT_IRON_FLY']] = 1
             action_mask[self.actions_to_indices['OPEN_LONG_IRON_CONDOR']] = 1
             action_mask[self.actions_to_indices['OPEN_SHORT_IRON_CONDOR']] = 1
-        if len(self.portfolio) <= self.max_positions - 2:
+
+        if available_slots >= 2:
+            # --- Straddle logic (always valid as offset is 0) ---
             action_mask[self.actions_to_indices['OPEN_LONG_STRADDLE_ATM']] = 1
             action_mask[self.actions_to_indices['OPEN_SHORT_STRADDLE_ATM']] = 1
-            action_mask[self.actions_to_indices['OPEN_LONG_STRANGLE_ATM_1']] = 1
-            action_mask[self.actions_to_indices['OPEN_SHORT_STRANGLE_ATM_1']] = 1
-        if len(self.portfolio) < self.max_positions:
+
+            # --- DYNAMIC STRANGLE MASKING ---
+            for width in [1, 2]:
+                call_offset = +width
+                put_offset = -width
+
+                # Check if this strangle width is legal
+                if (min_offset <= call_offset <= max_offset and min_offset <= put_offset <= max_offset):
+                    action_name_long = f'OPEN_LONG_STRANGLE_ATM_{width}'
+                    action_name_short = f'OPEN_SHORT_STRANGLE_ATM_{width}'
+
+                    if action_name_long in self.actions_to_indices:
+                        action_mask[self.actions_to_indices[action_name_long]] = 1
+                    if action_name_short in self.actions_to_indices:
+                        action_mask[self.actions_to_indices[action_name_short]] = 1
+
+            # --- ENABLE VERTICAL SPREAD ACTIONS ---
+            for width_in_strikes in [1, 2]:
+                for option_type in ['call', 'put']:
+                    # Calculate the offset of the short/long leg
+                    offset = width_in_strikes if option_type == 'call' else -width_in_strikes
+                    
+                    # Check if this offset is within the valid range
+                    is_legal_spread = (min_offset <= offset <= max_offset)
+
+                    if is_legal_spread:
+                        # If the spread is valid, enable its corresponding actions
+                        action_name_long = f'OPEN_LONG_VERTICAL_{option_type.upper()}_{width_in_strikes}'
+                        action_name_short = f'OPEN_SHORT_VERTICAL_{option_type.upper()}_{width_in_strikes}'
+                        
+                        if action_name_long in self.actions_to_indices:
+                            action_mask[self.actions_to_indices[action_name_long]] = 1
+                        if action_name_short in self.actions_to_indices:
+                            action_mask[self.actions_to_indices[action_name_short]] = 1
+
+        if available_slots >= 1:
             atm_price = 0
             if np.isfinite(self.current_price) and np.isfinite(self.strike_distance) and self.strike_distance > 0:
                 atm_price = int(self.current_price / self.strike_distance + 0.5) * self.strike_distance
