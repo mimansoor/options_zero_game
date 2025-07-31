@@ -8,14 +8,14 @@ from zoo.options_zero_game.envs.options_zero_game_env import OptionsZeroGameEnv
 # ==============================================================
 #                 Options-Zero-Game Config
 # ==============================================================
-collector_env_num = 4
-evaluator_env_num = 2
-batch_size = 128
-num_simulations = 25
-update_per_collect = 200
+collector_env_num = 20
+evaluator_env_num = 20
+batch_size = 256
+num_simulations = 100
+update_per_collect = 1000
 max_env_step = int(5e6)
 reanalyze_ratio = 0.
-n_episode = 8
+n_episode = 20
 
 # <<< MODIFIED: The final, correct action space size derived from the environment
 # 1 HOLD + (11 strikes * 4 types) + 8 Combos + 4 CLOSE_i + 1 CLOSE_ALL = 1 + 44 + 8 + 4 + 1 = 58
@@ -87,7 +87,7 @@ options_zero_game_muzero_config = dict(
             discrete_action_encoding_type='one_hot',
             norm_type='BN',
         ),
-        model_path = None,
+        model_path = './best_ckpt/ckpt_best.pth.tar',
         cuda=True,
         game_segment_length=OptionsZeroGameEnv.config['time_to_expiry_days'] * OptionsZeroGameEnv.config['steps_per_day'],
         update_per_collect=update_per_collect,
