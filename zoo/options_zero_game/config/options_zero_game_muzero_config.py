@@ -7,17 +7,16 @@ from zoo.options_zero_game.envs.options_zero_game_env import OptionsZeroGameEnv
 # ==============================================================
 #                 Hyperparameters for Tuning
 # ==============================================================
-collector_env_num = 20
-evaluator_env_num = 20
+collector_env_num = 8
+evaluator_env_num = 8
 batch_size = 256
-num_simulations = 100
-update_per_collect = 1000
+num_simulations = 25
+update_per_collect = 200
 max_env_step = int(5e6)
 reanalyze_ratio = 0.
-n_episode = 20
+n_episode = 8
 
 # A comprehensive list of GARCH parameters for different market types.
-# The 'mixed' price_source setting will randomly choose between these and historical data.
 market_regimes = [
     # Name, mu, omega, alpha, beta, overnight_vol_multiplier
     {'name': 'Bond_Markets', 'mu': 0.00001, 'omega': 0.000002, 'alpha': 0.05, 'beta': 0.92, 'overnight_vol_multiplier': 1.1},
@@ -47,36 +46,23 @@ options_zero_game_muzero_config = dict(
         evaluator_env_num=evaluator_env_num,
         n_evaluator_episode=evaluator_env_num,
         manager=dict(shared_memory=False, ),
-        
-        # --- Environment-Specific Parameters ---
-        # Select the price data source: 'garch', 'historical', or 'mixed'
         price_source='mixed',
         historical_data_path='zoo/options_zero_game/data/market_data_cache',
         market_regimes=market_regimes,
-
-        # Set ignore_legal_actions to True. This allows MuZero's MCTS to explore all actions,
-        # while the environment itself will enforce the rules and apply penalties for illegal moves.
         ignore_legal_actions=True, 
-        
-        # Other gameplay parameters
         drawdown_penalty_weight=0.1,
         illegal_action_penalty=-1.0,
         rolling_vol_window=5,
     ),
     policy=dict(
-        # The model, observation_shape, and action_space_size will be dynamically
-        # configured in the __main__ block below.
         model=dict(
-            model_type='mlp',
+            model_type='mlp',  # <<< --- KEY FIX 2: Use the correct model type name --- >>>
             lstm_hidden_size=512,
             latent_state_dim=512,
             self_supervised_learning_loss=True,
             discrete_action_encoding_type='one_hot',
             norm_type='BN',
         ),
-        # Path to a checkpoint file to resume training or for evaluation.
-        # Leave commented out to start a fresh training run.
-        # model_path='./path/to/your/ckpt_best.pth.tar',
         cuda=True,
         game_segment_length=OptionsZeroGameEnv.config['time_to_expiry_days'] * OptionsZeroGameEnv.config['steps_per_day'],
         update_per_collect=update_per_collect,
@@ -119,30 +105,28 @@ create_config = EasyDict(create_config)
 #  Dynamic Configuration and Training Launcher
 # =================================================================
 if __name__ == '__main__':
-    # This entry point is used when you run the script directly:
-    # `python -u zoo/options_zero_game/config/options_zero_game_muzero_config.py`
-    
     from lzero.entry import train_muzero
     
-    # 1. Create a temporary environment instance to get the true observation and action shapes.
-    #    This makes the config robust to any changes in the environment.
+    # 1. Create a temporary environment instance.
     temp_env_cfg = main_config.env 
     temp_env = OptionsZeroGameEnv(temp_env_cfg)
-    obs_shape = temp_env.observation_space.shape
+    
+    # <<< --- KEY FIX 1: Unpack the shape tuple to get an integer --- >>>
+    obs_shape_tuple = temp_env.observation_space.shape
+    obs_shape_int = obs_shape_tuple[0]
+    
     act_size = temp_env.action_space.n
     
-    # 2. Update the main configuration dictionary with the correct, dynamic values.
-    main_config.policy.model.observation_shape = obs_shape
+    # 2. Update the main configuration with the correct, dynamic values.
+    main_config.policy.model.observation_shape = obs_shape_int # Use the integer
     main_config.policy.model.action_space_size = act_size
     
-    # 3. Print a sanity check to the console to confirm the shapes before starting.
+    # 3. Sanity check printout.
     print("="*50)
     print(">>> DYNAMICALLY CONFIGURED MODEL SHAPES <<<")
-    print(f"    Observation Shape: {main_config.policy.model.observation_shape}")
-    print(f"    Action Space Size: {main_config.policy.model.action_space_size}")
+    print(f"    Observation Shape (int): {main_config.policy.model.observation_shape}")
+    print(f"    Action Space Size (int): {main_config.policy.model.action_space_size}")
     print("="*50)
     
-    # 4. Launch the training process.
-    #    Ensure any old experiment directories are removed if you have changed the
-    #    environment in a way that alters the model architecture.
+    # 4. Launch the training.
     train_muzero([main_config, create_config], seed=0, max_env_step=max_env_step)
