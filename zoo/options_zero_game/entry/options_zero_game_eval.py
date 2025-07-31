@@ -23,7 +23,7 @@ if __name__ == "__main__":
     create_config.env.type = 'log_replay'
     
     # <<< THE FIX: Save the log file directly to the 'build' directory
-    main_config.env.log_file_path = 'visualizer-ui/build/replay_log.json'
+    main_config.env.log_file_path = 'zoo/options_zero_game/visualizer-ui/build/replay_log.json'
 
     main_config.env.market_regimes = [
         # Name, mu, omega, alpha, beta, overnight_vol_multiplier

@@ -5,7 +5,7 @@ import os
 # Define the port the server will run on
 PORT = 5001
 # Define the directory where our built React app is located
-DIRECTORY = "visualizer-ui/build"
+DIRECTORY = "zoo/options_zero_game/visualizer-ui/build"
 
 class Handler(http.server.SimpleHTTPRequestHandler):
     def __init__(self, *args, **kwargs):
