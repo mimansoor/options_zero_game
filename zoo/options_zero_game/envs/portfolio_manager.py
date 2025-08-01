@@ -201,6 +201,60 @@ class PortfolioManager:
             print(f"Warning: Could not parse shift action '{action_name}'. Error: {e}")
             return
 
+    def get_portfolio_summary(self, current_price: float, iv_bin_index: int) -> Dict:
+        """
+        Calculates high-level summary statistics for the entire portfolio.
+        """
+        if self.portfolio.empty:
+            return {
+                'max_profit': 0.0, 'max_loss': 0.0, 'rr_ratio': 0.0, 'prob_profit': 0.5
+            }
+
+        # Since we enforce a "one strategy at a time" rule, the portfolio's max profit/loss
+        # is simply the value from the first leg (as all legs of a strategy share it).
+        max_profit = self.portfolio.iloc[0]['strategy_max_profit']
+        max_loss = self.portfolio.iloc[0]['strategy_max_loss']
+
+        # Calculate Risk/Reward Ratio with a safe division
+        # We use absolute values as RR is typically a positive ratio.
+        abs_max_loss = abs(max_loss)
+        if abs_max_loss > 1e-6:
+            rr_ratio = abs(max_profit) / abs_max_loss
+        else:
+            rr_ratio = 0.0 # Or a large number if profit is positive, let's use 0 for stability
+
+        # --- Heuristic for Probability of Profit ---
+        # We will calculate the PoP for the "main" leg of the strategy.
+        # A good heuristic is to pick the leg with the highest absolute delta.
+        atm_price = int(current_price / self.strike_distance + 0.5) * self.strike_distance
+        
+        # Calculate greeks for all legs to find the one with max delta
+        all_greeks = []
+        for _, pos in self.portfolio.iterrows():
+            offset = round((pos['strike_price'] - atm_price) / self.strike_distance)
+            vol = self.bs_manager.get_implied_volatility(offset, pos['type'], iv_bin_index)
+            greeks = self.bs_manager.get_all_greeks_and_price(current_price, pos['strike_price'], pos['days_to_expiry'], pos['type'] == 'call')
+            all_greeks.append({'greeks': greeks, 'pos': pos})
+            
+        # Find the leg with the highest absolute delta
+        main_leg = max(all_greeks, key=lambda x: abs(x['greeks']['delta']))
+        
+        main_greeks = main_leg['greeks']
+        main_pos = main_leg['pos']
+        
+        # Calculate PoP for this main leg
+        if main_pos['type'] == 'call':
+            prob_profit = _numba_cdf(main_greeks['d2']) if main_pos['direction'] == 'long' else 1 - _numba_cdf(main_greeks['d2'])
+        else: # Put
+            prob_profit = 1 - _numba_cdf(main_greeks['d2']) if main_pos['direction'] == 'long' else _numba_cdf(main_greeks['d2'])
+
+        return {
+            'max_profit': max_profit,
+            'max_loss': max_loss,
+            'rr_ratio': rr_ratio,
+            'prob_profit': prob_profit if math.isfinite(prob_profit) else 0.5
+        }
+
     def get_portfolio_greeks(self, current_price: float, iv_bin_index: int) -> Dict:
         """Calculates and returns a dictionary of normalized portfolio-level Greeks."""
         total_delta, total_gamma, total_theta, total_vega = 0.0, 0.0, 0.0, 0.0

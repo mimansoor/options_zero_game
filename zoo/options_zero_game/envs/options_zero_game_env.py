@@ -100,6 +100,7 @@ class OptionsZeroGameEnv(gym.Env):
         self.OBS_IDX = {
             'PRICE_NORM': 0, 'TIME_NORM': 1, 'PNL_NORM': 2, 'VOL_MISMATCH_NORM': 3, 'LOG_RETURN': 4,
             'MOMENTUM_NORM': 5, 'PORTFOLIO_DELTA': 6, 'PORTFOLIO_GAMMA': 7, 'PORTFOLIO_THETA': 8, 'PORTFOLIO_VEGA': 9,
+            'PORTFOLIO_MAX_PROFIT_NORM': 10, 'PORTFOLIO_MAX_LOSS_NORM': 11, 'PORTFOLIO_RR_RATIO_NORM': 12, 'PORTFOLIO_PROB_PROFIT': 13,
         }
         self.POS_IDX = {
             'IS_OCCUPIED': 0, 'TYPE_NORM': 1, 'DIRECTION_NORM': 2, 'STRIKE_DIST_NORM': 3, 'DAYS_HELD_NORM': 4,
@@ -222,6 +223,16 @@ class OptionsZeroGameEnv(gym.Env):
         vec[self.OBS_IDX['PORTFOLIO_GAMMA']] = greeks['gamma_norm']
         vec[self.OBS_IDX['PORTFOLIO_THETA']] = greeks['theta_norm']
         vec[self.OBS_IDX['PORTFOLIO_VEGA']] = greeks['vega_norm']
+
+        summary = self.portfolio_manager.get_portfolio_summary(self.price_manager.current_price, self.iv_bin_index)
+
+        # Normalize the values before adding them to the state
+        vec[self.OBS_IDX['PORTFOLIO_MAX_PROFIT_NORM']] = math.tanh(summary['max_profit'] / self._cfg.initial_cash)
+        vec[self.OBS_IDX['PORTFOLIO_MAX_LOSS_NORM']] = math.tanh(summary['max_loss'] / self._cfg.initial_cash)
+        # RR Ratio is often spiky, tanh is a good choice
+        vec[self.OBS_IDX['PORTFOLIO_RR_RATIO_NORM']] = math.tanh(summary['rr_ratio'])
+        # Probability is already in a [0, 1] range, we can scale it to [-1, 1]
+        vec[self.OBS_IDX['PORTFOLIO_PROB_PROFIT']] = (summary['prob_profit'] * 2) - 1.0
 
         # Per-Position State
         self.portfolio_manager.get_positions_state(vec, self.PORTFOLIO_START_IDX, self.PORTFOLIO_STATE_SIZE_PER_POS, self.POS_IDX, self.price_manager.current_price, self.iv_bin_index, self.current_step, self.total_steps)
