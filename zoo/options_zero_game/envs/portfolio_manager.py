@@ -3,7 +3,7 @@ import pandas as pd
 import numpy as np
 import math
 from typing import Dict, List, Any
-from .black_scholes_manager import BlackScholesManager
+from .black_scholes_manager import BlackScholesManager, _numba_cdf
 
 class PortfolioManager:
     """
@@ -84,8 +84,10 @@ class PortfolioManager:
             vec[current_pos_idx + pos_idx_map['STRIKE_DIST_NORM']] = (pos['strike_price'] - atm_price) / (5 * self.strike_distance)
             vec[current_pos_idx + pos_idx_map['DAYS_HELD_NORM']] = (current_step - pos.get('entry_step', current_step)) / total_steps
 
-            if is_call: pop = self.bs_manager._numba_cdf(greeks['d2']) if pos['direction'] == 'long' else 1 - self.bs_manager._numba_cdf(greeks['d2'])
-            else: pop = 1 - self.bs_manager._numba_cdf(greeks['d2']) if pos['direction'] == 'long' else self.bs_manager._numba_cdf(greeks['d2'])
+            # --- THE FIX IS HERE ---
+            # Call the directly imported _numba_cdf function instead of through the manager instance
+            if is_call: pop = _numba_cdf(greeks['d2']) if pos['direction'] == 'long' else 1 - _numba_cdf(greeks['d2'])
+            else: pop = 1 - _numba_cdf(greeks['d2']) if pos['direction'] == 'long' else _numba_cdf(greeks['d2'])
             vec[current_pos_idx + pos_idx_map['PROB_OF_PROFIT']] = pop if math.isfinite(pop) else 0.5
             
             vec[current_pos_idx + pos_idx_map['MAX_PROFIT_NORM']] = math.tanh(pos['strategy_max_profit'] / self.initial_cash)
@@ -95,7 +97,7 @@ class PortfolioManager:
             vec[current_pos_idx + pos_idx_map['GAMMA']] = math.tanh(greeks['gamma'] * self.lot_size)
             vec[current_pos_idx + pos_idx_map['THETA']] = math.tanh(greeks['theta'] * self.lot_size)
             vec[current_pos_idx + pos_idx_map['VEGA']] = math.tanh(greeks['vega'] * self.lot_size)
-            
+           
     def get_total_pnl(self, current_price: float, iv_bin_index: int) -> float:
         if self.portfolio.empty:
             return self.realized_pnl
@@ -129,23 +131,34 @@ class PortfolioManager:
                     self.close_position(idx, current_price, iv_bin_index)
 
     def close_position(self, position_index: int, current_price: float, iv_bin_index: int):
-        # --- Defensive Assertion ---
-        assert 0 <= position_index < len(self.portfolio), f"Attempted to close invalid position index: {position_index}. Portfolio size is {len(self.portfolio)}."
-        if position_index < 0: position_index = len(self.portfolio) + position_index
-        if 0 <= position_index < len(self.portfolio):
-            pos_to_close = self.portfolio.iloc[position_index]
-            is_call = pos_to_close['type'] == 'call'
-            atm_price = int(current_price / self.strike_distance + 0.5) * self.strike_distance
-            offset = round((pos_to_close['strike_price'] - atm_price) / self.strike_distance)
-            vol = self.bs_manager.get_implied_volatility(offset, pos_to_close['type'], iv_bin_index)
-            greeks = self.bs_manager.get_all_greeks_and_price(current_price, pos_to_close['strike_price'], pos_to_close['days_to_expiry'], vol, is_call)
-            
-            is_short = pos_to_close['direction'] == 'short'
-            exit_premium = self.bs_manager.get_price_with_spread(greeks['price'], is_buy=is_short, bid_ask_spread_pct=self.bid_ask_spread_pct)
-            
-            pnl = (exit_premium - pos_to_close['entry_premium']) if pos_to_close['direction'] == 'long' else (pos_to_close['entry_premium'] - exit_premium)
-            self.realized_pnl += pnl * self.lot_size
-            self.portfolio = self.portfolio.drop(self.portfolio.index[position_index]).reset_index(drop=True)
+        """
+        Closes a position at a specific index, with corrected assertion logic.
+        """
+        # --- THE FIX IS HERE ---
+        
+        # 1. First, handle the negative indexing to convert it to a positive index.
+        #    e.g., if portfolio size is 1, an index of -1 becomes 0.
+        if position_index < 0:
+            position_index = len(self.portfolio) + position_index
+
+        # 2. Now, assert that the *normalized*, positive index is valid.
+        #    This will now correctly check `0 <= 0 < 1`, which is True.
+        assert 0 <= position_index < len(self.portfolio), f"Attempted to close invalid or out-of-bounds index: {position_index}. Portfolio size is {len(self.portfolio)}."
+        
+        # The rest of the method logic remains the same.
+        pos_to_close = self.portfolio.iloc[position_index]
+        is_call = pos_to_close['type'] == 'call'
+        atm_price = int(current_price / self.strike_distance + 0.5) * self.strike_distance
+        offset = round((pos_to_close['strike_price'] - atm_price) / self.strike_distance)
+        vol = self.bs_manager.get_implied_volatility(offset, pos_to_close['type'], iv_bin_index)
+        greeks = self.bs_manager.get_all_greeks_and_price(current_price, pos_to_close['strike_price'], pos_to_close['days_to_expiry'], vol, is_call)
+        
+        is_short = pos_to_close['direction'] == 'short'
+        exit_premium = self.bs_manager.get_price_with_spread(greeks['price'], is_buy=is_short, bid_ask_spread_pct=self.bid_ask_spread_pct)
+        
+        pnl = (exit_premium - pos_to_close['entry_premium']) if pos_to_close['direction'] == 'long' else (pos_to_close['entry_premium'] - exit_premium)
+        self.realized_pnl += pnl * self.lot_size
+        self.portfolio = self.portfolio.drop(self.portfolio.index[position_index]).reset_index(drop=True)
 
     def close_all_positions(self, current_price: float, iv_bin_index: int):
         while not self.portfolio.empty:
@@ -189,6 +202,7 @@ class PortfolioManager:
             return
 
     def get_portfolio_greeks(self, current_price: float, iv_bin_index: int) -> Dict:
+        """Calculates and returns a dictionary of normalized portfolio-level Greeks."""
         total_delta, total_gamma, total_theta, total_vega = 0.0, 0.0, 0.0, 0.0
         if self.portfolio.empty:
             return {'delta_norm': 0.0, 'gamma_norm': 0.0, 'theta_norm': 0.0, 'vega_norm': 0.0}
@@ -197,12 +211,24 @@ class PortfolioManager:
 
         for _, pos in self.portfolio.iterrows():
             direction_multiplier = 1 if pos['direction'] == 'long' else -1
+            is_call = pos['type'] == 'call'
+            
+            # --- THE FIX IS HERE ---
+            # 1. We must first calculate sigma (implied volatility) for the leg.
             offset = round((pos['strike_price'] - atm_price) / self.strike_distance)
             vol = self.bs_manager.get_implied_volatility(offset, pos['type'], iv_bin_index)
-            greeks = self.bs_manager.get_all_greeks_and_price(current_price, pos['strike_price'], pos['days_to_expiry'], pos['type'] == 'call')
+            
+            # 2. Now we can call get_all_greeks_and_price with all 5 required arguments.
+            greeks = self.bs_manager.get_all_greeks_and_price(
+                current_price,
+                pos['strike_price'],
+                pos['days_to_expiry'],
+                vol,       # <-- The missing `sigma` argument
+                is_call    # <-- The final `is_call` argument
+            )
             
             total_delta += greeks['delta'] * self.lot_size * direction_multiplier
-            total_gamma += greeks['gamma'] * (self.lot_size * self.lot_size * current_price**2 / 100) * direction_multiplier
+            total_gamma += greeks['gamma'] * (self.lot_size**2 * current_price**2 / 100) * direction_multiplier
             total_theta += greeks['theta'] * self.lot_size * direction_multiplier
             total_vega += greeks['vega'] * self.lot_size * direction_multiplier
 
@@ -213,7 +239,7 @@ class PortfolioManager:
             'theta_norm': math.tanh(total_theta / self.initial_cash),
             'vega_norm': math.tanh(total_vega / self.initial_cash)
         }
-        
+
     def sort_portfolio(self):
         if not self.portfolio.empty:
             self.portfolio = self.portfolio.sort_values(by=['strike_price', 'type', 'creation_id']).reset_index(drop=True)
@@ -362,30 +388,62 @@ class PortfolioManager:
         pnl['strategy_id'] = self.strategy_name_to_id.get(canonical_strategy_name, -1)
         self._execute_trades(legs, pnl)
 
-    def _open_iron_fly(self, action_name: str) -> None:
-        # --- Defensive Assertion ---
-        assert len(self.portfolio) <= self.max_positions - 4, "Illegal attempt to open a IronFly."
+    def _open_iron_condor(self, action_name: str, current_price: float, iv_bin_index: int, current_step: int, days_to_expiry: float):
+        """Opens a four-leg iron condor strategy."""
         if len(self.portfolio) > self.max_positions - 4: return
-        legs = self._get_trade_legs(action_name)
-        if not legs: return
+        
+        direction = 'long' if 'LONG' in action_name else 'short'
+        atm_price = int(current_price / self.strike_distance + 0.5) * self.strike_distance
+        
+        # A long iron condor is a bull put spread and a bear call spread
+        # It's a short strangle + a wider long strangle
+        short_dir = 'short' if direction == 'long' else 'long'
+        long_dir = 'long' if direction == 'long' else 'short'
+        
+        legs = [
+            {'type': 'put', 'direction': short_dir, 'strike_price': atm_price - self.strike_distance},
+            {'type': 'call', 'direction': short_dir, 'strike_price': atm_price + self.strike_distance},
+            {'type': 'put', 'direction': long_dir, 'strike_price': atm_price - (2 * self.strike_distance)},
+            {'type': 'call', 'direction': long_dir, 'strike_price': atm_price + (2 * self.strike_distance)}
+        ]
+
         for leg in legs:
-            leg['entry_premium'] = self._get_option_price(self._get_option_details(self.current_price, leg['strike_price'], leg['days_to_expiry'], leg['type'])[0], leg['direction'] == 'long')
-        direction = 'LONG' if 'LONG' in action_name else 'SHORT'
-        strategy_name = f"{direction}_IRON_FLY"
-        pnl = self._calculate_strategy_pnl(legs, strategy_name)
+            leg['entry_step'] = current_step
+            leg['days_to_expiry'] = days_to_expiry
+            
+        legs = self._price_legs(legs, current_price, iv_bin_index)
+        pnl = self._calculate_strategy_pnl(legs, action_name)
+        pnl['strategy_id'] = self.strategy_name_to_id.get(action_name.replace('OPEN_',''), -1)
         self._execute_trades(legs, pnl)
 
-    def _open_iron_condor(self, action_name: str) -> None:
-        # --- Defensive Assertion ---
-        assert len(self.portfolio) <= self.max_positions - 4, "Illegal attempt to open a IronCondor."
+    def _open_iron_fly(self, action_name: str, current_price: float, iv_bin_index: int, current_step: int, days_to_expiry: float):
+        """Opens a four-leg iron fly strategy."""
         if len(self.portfolio) > self.max_positions - 4: return
-        legs = self._get_trade_legs(action_name)
-        if not legs: return
+
+        direction = 'long' if 'LONG' in action_name else 'short'
+        atm_price = int(current_price / self.strike_distance + 0.5) * self.strike_distance
+
+        # An iron fly is a short straddle + a long strangle
+        straddle_dir = 'short' if direction == 'long' else 'long'
+        strangle_dir = 'long' if direction == 'long' else 'short'
+
+        hedge_strike_call = atm_price + self.strike_distance # Width is typically 1
+        hedge_strike_put = atm_price - self.strike_distance
+
+        legs = [
+            {'type': 'call', 'direction': straddle_dir, 'strike_price': atm_price},
+            {'type': 'put', 'direction': straddle_dir, 'strike_price': atm_price},
+            {'type': 'call', 'direction': strangle_dir, 'strike_price': hedge_strike_call},
+            {'type': 'put', 'direction': strangle_dir, 'strike_price': hedge_strike_put}
+        ]
+
         for leg in legs:
-            leg['entry_premium'] = self._get_option_price(self._get_option_details(self.current_price, leg['strike_price'], leg['days_to_expiry'], leg['type'])[0], leg['direction'] == 'long')
-        direction = 'LONG' if 'LONG' in action_name else 'SHORT'
-        strategy_name = f"{direction}_IRON_CONDOR"
-        pnl = self._calculate_strategy_pnl(legs, strategy_name)
+            leg['entry_step'] = current_step
+            leg['days_to_expiry'] = days_to_expiry
+
+        legs = self._price_legs(legs, current_price, iv_bin_index)
+        pnl = self._calculate_strategy_pnl(legs, action_name)
+        pnl['strategy_id'] = self.strategy_name_to_id.get(action_name.replace('OPEN_',''), -1)
         self._execute_trades(legs, pnl)
 
     def _open_vertical_spread(self, action_name: str, current_price: float, iv_bin_index: int, current_step: int, days_to_expiry: float):

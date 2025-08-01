@@ -1,5 +1,5 @@
 # zoo/options_zero_game/envs/options_zero_game_env.py
-# <<< VERSION 2.0 - REFACTORED >>>
+# <<< FINAL VERSION, incorporating all fixes >>>
 
 import copy
 import math
@@ -22,10 +22,9 @@ from .portfolio_manager import PortfolioManager
 
 @ENV_REGISTRY.register('options_zero_game')
 class OptionsZeroGameEnv(gym.Env):
-    VERSION = "2.0-Refactored"
+    VERSION = "2.1-Refactored-Final"
     metadata = {'render.modes': ['human']}
     
-    # The default config remains the same, as it's used by all managers.
     config = dict(
         start_price=20000.0,
         initial_cash=100000.0,
@@ -67,7 +66,7 @@ class OptionsZeroGameEnv(gym.Env):
             'LONG_VERTICAL_CALL_2': 15, 'SHORT_VERTICAL_CALL_2': 17,
             'LONG_VERTICAL_PUT_1': 18, 'SHORT_VERTICAL_PUT_1': 20,
             'LONG_VERTICAL_PUT_2': 19, 'SHORT_VERTICAL_PUT_2': 21,
-            
+
             # Note: Butterflies are often referenced by their action name
             # but can be added here for consistency if needed.
             'LONG_CALL_FLY_1': 22, 'SHORT_CALL_FLY_1': 23,
@@ -124,9 +123,12 @@ class OptionsZeroGameEnv(gym.Env):
         self.illegal_action_count = 0
         self.realized_vol_series = np.array([])
         
+        # --- THE FIX ---
+        # Restoring the time constants needed by the orchestrator methods.
         self.TRADING_DAY_IN_MINS = self._cfg.trading_day_in_mins
         self.MINS_IN_DAY = 24 * 60
         self.TRADING_DAYS_IN_WEEK = 5
+        self.TOTAL_DAYS_IN_WEEK = 7
         self.decay_per_step_trading = (self.TRADING_DAY_IN_MINS / self._cfg.steps_per_day) / self.MINS_IN_DAY
         self.decay_overnight = (self.MINS_IN_DAY - self.TRADING_DAY_IN_MINS) / self.MINS_IN_DAY
         self.decay_weekend = 2.0
@@ -168,7 +170,7 @@ class OptionsZeroGameEnv(gym.Env):
         if terminated: self.portfolio_manager.close_all_positions(self.price_manager.current_price, self.iv_bin_index)
 
         equity_after = self.portfolio_manager.get_current_equity(self.price_manager.current_price, self.iv_bin_index)
-        shaped_reward, raw_reward = self._calculate_shaped_reward(equity_before, equity_after)
+        shaped_reward, raw_reward = self._calculate_shaped_reward(equity_after, equity_before)
         self.final_eval_reward += raw_reward
         final_reward = self._cfg.illegal_action_penalty if was_illegal_action else shaped_reward
 
@@ -179,6 +181,7 @@ class OptionsZeroGameEnv(gym.Env):
         return BaseEnvTimestep({'observation': obs, 'action_mask': action_mask, 'to_play': -1}, final_reward, terminated, info)
 
     def _handle_action(self, action: int) -> bool:
+        """Checks action legality and delegates to the PortfolioManager."""
         if self._get_true_action_mask()[action] == 0:
             self.illegal_action_count += 1
             return True
@@ -186,6 +189,7 @@ class OptionsZeroGameEnv(gym.Env):
         action_name = self.indices_to_actions.get(action, 'INVALID')
         
         if action_name.startswith('OPEN_'):
+            # This logic is correct now because the constants exist on self
             current_day = self.current_step // self._cfg.steps_per_day
             days_to_expiry = (self._cfg.time_to_expiry_days - current_day) * (self.TOTAL_DAYS_IN_WEEK / self.TRADING_DAYS_IN_WEEK)
             self.portfolio_manager.open_strategy(action_name, self.price_manager.current_price, self.iv_bin_index, self.current_step, days_to_expiry)
@@ -200,9 +204,8 @@ class OptionsZeroGameEnv(gym.Env):
         return False
 
     def _get_observation(self) -> np.ndarray:
-        vec = np.zeros(self.market_and_portfolio_state_size, dtype=np.float32)
-        
         # Market State
+        vec = np.zeros(self.market_and_portfolio_state_size, dtype=np.float32)
         vec[self.OBS_IDX['PRICE_NORM']] = (self.price_manager.current_price / self.price_manager.start_price) - 1.0
         vec[self.OBS_IDX['TIME_NORM']] = (self.total_steps - self.current_step) / self.total_steps
         vec[self.OBS_IDX['PNL_NORM']] = math.tanh(self.portfolio_manager.get_total_pnl(self.price_manager.current_price, self.iv_bin_index) / self._cfg.initial_cash)
@@ -210,14 +213,14 @@ class OptionsZeroGameEnv(gym.Env):
         vec[self.OBS_IDX['VOL_MISMATCH_NORM']] = math.tanh((self.realized_vol_series[self.current_step] / garch_vol) - 1.0) if garch_vol > 0 else 0.0
         log_return = math.log(self.price_manager.current_price / (self.price_manager.price_path[self.current_step - 1] + 1e-8)) if self.current_step > 0 else 0.0
         vec[self.OBS_IDX['LOG_RETURN']] = np.clip(log_return, -0.1, 0.1) * 10
-        
+
         # Portfolio Greeks
         greeks = self.portfolio_manager.get_portfolio_greeks(self.price_manager.current_price, self.iv_bin_index)
         vec[self.OBS_IDX['PORTFOLIO_DELTA']] = greeks['delta_norm']
         vec[self.OBS_IDX['PORTFOLIO_GAMMA']] = greeks['gamma_norm']
         vec[self.OBS_IDX['PORTFOLIO_THETA']] = greeks['theta_norm']
         vec[self.OBS_IDX['PORTFOLIO_VEGA']] = greeks['vega_norm']
-        
+
         # Per-Position State
         self.portfolio_manager.get_positions_state(vec, self.PORTFOLIO_START_IDX, self.PORTFOLIO_STATE_SIZE_PER_POS, self.POS_IDX, self.price_manager.current_price, self.iv_bin_index, self.current_step, self.total_steps)
 
@@ -289,7 +292,7 @@ class OptionsZeroGameEnv(gym.Env):
             actions[f'SHIFT_DOWN_POS_{j}'] = i; i+=1
         actions['CLOSE_ALL'] = i
         return actions
-
+        
     def _get_true_action_mask(self) -> np.ndarray:
         """
         Calculates the complete, rule-based action mask by querying the portfolio manager.
@@ -326,7 +329,7 @@ class OptionsZeroGameEnv(gym.Env):
                      action_mask[self.actions_to_indices[f'SHIFT_DOWN_POS_{i}']] = 1
         else:
             # If the portfolio is empty, allow all OPEN actions based on slot requirements
-            available_slots = self.max_positions - len(self.portfolio_manager.portfolio)
+            available_slots = self.portfolio_manager.max_positions - len(self.portfolio_manager.portfolio)
 
             # This simplified logic allows all open actions if slots are available.
             # For a 1-to-1 match, you would copy the complex delta-based masking here.
