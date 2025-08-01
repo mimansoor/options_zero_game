@@ -69,7 +69,7 @@ if __name__ == "__main__":
     
     returns_mean, returns = eval_muzero(
         [main_config, create_config],
-        seed=50,
+        #seed=50,
         num_episodes_each_seed=1,
         print_seed_details=True,
         model_path=model_path

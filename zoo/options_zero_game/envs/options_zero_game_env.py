@@ -463,7 +463,10 @@ class OptionsZeroGameEnv(gym.Env):
 
     def reset(self, seed: int = None, **kwargs):
         if seed is not None: self.seed(seed)
-        elif self.np_random is None: self.seed(0)
+        elif self.np_random is None:
+            # 2. USE TIME FOR A MORE RANDOM SEED
+            new_seed = int(time.time())
+            self.seed(new_seed)
 
         # 1. Always start by setting a default start_price from config.
         #    This will be overwritten by the historical loader if needed.

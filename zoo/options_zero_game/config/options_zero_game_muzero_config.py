@@ -140,5 +140,34 @@ create_config = dict(
 create_config = EasyDict(create_config)
 
 if __name__ == "__main__":
+    import argparse
+    import time
     from lzero.entry import train_muzero
-    train_muzero([main_config, create_config], seed=0, max_env_step=max_env_step)
+
+    # 1. Set up the argument parser
+    parser = argparse.ArgumentParser(description="Train the Options-Zero-Game MuZero Agent.")
+    parser.add_argument(
+        '--seed', 
+        type=int, 
+        default=0, 
+        help="Master seed for the experiment. Defaults to 0 for reproducibility. "
+             "Use a negative value (e.g., -1) to generate a random seed based on the current time."
+    )
+    args = parser.parse_args()
+
+    # 2. Determine the final seed value
+    if args.seed < 0:
+        # User requested a random seed
+        final_seed = int(time.time())
+        print(f"--- Running with a RANDOM seed: {final_seed} ---")
+    else:
+        # User provided a specific seed or is using the default
+        final_seed = args.seed
+        print(f"--- Running with a FIXED seed: {final_seed} ---")
+
+    # 3. Pass the final seed to the training function
+    train_muzero(
+        [main_config, create_config], 
+        seed=final_seed, 
+        max_env_step=max_env_step
+    )

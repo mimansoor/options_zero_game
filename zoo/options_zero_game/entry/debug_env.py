@@ -32,7 +32,8 @@ def run_random_agent_test():
         print(f"Action Space: {env.action_space}")
 
         print("\n--- Testing env.reset() ---")
-        obs = env.reset(seed=42)
+        #obs = env.reset(seed=42)
+        obs = env.reset()
         assert env.observation_space.contains(obs['observation']), "Initial observation is not in the defined space!"
         print("env.reset() successful. Initial observation is valid.")
 
