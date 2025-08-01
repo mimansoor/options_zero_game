@@ -210,39 +210,37 @@ class PortfolioManager:
                 'max_profit': 0.0, 'max_loss': 0.0, 'rr_ratio': 0.0, 'prob_profit': 0.5
             }
 
-        # Since we enforce a "one strategy at a time" rule, the portfolio's max profit/loss
-        # is simply the value from the first leg (as all legs of a strategy share it).
         max_profit = self.portfolio.iloc[0]['strategy_max_profit']
         max_loss = self.portfolio.iloc[0]['strategy_max_loss']
 
-        # Calculate Risk/Reward Ratio with a safe division
-        # We use absolute values as RR is typically a positive ratio.
         abs_max_loss = abs(max_loss)
-        if abs_max_loss > 1e-6:
-            rr_ratio = abs(max_profit) / abs_max_loss
-        else:
-            rr_ratio = 0.0 # Or a large number if profit is positive, let's use 0 for stability
+        rr_ratio = abs(max_profit) / abs_max_loss if abs_max_loss > 1e-6 else 0.0
 
-        # --- Heuristic for Probability of Profit ---
-        # We will calculate the PoP for the "main" leg of the strategy.
-        # A good heuristic is to pick the leg with the highest absolute delta.
         atm_price = int(current_price / self.strike_distance + 0.5) * self.strike_distance
         
-        # Calculate greeks for all legs to find the one with max delta
         all_greeks = []
         for _, pos in self.portfolio.iterrows():
+            is_call = pos['type'] == 'call'
+            
+            # --- THE FIX IS HERE ---
+            # 1. We must calculate the volatility (sigma) for the leg first.
             offset = round((pos['strike_price'] - atm_price) / self.strike_distance)
             vol = self.bs_manager.get_implied_volatility(offset, pos['type'], iv_bin_index)
-            greeks = self.bs_manager.get_all_greeks_and_price(current_price, pos['strike_price'], pos['days_to_expiry'], pos['type'] == 'call')
+            
+            # 2. Now we can call the function with all 5 required arguments.
+            greeks = self.bs_manager.get_all_greeks_and_price(
+                current_price,
+                pos['strike_price'],
+                pos['days_to_expiry'],
+                vol,      # <-- The missing `sigma` argument
+                is_call   # <-- The final `is_call` argument
+            )
             all_greeks.append({'greeks': greeks, 'pos': pos})
             
-        # Find the leg with the highest absolute delta
         main_leg = max(all_greeks, key=lambda x: abs(x['greeks']['delta']))
-        
         main_greeks = main_leg['greeks']
         main_pos = main_leg['pos']
         
-        # Calculate PoP for this main leg
         if main_pos['type'] == 'call':
             prob_profit = _numba_cdf(main_greeks['d2']) if main_pos['direction'] == 'long' else 1 - _numba_cdf(main_greeks['d2'])
         else: # Put
