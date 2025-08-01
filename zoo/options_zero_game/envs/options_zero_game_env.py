@@ -171,21 +171,16 @@ class OptionsZeroGameEnv(gym.Env):
             'LONG_CALL': 0, 'SHORT_CALL': 1, 'LONG_PUT': 2, 'SHORT_PUT': 3,
             'LONG_STRADDLE': 4, 'SHORT_STRADDLE': 5,
             
-            'LONG_STRANGLE_1': 6,
-            'SHORT_STRANGLE_1': 7,
-            'LONG_STRANGLE_2': 8,
-            'SHORT_STRANGLE_2': 9,
+            'LONG_STRANGLE_1': 6, 'SHORT_STRANGLE_1': 7,
+            'LONG_STRANGLE_2': 8, 'SHORT_STRANGLE_2': 9,
             
-            'LONG_IRON_FLY': 10, 'SHORT_IRON_FLY': 11, 'LONG_IRON_CONDOR': 12, 'SHORT_IRON_CONDOR': 13,
+            'LONG_IRON_FLY': 10, 'SHORT_IRON_FLY': 11,
+            'LONG_IRON_CONDOR': 12, 'SHORT_IRON_CONDOR': 13,
 
-            'LONG_VERTICAL_CALL_1': 14,
-            'LONG_VERTICAL_CALL_2': 15,
-            'SHORT_VERTICAL_CALL_1': 16,
-            'SHORT_VERTICAL_CALL_2': 17,
-            'LONG_VERTICAL_PUT_1': 18,
-            'LONG_VERTICAL_PUT_2': 19,
-            'SHORT_VERTICAL_PUT_1': 20,
-            'SHORT_VERTICAL_PUT_2': 21,
+            'LONG_VERTICAL_CALL_1': 14, 'LONG_VERTICAL_CALL_2': 15,
+            'SHORT_VERTICAL_CALL_1': 16, 'SHORT_VERTICAL_CALL_2': 17,
+            'LONG_VERTICAL_PUT_1': 18, 'LONG_VERTICAL_PUT_2': 19,
+            'SHORT_VERTICAL_PUT_1': 20, 'SHORT_VERTICAL_PUT_2': 21,
         }
        
         self.actions_to_indices: Dict[str, int] = self._build_action_space()
@@ -203,6 +198,9 @@ class OptionsZeroGameEnv(gym.Env):
         self.portfolio_columns: List[str] = ['type', 'direction', 'entry_step', 'strike_price', 'entry_premium', 'days_to_expiry', 'creation_id', 'strategy_id', 'strategy_max_profit', 'strategy_max_loss']
         self.portfolio_dtypes = {'type': 'object', 'direction': 'object', 'entry_step': 'int64', 'strike_price': 'float64', 'entry_premium': 'float64', 'days_to_expiry': 'float64', 'creation_id': 'int64', 'strategy_id': 'int64', 'strategy_max_profit': 'float64', 'strategy_max_loss': 'float64'}
         self.portfolio: pd.DataFrame = pd.DataFrame(columns=self.portfolio_columns).astype(self.portfolio_dtypes)
+        #Add max and min strikes.
+        self.max_offset = max(int(k) for k in self._cfg.iv_skew_table['call'].keys())
+        self.min_offset = min(int(k) for k in self._cfg.iv_skew_table['call'].keys())
 
     def _discretize_iv_skew(self, skew_table: Dict[str, Dict[str, Tuple[float, float]]], num_bins: int = 5) -> Dict[str, Dict[str, np.ndarray]]:
         binned_ivs = {'call': {}, 'put': {}}
@@ -245,9 +243,22 @@ class OptionsZeroGameEnv(gym.Env):
         actions['OPEN_LONG_IRON_CONDOR'] = i; i+=1
         actions['OPEN_SHORT_IRON_CONDOR'] = i; i+=1
 
+        # --- Butterfly Spreads (Widths: 1 and 2 Strikes) ---
+        for width in [1, 2]:
+            actions[f'OPEN_LONG_CALL_FLY_{width}'] = i; i+=1
+            actions[f'OPEN_SHORT_CALL_FLY_{width}'] = i; i+=1
+            actions[f'OPEN_LONG_PUT_FLY_{width}'] = i; i+=1
+            actions[f'OPEN_SHORT_PUT_FLY_{width}'] = i; i+=1
+
         # --- Closing Actions ---
         for j in range(self.max_positions):
             actions[f'CLOSE_POSITION_{j}'] = i; i+=1
+
+        # --- Shifting/Rolling Actions ---
+        for j in range(self.max_positions):
+            actions[f'SHIFT_UP_POS_{j}'] = i; i+=1
+            actions[f'SHIFT_DOWN_POS_{j}'] = i; i+=1
+
         actions['CLOSE_ALL'] = i
         return actions
 
@@ -578,6 +589,9 @@ class OptionsZeroGameEnv(gym.Env):
         if action_name.startswith('OPEN_'):
             self._handle_open_action(action_name)
             portfolio_changed = True
+        elif action_name.startswith('SHIFT_'):
+            self._handle_shift_action(action_name)
+            portfolio_changed = True
         elif action_name.startswith('CLOSE_POSITION_'):
             pos_index = int(action_name.split('_')[-1])
             self._close_position(pos_index)
@@ -613,6 +627,103 @@ class OptionsZeroGameEnv(gym.Env):
         observation = {'observation': obs, 'action_mask': mcts_action_mask, 'to_play': -1}
         return BaseEnvTimestep(observation, final_reward, terminated, info)
 
+    def _open_butterfly(self, action_name: str) -> None:
+        """Opens a three-strike butterfly spread with a fixed, predefined width."""
+        if len(self.portfolio) > self.max_positions - 4:
+            return
+
+        # 1. Parse action name for direction, type, and width
+        try:
+            parts = action_name.split('_')
+            direction = parts[1].upper()
+            option_type = parts[2].lower()
+            width_in_strikes = int(parts[4])
+            width_in_price = width_in_strikes * self.strike_distance
+        except (ValueError, IndexError):
+            print(f"Warning: Could not parse butterfly action name '{action_name}'.")
+            return
+
+        # 2. Define Strikes based on the fixed width
+        atm_price = int(self.current_price / self.strike_distance + 0.5) * self.strike_distance
+        strike_lower = atm_price - width_in_price
+        strike_middle = atm_price
+        strike_upper = atm_price + width_in_price
+
+        # 3. Define Legs
+        wing_direction = 'long' if direction == 'LONG' else 'short'
+        body_direction = 'short' if direction == 'LONG' else 'long'
+
+        legs_to_trade = [
+            {'type': option_type, 'direction': wing_direction, 'strike_price': strike_lower},
+            {'type': option_type, 'direction': body_direction, 'strike_price': strike_middle},
+            {'type': option_type, 'direction': body_direction, 'strike_price': strike_middle},
+            {'type': option_type, 'direction': wing_direction, 'strike_price': strike_upper},
+        ]
+
+        # 4. Price the legs
+        current_trading_day = self.current_step // self.steps_per_day
+        trading_days_left = self.time_to_expiry_days - current_trading_day
+        days_to_expiry = trading_days_left * (self.TOTAL_DAYS_IN_WEEK / self.TRADING_DAYS_IN_WEEK)
+
+        for leg in legs_to_trade:
+            leg['entry_step'] = self.current_step
+            leg['days_to_expiry'] = days_to_expiry
+            mid_price, _, _ = self._get_option_details(self.current_price, leg['strike_price'], leg['days_to_expiry'], leg['type'])
+            leg['entry_premium'] = self._get_option_price(mid_price, is_buy=(leg['direction'] == 'long'))
+
+        # 5. Calculate strategy PnL using the NEW SPECIFIC strategy name
+        strategy_name_for_pnl = f"{direction}_BUTTERFLY_{width_in_strikes}"
+        pnl = self._calculate_strategy_pnl(legs_to_trade, strategy_name_for_pnl, width1=width_in_price)
+        self._execute_trades(legs_to_trade, pnl)
+
+    def _handle_shift_action(self, action_name: str) -> None:
+        """
+        Handles shifting a position up or down by one strike.
+        This is a "roll" action: close the old position, open a new one.
+        """
+        try:
+            # 1. Parse action name to get direction and index
+            parts = action_name.split('_')
+            direction = parts[1].upper()  # 'UP' or 'DOWN'
+            position_index = int(parts[3])
+
+            if not (0 <= position_index < len(self.portfolio)):
+                return  # Should not happen if action mask is correct
+
+            # 2. Get the original position's details
+            original_pos = self.portfolio.iloc[position_index].copy()
+
+            # 3. Calculate the new strike price
+            strike_modifier = self.strike_distance if direction == 'UP' else -self.strike_distance
+            new_strike_price = original_pos['strike_price'] + strike_modifier
+
+            # 4. Close the original position (this realizes its PnL)
+            self._close_position(position_index)
+
+            # 5. Open the new single-leg position
+            # Inherit type, direction, and DTE from the original position
+            new_leg = {
+                'type': original_pos['type'],
+                'direction': original_pos['direction'],
+                'strike_price': new_strike_price,
+                'entry_step': self.current_step,
+                'days_to_expiry': original_pos['days_to_expiry'],
+            }
+
+            # Price the new leg
+            mid_price, _, _ = self._get_option_details(self.current_price, new_leg['strike_price'], new_leg['days_to_expiry'], new_leg['type'])
+            new_leg['entry_premium'] = self._get_option_price(mid_price, is_buy=(new_leg['direction'] == 'long'))
+
+            # Calculate its individual strategy PnL and execute the trade
+            strategy_name = f"{new_leg['direction'].upper()}_{new_leg['type'].upper()}"
+            strategy_pnl = self._calculate_strategy_pnl([new_leg], strategy_name)
+            self._execute_trades([new_leg], strategy_pnl)
+
+        except (ValueError, IndexError) as e:
+            # Add a guard against malformed action names or indices
+            print(f"Warning: Could not parse shift action '{action_name}'. Error: {e}")
+            return
+
     def _handle_open_action(self, action_name: str) -> None:
         if 'IRON_CONDOR' in action_name: self._open_iron_condor(action_name)
         elif 'IRON_FLY' in action_name: self._open_iron_fly(action_name)
@@ -620,6 +731,7 @@ class OptionsZeroGameEnv(gym.Env):
         elif 'STRANGLE' in action_name: self._open_strangle(action_name)
         elif 'STRADDLE' in action_name: self._open_straddle(action_name)
         else: self._open_single_leg(action_name)
+
     def _execute_trades(self, trades_to_execute: List[Dict], strategy_pnl: Dict) -> None:
         if not trades_to_execute: return
         strategy_id = strategy_pnl.get('strategy_id', -1) 
@@ -686,21 +798,25 @@ class OptionsZeroGameEnv(gym.Env):
                 max_loss = -self.undefined_risk_cap
 
         # --- Defined Risk Strategies ---
-        elif 'VERTICAL' in strategy_name or 'IRON' in strategy_name:
+        # A butterfly is a defined-risk spread, so its P&L calculation is identical
+        # to that of Verticals and Iron Condors/Flies. We just add it to the condition.
+        elif 'VERTICAL' in strategy_name or 'IRON' in strategy_name or 'BUTTERFLY' in strategy_name:
             # For defined-risk spreads, the other side of the P&L is determined by the width of the strikes.
             call_strikes = sorted([leg['strike_price'] for leg in legs if leg['type'] == 'call'])
             put_strikes = sorted([leg['strike_price'] for leg in legs if leg['type'] == 'put'])
 
+            # A standard butterfly is all calls or all puts, so one of these will be 0.
+            # The max() function correctly finds the width of the butterfly's wings.
             call_width = (call_strikes[-1] - call_strikes[0]) if len(call_strikes) > 1 else 0
             put_width = (put_strikes[-1] - put_strikes[0]) if len(put_strikes) > 1 else 0
 
             # The effective width is the widest part of the spread.
             max_width = max(call_width, put_width) * self.lot_size
 
-            if is_debit_spread:  # Long Vertical, Long Condor/Fly
+            if is_debit_spread:  # Long Vertical, Long Condor/Fly, Long Butterfly
                 # Max profit is the width of the spread minus the debit paid.
                 max_profit = max_width + max_loss  # max_loss is already negative
-            else:  # Short Vertical, Short Condor/Fly
+            else:  # Short Vertical, Short Condor/Fly, Short Butterfly
                 # Max loss is the width of the spread minus the credit received.
                 max_loss = -max_width + max_profit  # max_profit is already positive
 
@@ -752,6 +868,7 @@ class OptionsZeroGameEnv(gym.Env):
         strategy_name = f"{leg['direction'].upper()}_{leg['type'].upper()}"
         pnl = self._calculate_strategy_pnl(legs, strategy_name)
         self._execute_trades(legs, pnl)
+
     def _open_straddle(self, action_name: str) -> None:
         if len(self.portfolio) > self.max_positions - 2: return
         legs = self._get_trade_legs(action_name)
@@ -779,23 +896,13 @@ class OptionsZeroGameEnv(gym.Env):
             return
             
         strike_offset = width_in_strikes * self.strike_distance
-        # --- 2. Validation (already implemented, now more important) ---
-        max_offset = max(int(k) for k in self._cfg.iv_skew_table['call'].keys())
-        min_offset = min(int(k) for k in self._cfg.iv_skew_table['call'].keys())
-
-        call_offset = strike_offset
-        put_offset  = strike_offset
-        
-        if not (min_offset <= call_offset <= max_offset and min_offset <= put_offset <= max_offset):
-            return
-
 
         # --- 3. Define the legs ---
         atm_price = int(self.current_price / self.strike_distance + 0.5) * self.strike_distance
         direction = 'long' if 'LONG' in action_name else 'short'
         legs = [
-            {'type': 'call', 'direction': direction, 'strike_price': atm_price + call_offset},
-            {'type': 'put', 'direction': direction, 'strike_price': atm_price - put_offset}
+            {'type': 'call', 'direction': direction, 'strike_price': atm_price + strike_offset},
+            {'type': 'put', 'direction': direction, 'strike_price': atm_price - strike_offset}
         ]
 
         # --- 4. Price and prepare the legs ---
@@ -869,23 +976,6 @@ class OptionsZeroGameEnv(gym.Env):
         else: # Puts, spreads go down
             strike2 = atm_price - width_in_price
             
-        # Calculate the offsets of both strikes from ATM.
-        # Note: atm_price is the center, so strike1's offset is always 0.
-        offset1 = round((strike1 - atm_price) / self.strike_distance)
-        offset2 = round((strike2 - atm_price) / self.strike_distance)
-        
-        # Check if either leg is outside our defined limits (e.g., +/- 5 strikes)
-        # We get the limit from the iv_skew_table keys.
-        max_offset = max(int(k) for k in self._cfg.iv_skew_table['call'].keys())
-        min_offset = min(int(k) for k in self._cfg.iv_skew_table['call'].keys())
-
-        if not (min_offset <= offset1 <= max_offset and min_offset <= offset2 <= max_offset):
-            # This action would create a leg outside the defined strike range.
-            # Treat it as an invalid action and do nothing.
-            # We'll also mask this in _get_true_action_mask.
-            print(f"DEBUG: Invalid spread action '{action_name}'. Offset {offset2} is out of bounds [{min_offset}, {max_offset}].")
-            return
-
         # --- 3. Define the legs of the spread ---
         legs_to_trade = []
         if direction == 'LONG':
@@ -950,8 +1040,21 @@ class OptionsZeroGameEnv(gym.Env):
         # --- Get common parameters for validation ---
         available_slots = self.max_positions - len(self.portfolio)
         atm_price = int(self.current_price / self.strike_distance + 0.5) * self.strike_distance
-        max_offset = max(int(k) for k in self._cfg.iv_skew_table['call'].keys())
-        min_offset = min(int(k) for k in self._cfg.iv_skew_table['call'].keys())
+
+        # --- SHIFT MASKING LOGIC START ---
+        for i, pos in self.portfolio.iterrows():
+            # Check legality of shifting UP
+            new_strike_up = pos['strike_price'] + self.strike_distance
+            offset_up = round((new_strike_up - atm_price) / self.strike_distance)
+            if self.min_offset <= offset_up <= self.max_offset:
+                 action_mask[self.actions_to_indices[f'SHIFT_UP_POS_{i}']] = 1
+
+            # Check legality of shifting DOWN
+            new_strike_down = pos['strike_price'] - self.strike_distance
+            offset_down = round((new_strike_down - atm_price) / self.strike_distance)
+            if self.min_offset <= offset_down <= self.max_offset:
+                 action_mask[self.actions_to_indices[f'SHIFT_DOWN_POS_{i}']] = 1
+        # --- SHIFT MASKING LOGIC END ---
 
         # --- Multi-leg strategy rules based on available slots ---
         available_slots = self.max_positions - len(self.portfolio)
@@ -961,6 +1064,20 @@ class OptionsZeroGameEnv(gym.Env):
             action_mask[self.actions_to_indices['OPEN_SHORT_IRON_FLY']] = 1
             action_mask[self.actions_to_indices['OPEN_LONG_IRON_CONDOR']] = 1
             action_mask[self.actions_to_indices['OPEN_SHORT_IRON_CONDOR']] = 1
+            # <<< --- UPDATED BUTTERFLY MASKING LOGIC --- >>>
+            for width in [1, 2]:
+                wing_offset_pos = +width
+                wing_offset_neg = -width
+                
+                # Check if the wings for this width are within the valid strike range
+                if (min_offset <= wing_offset_pos <= max_offset and 
+                    min_offset <= wing_offset_neg <= max_offset):
+                    
+                    # Enable all butterfly actions for THIS SPECIFIC width
+                    action_mask[self.actions_to_indices[f'OPEN_LONG_CALL_FLY_{width}']] = 1
+                    action_mask[self.actions_to_indices[f'OPEN_SHORT_CALL_FLY_{width}']] = 1
+                    action_mask[self.actions_to_indices[f'OPEN_LONG_PUT_FLY_{width}']] = 1
+                    action_mask[self.actions_to_indices[f'OPEN_SHORT_PUT_FLY_{width}']] = 1
 
         if available_slots >= 2:
             # --- Straddle logic (always valid as offset is 0) ---
@@ -973,7 +1090,7 @@ class OptionsZeroGameEnv(gym.Env):
                 put_offset = -width
 
                 # Check if this strangle width is legal
-                if (min_offset <= call_offset <= max_offset and min_offset <= put_offset <= max_offset):
+                if (self.min_offset <= call_offset <= self.max_offset and self.min_offset <= put_offset <= self.max_offset):
                     action_name_long = f'OPEN_LONG_STRANGLE_ATM_{width}'
                     action_name_short = f'OPEN_SHORT_STRANGLE_ATM_{width}'
 
@@ -989,7 +1106,7 @@ class OptionsZeroGameEnv(gym.Env):
                     offset = width_in_strikes if option_type == 'call' else -width_in_strikes
                     
                     # Check if this offset is within the valid range
-                    is_legal_spread = (min_offset <= offset <= max_offset)
+                    is_legal_spread = (self.min_offset <= offset <= self.max_offset)
 
                     if is_legal_spread:
                         # If the spread is valid, enable its corresponding actions
