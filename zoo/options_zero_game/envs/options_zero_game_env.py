@@ -181,6 +181,10 @@ class OptionsZeroGameEnv(gym.Env):
             'SHORT_VERTICAL_CALL_1': 16, 'SHORT_VERTICAL_CALL_2': 17,
             'LONG_VERTICAL_PUT_1': 18, 'LONG_VERTICAL_PUT_2': 19,
             'SHORT_VERTICAL_PUT_1': 20, 'SHORT_VERTICAL_PUT_2': 21,
+
+            # <<< --- NEW BUTTERFLY IDs START HERE --- >>>
+            'LONG_BUTTERFLY_1': 22, 'SHORT_BUTTERFLY_1': 23,
+            'LONG_BUTTERFLY_2': 24, 'SHORT_BUTTERFLY_2': 25,
         }
        
         self.actions_to_indices: Dict[str, int] = self._build_action_space()
@@ -269,8 +273,9 @@ class OptionsZeroGameEnv(gym.Env):
 
     def _generate_historical_price_path(self) -> None:
         """
-        Loads a random ticker from the cache and samples a random segment of its
-        price history to serve as the price_path for the episode.
+        Loads a random ticker from the cache, samples a random segment,
+        and normalizes it to begin at the environment's configured start_price.
+        This version is designed for the clean 'Date,TICKER' CSV format.
         """
         if not self._available_tickers:
             raise RuntimeError("Historical mode selected but no tickers are available.")
@@ -278,37 +283,51 @@ class OptionsZeroGameEnv(gym.Env):
         # 1. Select a random ticker and load its data
         selected_ticker = random.choice(self._available_tickers)
         file_path = os.path.join(self.historical_data_path, f"{selected_ticker}.csv")
-        data = pd.read_csv(file_path, index_col=0, parse_dates=True)
+        
+        # --- CLEAN READER LOGIC ---
+        # This is now much simpler because we know the format is consistent.
+        # We tell pandas that the first column ('Date') is our index and to parse it as dates.
+        data = pd.read_csv(file_path, index_col='Date', parse_dates=True)
+        
+        # The price data is in the first (and only) column.
+        # We will rename it to 'Close' for clarity and consistency.
+        # .columns[0] will get the ticker name (e.g., 'SPY', 'INTC')
+        data.rename(columns={data.columns[0]: 'Close'}, inplace=True)
+        # --- END OF CLEAN READER ---
 
         # 2. Ensure data is long enough for an episode
-        if len(data) <= self.total_steps:
-            raise RuntimeError("Historical mode selected but data is less than total_steps.")
-            # Fallback to GARCH if this specific file is too short
-            print(f"Warning: {selected_ticker} data is too short. Falling back to GARCH for this episode.")
-            self._generate_price_path() # This calls the original synthetic generator
+        if len(data) < self.total_steps + 1:
+            print(f"Warning: {selected_ticker} data is too short. Falling back to GARCH.")
+            # ... (rest of the fallback logic remains the same)
+            if not hasattr(self, 'trend'):
+                chosen_regime = random.choice(self.market_regimes)
+                self.current_regime_name, self.trend, self.omega, self.alpha, self.beta = chosen_regime['name'], chosen_regime['mu'], chosen_regime['omega'], chosen_regime['alpha'], chosen_regime['beta']
+                self.overnight_vol_multiplier = chosen_regime.get('overnight_vol_multiplier', 1.5)
+            self._generate_garch_price_path()
             return
 
-        # 3. Sample a random continuous segment for the episode
+        # 3. Sample and normalize the data
         start_index = random.randint(0, len(data) - self.total_steps - 1)
         end_index = start_index + self.total_steps + 1
         price_segment = data['Close'].iloc[start_index:end_index]
         
-        # 4. Set the price path and episode parameters
-        self.price_path = price_segment.to_numpy(dtype=np.float32)
+        raw_start_price = price_segment.iloc[0]
+        target_start_price = self._cfg.start_price
         
-        # --- CRITICAL: Update environment state to match the historical data ---
-        self.start_price = self.price_path[0]
+        if raw_start_price > 1e-4:
+            normalization_factor = target_start_price / raw_start_price
+            normalized_price_segment = price_segment * normalization_factor
+        else:
+            print(f"Warning: Corrupt data for {selected_ticker} (start price <= 0). Using flat path.")
+            normalized_price_segment = pd.Series([target_start_price] * len(price_segment), index=price_segment.index)
+
+        # 4. Set the price path and continue
+        self.price_path = normalized_price_segment.to_numpy(dtype=np.float32)
+        self.start_price = target_start_price
         self.current_regime_name = f"Historical: {selected_ticker}"
-        
-        # Emulate GARCH parameters based on the sampled historical data
-        # for consistency in the observation space.
         log_returns = np.log(self.price_path[1:] / self.price_path[:-1])
-        
-        # Calculate annualized volatility for the segment
         annualized_vol = np.std(log_returns) * np.sqrt(252 * self.steps_per_day)
         self.garch_implied_vol = annualized_vol if np.isfinite(annualized_vol) else 0.2
-
-        # Calculate drift/trend for the segment
         self.trend = np.mean(log_returns) * (252 * self.steps_per_day)
 
     def _generate_garch_price_path(self) -> None:
@@ -673,7 +692,7 @@ class OptionsZeroGameEnv(gym.Env):
 
         # 5. Calculate strategy PnL using the NEW SPECIFIC strategy name
         strategy_name_for_pnl = f"{direction}_BUTTERFLY_{width_in_strikes}"
-        pnl = self._calculate_strategy_pnl(legs_to_trade, strategy_name_for_pnl, width1=width_in_price)
+        pnl = self._calculate_strategy_pnl(legs_to_trade, strategy_name_for_pnl)
         self._execute_trades(legs_to_trade, pnl)
 
     def _handle_shift_action(self, action_name: str) -> None:
@@ -725,12 +744,32 @@ class OptionsZeroGameEnv(gym.Env):
             return
 
     def _handle_open_action(self, action_name: str) -> None:
-        if 'IRON_CONDOR' in action_name: self._open_iron_condor(action_name)
-        elif 'IRON_FLY' in action_name: self._open_iron_fly(action_name)
-        elif 'VERTICAL' in action_name: self._open_vertical_spread(action_name)
-        elif 'STRANGLE' in action_name: self._open_strangle(action_name)
-        elif 'STRADDLE' in action_name: self._open_straddle(action_name)
-        else: self._open_single_leg(action_name)
+        """
+        Routes any "OPEN_" action to the correct specialized function.
+        This version is robust and prevents misrouting of strategies.
+        """
+        # --- Route by most complex/specific keywords first ---
+
+        if 'FLY' in action_name and 'IRON' not in action_name:
+            self._open_butterfly(action_name)
+        elif 'IRON_CONDOR' in action_name:
+            self._open_iron_condor(action_name)
+        elif 'IRON_FLY' in action_name:
+            self._open_iron_fly(action_name)
+        elif 'VERTICAL' in action_name:
+            self._open_vertical_spread(action_name)
+        elif 'STRANGLE' in action_name:
+            self._open_strangle(action_name)
+        elif 'STRADDLE' in action_name:
+            self._open_straddle(action_name)
+        elif 'ATM' in action_name:
+            # This is the only case that should lead to a single leg.
+            self._open_single_leg(action_name)
+        else:
+            assert 0, "Warning: Unrecognized action format in _handle_open_action: {action_name}"
+            # Add a failsafe print for any future actions you might add
+            # This helps in debugging.
+            print(f"Warning: Unrecognized action format in _handle_open_action: {action_name}")
 
     def _execute_trades(self, trades_to_execute: List[Dict], strategy_pnl: Dict) -> None:
         if not trades_to_execute: return
@@ -859,6 +898,7 @@ class OptionsZeroGameEnv(gym.Env):
             leg['entry_step'] = self.current_step
             leg['days_to_expiry'] = days_to_expiry
         return legs
+
     def _open_single_leg(self, action_name: str) -> None:
         if len(self.portfolio) >= self.max_positions: return
         legs = self._get_trade_legs(action_name)
@@ -1025,133 +1065,143 @@ class OptionsZeroGameEnv(gym.Env):
         self._execute_trades(legs_to_trade, strategy_pnl)
 
     def _get_true_action_mask(self) -> np.ndarray:
+
         action_mask = np.zeros(self.action_space_size, dtype=np.int8)
         current_trading_day = self.current_step // self.steps_per_day
-        is_expiry_day = current_trading_day >= self.time_to_expiry_days - 1
+
+        # Always HOLD is a legal action.
         action_mask[self.actions_to_indices['HOLD']] = 1
-        if not self.portfolio.empty:
+
+        # This simple boolean check is the key.
+        # If the portfolio has ANY position in it, a strategy is considered "open".
+        is_strategy_open = not self.portfolio.empty
+
+        # Expiry Day?
+        is_expiry_day = current_trading_day >= self.time_to_expiry_days - 1
+
+        # All close actions and Shift actions are allowed on non-expiry days.
+        if is_strategy_open and not is_expiry_day:
+            atm_price = int(self.current_price / self.strike_distance + 0.5) * self.strike_distance
             action_mask[self.actions_to_indices['CLOSE_ALL']] = 1
             for i in range(len(self.portfolio)):
                 if f'CLOSE_POSITION_{i}' in self.actions_to_indices:
                     action_mask[self.actions_to_indices[f'CLOSE_POSITION_{i}']] = 1
-        if is_expiry_day:
-            return action_mask
 
-        # --- Get common parameters for validation ---
-        available_slots = self.max_positions - len(self.portfolio)
-        atm_price = int(self.current_price / self.strike_distance + 0.5) * self.strike_distance
+            # --- SHIFT MASKING LOGIC START ---
+            for i, pos in self.portfolio.iterrows():
+                # Check legality of shifting UP
+                new_strike_up = pos['strike_price'] + self.strike_distance
+                offset_up = round((new_strike_up - atm_price) / self.strike_distance)
+                if self.min_offset <= offset_up <= self.max_offset:
+                     action_mask[self.actions_to_indices[f'SHIFT_UP_POS_{i}']] = 1
 
-        # --- SHIFT MASKING LOGIC START ---
-        for i, pos in self.portfolio.iterrows():
-            # Check legality of shifting UP
-            new_strike_up = pos['strike_price'] + self.strike_distance
-            offset_up = round((new_strike_up - atm_price) / self.strike_distance)
-            if self.min_offset <= offset_up <= self.max_offset:
-                 action_mask[self.actions_to_indices[f'SHIFT_UP_POS_{i}']] = 1
+                # Check legality of shifting DOWN
+                new_strike_down = pos['strike_price'] - self.strike_distance
+                offset_down = round((new_strike_down - atm_price) / self.strike_distance)
+                if self.min_offset <= offset_down <= self.max_offset:
+                     action_mask[self.actions_to_indices[f'SHIFT_DOWN_POS_{i}']] = 1
+            # --- SHIFT MASKING LOGIC END ---
 
-            # Check legality of shifting DOWN
-            new_strike_down = pos['strike_price'] - self.strike_distance
-            offset_down = round((new_strike_down - atm_price) / self.strike_distance)
-            if self.min_offset <= offset_down <= self.max_offset:
-                 action_mask[self.actions_to_indices[f'SHIFT_DOWN_POS_{i}']] = 1
-        # --- SHIFT MASKING LOGIC END ---
+        # --- ONLY ALLOW OPENING A NEW STRATEGY IF THE PORTFOLIO IS EMPTY ---
+        # This entire block is skipped if a strategy is already open.
+        if not is_strategy_open and not is_expiry_day:
+            # --- Multi-leg strategy rules based on available slots ---
+            available_slots = self.max_positions - len(self.portfolio)
 
-        # --- Multi-leg strategy rules based on available slots ---
-        available_slots = self.max_positions - len(self.portfolio)
-
-        if available_slots >= 4:
-            action_mask[self.actions_to_indices['OPEN_LONG_IRON_FLY']] = 1
-            action_mask[self.actions_to_indices['OPEN_SHORT_IRON_FLY']] = 1
-            action_mask[self.actions_to_indices['OPEN_LONG_IRON_CONDOR']] = 1
-            action_mask[self.actions_to_indices['OPEN_SHORT_IRON_CONDOR']] = 1
-            # <<< --- UPDATED BUTTERFLY MASKING LOGIC --- >>>
-            for width in [1, 2]:
-                wing_offset_pos = +width
-                wing_offset_neg = -width
-                
-                # Check if the wings for this width are within the valid strike range
-                if (min_offset <= wing_offset_pos <= max_offset and 
-                    min_offset <= wing_offset_neg <= max_offset):
+            if available_slots >= 4:
+                action_mask[self.actions_to_indices['OPEN_LONG_IRON_FLY']] = 1
+                action_mask[self.actions_to_indices['OPEN_SHORT_IRON_FLY']] = 1
+                action_mask[self.actions_to_indices['OPEN_LONG_IRON_CONDOR']] = 1
+                action_mask[self.actions_to_indices['OPEN_SHORT_IRON_CONDOR']] = 1
+                # <<< --- UPDATED BUTTERFLY MASKING LOGIC --- >>>
+                for width in [1, 2]:
+                    wing_offset_pos = +width
+                    wing_offset_neg = -width
                     
-                    # Enable all butterfly actions for THIS SPECIFIC width
-                    action_mask[self.actions_to_indices[f'OPEN_LONG_CALL_FLY_{width}']] = 1
-                    action_mask[self.actions_to_indices[f'OPEN_SHORT_CALL_FLY_{width}']] = 1
-                    action_mask[self.actions_to_indices[f'OPEN_LONG_PUT_FLY_{width}']] = 1
-                    action_mask[self.actions_to_indices[f'OPEN_SHORT_PUT_FLY_{width}']] = 1
-
-        if available_slots >= 2:
-            # --- Straddle logic (always valid as offset is 0) ---
-            action_mask[self.actions_to_indices['OPEN_LONG_STRADDLE_ATM']] = 1
-            action_mask[self.actions_to_indices['OPEN_SHORT_STRADDLE_ATM']] = 1
-
-            # --- DYNAMIC STRANGLE MASKING ---
-            for width in [1, 2]:
-                call_offset = +width
-                put_offset = -width
-
-                # Check if this strangle width is legal
-                if (self.min_offset <= call_offset <= self.max_offset and self.min_offset <= put_offset <= self.max_offset):
-                    action_name_long = f'OPEN_LONG_STRANGLE_ATM_{width}'
-                    action_name_short = f'OPEN_SHORT_STRANGLE_ATM_{width}'
-
-                    if action_name_long in self.actions_to_indices:
-                        action_mask[self.actions_to_indices[action_name_long]] = 1
-                    if action_name_short in self.actions_to_indices:
-                        action_mask[self.actions_to_indices[action_name_short]] = 1
-
-            # --- ENABLE VERTICAL SPREAD ACTIONS ---
-            for width_in_strikes in [1, 2]:
-                for option_type in ['call', 'put']:
-                    # Calculate the offset of the short/long leg
-                    offset = width_in_strikes if option_type == 'call' else -width_in_strikes
-                    
-                    # Check if this offset is within the valid range
-                    is_legal_spread = (self.min_offset <= offset <= self.max_offset)
-
-                    if is_legal_spread:
-                        # If the spread is valid, enable its corresponding actions
-                        action_name_long = f'OPEN_LONG_VERTICAL_{option_type.upper()}_{width_in_strikes}'
-                        action_name_short = f'OPEN_SHORT_VERTICAL_{option_type.upper()}_{width_in_strikes}'
+                    # Check if the wings for this width are within the valid strike range
+                    if (self.min_offset <= wing_offset_pos <= self.max_offset and 
+                        self.min_offset <= wing_offset_neg <= self.max_offset):
                         
+                        # Enable all butterfly actions for THIS SPECIFIC width
+                        action_mask[self.actions_to_indices[f'OPEN_LONG_CALL_FLY_{width}']] = 1
+                        action_mask[self.actions_to_indices[f'OPEN_SHORT_CALL_FLY_{width}']] = 1
+                        action_mask[self.actions_to_indices[f'OPEN_LONG_PUT_FLY_{width}']] = 1
+                        action_mask[self.actions_to_indices[f'OPEN_SHORT_PUT_FLY_{width}']] = 1
+
+            if available_slots >= 2:
+                # --- Straddle logic (always valid as offset is 0) ---
+                action_mask[self.actions_to_indices['OPEN_LONG_STRADDLE_ATM']] = 1
+                action_mask[self.actions_to_indices['OPEN_SHORT_STRADDLE_ATM']] = 1
+
+                # --- DYNAMIC STRANGLE MASKING ---
+                for width in [1, 2]:
+                    call_offset = +width
+                    put_offset = -width
+
+                    # Check if this strangle width is legal
+                    if (self.min_offset <= call_offset <= self.max_offset and self.min_offset <= put_offset <= self.max_offset):
+                        action_name_long = f'OPEN_LONG_STRANGLE_ATM_{width}'
+                        action_name_short = f'OPEN_SHORT_STRANGLE_ATM_{width}'
+
                         if action_name_long in self.actions_to_indices:
                             action_mask[self.actions_to_indices[action_name_long]] = 1
                         if action_name_short in self.actions_to_indices:
                             action_mask[self.actions_to_indices[action_name_short]] = 1
 
-        if available_slots >= 1:
-            atm_price = 0
-            if np.isfinite(self.current_price) and np.isfinite(self.strike_distance) and self.strike_distance > 0:
-                atm_price = int(self.current_price / self.strike_distance + 0.5) * self.strike_distance
-            trading_days_left = self.time_to_expiry_days - current_trading_day
-            days_to_expiry = trading_days_left * (self.TOTAL_DAYS_IN_WEEK / self.TRADING_DAYS_IN_WEEK)
-            num_long_calls = len(self.portfolio.query("type == 'call' and direction == 'long'"))
-            num_short_calls = len(self.portfolio.query("type == 'call' and direction == 'short'"))
-            num_long_puts = len(self.portfolio.query("type == 'put' and direction == 'long'"))
-            num_short_puts = len(self.portfolio.query("type == 'put' and direction == 'short'"))
-            existing_positions = {(p['strike_price'], p['type']): p['direction'] for i, p in self.portfolio.iterrows()}
-            for offset in range(-5, 6):
-                strike_price = atm_price + offset * self.strike_distance
-                for option_type in ['call', 'put']:
-                    _, signed_delta, _ = self._get_option_details(self.current_price, strike_price, days_to_expiry, option_type)
-                    abs_delta = abs(signed_delta)
-                    is_far_otm = abs_delta < self.otm_threshold
-                    is_far_itm = abs_delta > self.itm_threshold
-                    action_name_long = f'OPEN_LONG_{option_type.upper()}_ATM{"+" if offset >=0 else ""}{offset}'
-                    if action_name_long in self.actions_to_indices:
-                        is_legal = True
-                        if is_far_otm or is_far_itm: is_legal = False
-                        conflict_type = 'put' if option_type == 'call' else 'call'
-                        if existing_positions.get((strike_price, conflict_type)) == 'short': is_legal = False
-                        if (option_type == 'call' and num_long_calls > 0) or (option_type == 'put' and num_long_puts > 0): is_legal = False
-                        if is_legal: action_mask[self.actions_to_indices[action_name_long]] = 1
-                    action_name_short = f'OPEN_SHORT_{option_type.upper()}_ATM{"+" if offset >=0 else ""}{offset}'
-                    if action_name_short in self.actions_to_indices:
-                        is_legal = True
-                        if is_far_itm: is_legal = False
-                        conflict_type = 'put' if option_type == 'call' else 'call'
-                        if existing_positions.get((strike_price, conflict_type)) == 'long': is_legal = False
-                        if (option_type == 'call' and num_short_calls > 0) or (option_type == 'put' and num_short_puts > 0): is_legal = False
-                        if is_legal: action_mask[self.actions_to_indices[action_name_short]] = 1
+                # --- ENABLE VERTICAL SPREAD ACTIONS ---
+                for width_in_strikes in [1, 2]:
+                    for option_type in ['call', 'put']:
+                        # Calculate the offset of the short/long leg
+                        offset = width_in_strikes if option_type == 'call' else -width_in_strikes
+                        
+                        # Check if this offset is within the valid range
+                        is_legal_spread = (self.min_offset <= offset <= self.max_offset)
+
+                        if is_legal_spread:
+                            # If the spread is valid, enable its corresponding actions
+                            action_name_long = f'OPEN_LONG_VERTICAL_{option_type.upper()}_{width_in_strikes}'
+                            action_name_short = f'OPEN_SHORT_VERTICAL_{option_type.upper()}_{width_in_strikes}'
+                            
+                            if action_name_long in self.actions_to_indices:
+                                action_mask[self.actions_to_indices[action_name_long]] = 1
+                            if action_name_short in self.actions_to_indices:
+                                action_mask[self.actions_to_indices[action_name_short]] = 1
+
+            if available_slots >= 1:
+                atm_price = 0
+                if np.isfinite(self.current_price) and np.isfinite(self.strike_distance) and self.strike_distance > 0:
+                    atm_price = int(self.current_price / self.strike_distance + 0.5) * self.strike_distance
+                trading_days_left = self.time_to_expiry_days - current_trading_day
+                days_to_expiry = trading_days_left * (self.TOTAL_DAYS_IN_WEEK / self.TRADING_DAYS_IN_WEEK)
+                num_long_calls = len(self.portfolio.query("type == 'call' and direction == 'long'"))
+                num_short_calls = len(self.portfolio.query("type == 'call' and direction == 'short'"))
+                num_long_puts = len(self.portfolio.query("type == 'put' and direction == 'long'"))
+                num_short_puts = len(self.portfolio.query("type == 'put' and direction == 'short'"))
+                existing_positions = {(p['strike_price'], p['type']): p['direction'] for i, p in self.portfolio.iterrows()}
+                for offset in range(-5, 6):
+                    strike_price = atm_price + offset * self.strike_distance
+                    for option_type in ['call', 'put']:
+                        _, signed_delta, _ = self._get_option_details(self.current_price, strike_price, days_to_expiry, option_type)
+                        abs_delta = abs(signed_delta)
+                        is_far_otm = abs_delta < self.otm_threshold
+                        is_far_itm = abs_delta > self.itm_threshold
+                        action_name_long = f'OPEN_LONG_{option_type.upper()}_ATM{"+" if offset >=0 else ""}{offset}'
+                        if action_name_long in self.actions_to_indices:
+                            is_legal = True
+                            if is_far_otm or is_far_itm: is_legal = False
+                            conflict_type = 'put' if option_type == 'call' else 'call'
+                            if existing_positions.get((strike_price, conflict_type)) == 'short': is_legal = False
+                            if (option_type == 'call' and num_long_calls > 0) or (option_type == 'put' and num_long_puts > 0): is_legal = False
+                            if is_legal: action_mask[self.actions_to_indices[action_name_long]] = 1
+                        action_name_short = f'OPEN_SHORT_{option_type.upper()}_ATM{"+" if offset >=0 else ""}{offset}'
+                        if action_name_short in self.actions_to_indices:
+                            is_legal = True
+                            if is_far_itm: is_legal = False
+                            conflict_type = 'put' if option_type == 'call' else 'call'
+                            if existing_positions.get((strike_price, conflict_type)) == 'long': is_legal = False
+                            if (option_type == 'call' and num_short_calls > 0) or (option_type == 'put' and num_short_puts > 0): is_legal = False
+                            if is_legal: action_mask[self.actions_to_indices[action_name_short]] = 1
+
         return action_mask
 
     def _get_observation(self) -> np.ndarray:
