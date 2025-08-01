@@ -18,6 +18,7 @@ class PriceActionManager:
         self.start_price_config = cfg['start_price']
         self.total_steps = cfg['time_to_expiry_days'] * cfg['steps_per_day']
         self.steps_per_day = cfg['steps_per_day']
+        self.momentum_window_steps = cfg['momentum_window_steps']
         self.np_random = np_random
         self._available_tickers = self._load_tickers()
         
@@ -29,7 +30,9 @@ class PriceActionManager:
 
         # State variables
         self.price_path: np.ndarray = np.array([])
+        self.sma_path: np.ndarray = np.array([])
         self.current_price: float = 0.0
+        self.momentum_signal: float = 0.0
         self.start_price: float = 0.0
         self.current_regime_name: str = ""
         self.garch_implied_vol: float = 0.2
@@ -65,10 +68,18 @@ class PriceActionManager:
             self.current_regime_name = "Failsafe (Flat)"
             self.price_path = np.full(self.total_steps + 1, self.start_price, dtype=np.float32)
             self.garch_implied_vol = 0.2
+
+        # Use pandas for a fast, clean rolling average calculation
+        price_series = pd.Series(self.price_path)
+        self.sma_path = price_series.rolling(
+            window=self.momentum_window_steps,
+            min_periods=1 # Calculate even if window isn't full at the start
+        ).mean().to_numpy(dtype=np.float32)
         
         # --- Defensive Assertions ---
         # Ensure the generated price path is valid before starting the episode.
         assert len(self.price_path) == self.total_steps + 1, f"Price path length is {len(self.price_path)}, expected {self.total_steps + 1}"
+        assert np.all(np.isfinite(self.sma_path)), "SMA path contains invalid numbers."
         assert np.all(np.isfinite(self.price_path)), "Price path contains NaN or Inf values."
         assert np.all(self.price_path > 0), "Price path contains non-positive values."
 
@@ -76,6 +87,14 @@ class PriceActionManager:
 
     def step(self, current_step: int):
         self.current_price = self.price_path[current_step]
+        current_sma = self.sma_path[current_step]
+        
+        # Calculate momentum as a normalized ratio (-1 to 1 is a good range)
+        # We use tanh for stable normalization.
+        if current_sma > 1e-6:
+            self.momentum_signal = math.tanh((self.current_price / current_sma) - 1.0)
+        else:
+            self.momentum_signal = 0.0
 
     def _generate_historical_price_path(self):
         selected_ticker = random.choice(self._available_tickers)
