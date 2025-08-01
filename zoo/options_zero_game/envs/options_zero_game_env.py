@@ -182,7 +182,6 @@ class OptionsZeroGameEnv(gym.Env):
             'LONG_VERTICAL_PUT_1': 18, 'LONG_VERTICAL_PUT_2': 19,
             'SHORT_VERTICAL_PUT_1': 20, 'SHORT_VERTICAL_PUT_2': 21,
 
-            # <<< --- NEW BUTTERFLY IDs START HERE --- >>>
             'LONG_BUTTERFLY_1': 22, 'SHORT_BUTTERFLY_1': 23,
             'LONG_BUTTERFLY_2': 24, 'SHORT_BUTTERFLY_2': 25,
         }
