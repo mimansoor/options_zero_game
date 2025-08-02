@@ -50,6 +50,34 @@ market_regimes = [
 ]
 
 # ==============================================================
+#                 Strategy ID Mapping
+# ==============================================================
+# The single, complete source of truth for all strategy names and their IDs.
+strategy_name_to_id = {
+    # Base strategies (for single legs)
+    'LONG_CALL': 0, 'SHORT_CALL': 1, 'LONG_PUT': 2, 'SHORT_PUT': 3,
+
+    # Complex Strategies
+    'LONG_STRADDLE': 4, 'SHORT_STRADDLE': 5,
+    'LONG_IRON_FLY': 10, 'SHORT_IRON_FLY': 11,
+    'LONG_IRON_CONDOR': 12, 'SHORT_IRON_CONDOR': 13,
+
+    # Strategies with Width Variations
+    'LONG_STRANGLE_1': 6, 'SHORT_STRANGLE_1': 7,
+    'LONG_STRANGLE_2': 8, 'SHORT_STRANGLE_2': 9,
+
+    'LONG_VERTICAL_CALL_1': 14, 'SHORT_VERTICAL_CALL_1': 15,
+    'LONG_VERTICAL_CALL_2': 16, 'SHORT_VERTICAL_CALL_2': 17,
+    'LONG_VERTICAL_PUT_1': 18, 'SHORT_VERTICAL_PUT_1': 19,
+    'LONG_VERTICAL_PUT_2': 20, 'SHORT_VERTICAL_PUT_2': 21,
+
+    'LONG_CALL_FLY_1': 22, 'SHORT_CALL_FLY_1': 23,
+    'LONG_PUT_FLY_1': 24, 'SHORT_PUT_FLY_1': 25,
+    'LONG_CALL_FLY_2': 26, 'SHORT_CALL_FLY_2': 27,
+    'LONG_PUT_FLY_2': 28, 'SHORT_PUT_FLY_2': 29,
+}
+
+# ==============================================================
 #           Main Config (The Parameters)
 # ==============================================================
 options_zero_game_muzero_config = dict(
@@ -66,6 +94,7 @@ options_zero_game_muzero_config = dict(
         historical_data_path='zoo/options_zero_game/data/market_data_cache',
         drawdown_penalty_weight=0.1,
         market_regimes=market_regimes,
+        strategy_name_to_id=strategy_name_to_id,
         illegal_action_penalty=-1.0,
         rolling_vol_window=5,
     ),

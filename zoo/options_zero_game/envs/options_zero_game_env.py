@@ -23,72 +23,63 @@ from .portfolio_manager import PortfolioManager
 
 @ENV_REGISTRY.register('options_zero_game')
 class OptionsZeroGameEnv(gym.Env):
-    VERSION = "2.1-Refactored-Final"
+    VERSION = "2.2-Final"
     metadata = {'render.modes': ['human']}
     
+    # --- THIS IS THE FIX ---
+    # A complete default configuration that allows the environment to be
+    # instantiated on its own without errors.
     config = dict(
-        start_price=20000.0,
-        initial_cash=500000.0,
+        # Price Action Manager Config
+        price_source='mixed',
+        historical_data_path='zoo/options_zero_game/data/market_data_cache',
         market_regimes = [
-            {'name': 'Developed_Market', 'mu': 0.00005, 'omega': 0.000005, 'alpha': 0.09, 'beta': 0.90},
+            {'name': 'Stable_LowVol', 'mu': 0.00005, 'omega': 0.000005, 'alpha': 0.09, 'beta': 0.90, 'overnight_vol_multiplier': 1.5},
+            {'name': 'Crisis_HighVol', 'mu': -0.0005, 'omega': 0.0001, 'alpha': 0.15, 'beta': 0.82, 'overnight_vol_multiplier': 2.2},
         ],
+        
+        # Time and Episode Config
         time_to_expiry_days=20,
         steps_per_day=1,
         trading_day_in_mins=375,
+        
+        # Observation Feature Config
         rolling_vol_window=5,
         momentum_window_steps=20,
-        iv_skew_table={
-            'call': {'-5': (13.5, 16.0), '-4': (13.3, 15.8), '-3': (13.2, 15.7), '-2': (13.1, 15.5), '-1': (13.0, 15.4), '0': (13.0, 15.3), '1': (13.0, 15.4), '2': (13.1, 15.6), '3': (13.2, 15.7), '4': (13.3, 15.8), '5': (13.5, 16.0)},
-            'put':  {'-5': (14.0, 16.5), '-4': (13.8, 16.3), '-3': (13.8, 16.1), '-2': (13.6, 16.0), '-1': (13.5, 15.8), '0': (13.5, 15.8), '1': (13.5, 15.8), '2': (13.6, 16.0), '3': (13.8, 16.1), '4': (13.8, 16.3), '5': (14.0, 16.5)},
-        },
-        strike_distance=50.0,
+        
+        # Options and Portfolio Config
+        start_price=20000.0,
+        initial_cash=100000.0,
         lot_size=75,
         max_positions=4,
+        strike_distance=50.0,
         bid_ask_spread_pct=0.002,
+        
+        # Black-Scholes Manager Config
         risk_free_rate=0.10,
+        iv_skew_table={
+            'call': {'-5':(13.5,16.0),'-4':(13.3,15.8),'-3':(13.2,15.7),'-2':(13.1,15.5),'-1':(13.0,15.4),'0':(13.0,15.3),'1':(13.0,15.4),'2':(13.1,15.6),'3':(13.2,15.7),'4':(13.3,15.8),'5':(13.5,16.0)},
+            'put':  {'-5':(14.0,16.5),'-4':(13.8,16.3),'-3':(13.8,16.1),'-2':(13.6,16.0),'-1':(13.5,15.8),'0':(13.5,15.8),'1':(13.5,15.8),'2':(13.6,16.0),'3':(13.8,16.1),'4':(13.8,16.3),'5':(14.0,16.5)},
+        },
+
+        # Reward and Penalty Config
         pnl_scaling_factor=1000,
         drawdown_penalty_weight=0.1,
         illegal_action_penalty=-1.0,
+        
+        # Advanced Trading Rules
+        profit_target_pct=3.0,
+        jackpot_reward=1.0,
+        strategy_profit_target_pct=50.0,
+        stop_loss_multiple_of_cost=2.0, # NEW: Added stop loss multiple
+        use_stop_loss=True,
+        forced_opening_strategy_name=None,
+        
+        # Agent/Framework Config
         ignore_legal_actions=True,
         otm_delta_threshold=0.15,
         itm_delta_threshold=0.85,
-        profit_target_pct=3.0, # Set to 0 to disable
-
-        # --- NEW ADVANCED TRADING RULES ---
-        # Rule 1: Jackpot Reward
-        jackpot_reward=1.0, # The special reward for hitting the fixed profit target.
-
-        # Rule 2: Dynamic Take-Profit (as a percentage of the strategy's max profit)
-        strategy_profit_target_pct=50.0, # Set to 0 to disable.
-        
-        # Rule 3: Stop-Loss (based on the initial trade cost)
-        stop_loss_multiple_of_cost=2.0, 
-        use_stop_loss=True, # Set to False to disable.
-
-        strategy_name_to_id = {
-            # --- Base Strategies ---
-            'LONG_CALL': 0, 'SHORT_CALL': 1, 'LONG_PUT': 2, 'SHORT_PUT': 3,
-            'LONG_STRADDLE': 4, 'SHORT_STRADDLE': 5,
-
-            # --- Dynamic Strategies (Name includes width) ---
-            'LONG_STRANGLE_1': 6, 'SHORT_STRANGLE_1': 7,
-            'LONG_STRANGLE_2': 8, 'SHORT_STRANGLE_2': 9,
-
-            'LONG_IRON_FLY': 10, 'SHORT_IRON_FLY': 11,
-            'LONG_IRON_CONDOR': 12, 'SHORT_IRON_CONDOR': 13,
-
-            'LONG_VERTICAL_CALL_1': 14, 'SHORT_VERTICAL_CALL_1': 16,
-            'LONG_VERTICAL_CALL_2': 15, 'SHORT_VERTICAL_CALL_2': 17,
-            'LONG_VERTICAL_PUT_1': 18, 'SHORT_VERTICAL_PUT_1': 20,
-            'LONG_VERTICAL_PUT_2': 19, 'SHORT_VERTICAL_PUT_2': 21,
-
-            # Note: Butterflies are often referenced by their action name
-            # but can be added here for consistency if needed.
-            'LONG_CALL_FLY_1': 22, 'SHORT_CALL_FLY_1': 23,
-            'LONG_PUT_FLY_1': 24, 'SHORT_PUT_FLY_1': 25,
-            'LONG_CALL_FLY_2': 26, 'SHORT_CALL_FLY_2': 27,
-            'LONG_PUT_FLY_2': 28, 'SHORT_PUT_FLY_2': 29,
-        }
+        strategy_name_to_id={}, # Can be left empty, as it's populated from the main config
     )
 
     @classmethod
@@ -212,14 +203,12 @@ class OptionsZeroGameEnv(gym.Env):
 
         # Get the current PnL once for all checks
         current_pnl = self.portfolio_manager.get_total_pnl(self.price_manager.current_price, self.iv_bin_index)
-
-        # Rule 3: Stop-Loss Check
+        # Rule 3: Stop-Loss Check (with multiplier)
         if self._cfg.use_stop_loss and not self.portfolio_manager.portfolio.empty:
-            # The stop-loss is triggered if the current PnL drops below the negative of the initial trade cost.
-            # For a debit, initial_net_premium > 0. For a credit, initial_net_premium < 0.
-            # The absolute value handles both cases correctly.
+            # The stop-loss is triggered if the current PnL drops below the negative of the initial trade cost*multiplier.
             initial_cost = abs(self.portfolio_manager.initial_net_premium * self.portfolio_manager.lot_size)
-            if current_pnl <= -(initial_cost * self._cfg.stop_loss_multiple_of_cost):
+            stop_loss_level = initial_cost * self._cfg.stop_loss_multiple_of_cost
+            if current_pnl <= -stop_loss_level:
                 terminated_by_rule = True
 
         # Profit-taking rules are only checked if not already stopped out
@@ -272,15 +261,32 @@ class OptionsZeroGameEnv(gym.Env):
             'executed_action_name': final_action_name 
         }
 
+        # If the episode is done, add the final duration to the info dict.
+        if terminated:
+            info['episode_duration'] = self.current_step
+
         return BaseEnvTimestep({'observation': obs, 'action_mask': action_mask, 'to_play': -1}, final_reward, terminated, info)
 
     def _handle_action(self, action: int) -> Tuple[int, bool]:
         """
         Determines the final executed action and if the agent's original action was illegal.
-        On step 0, it forces a diverse, random opening, overriding the agent's choice.
+        PRIORITY 1: Force a specific strategy for analysis if configured.
+        PRIORITY 2: Force a diverse random opening on step 0 for training curriculum.
+        PRIORITY 3: Standard rule enforcement for all other steps.
         Returns: (final_action_index, was_illegal_flag)
         """
-        # --- Rule: Force a diverse opening on Step 0 ---
+        # --- PRIORITY 1: Handle forced strategy for analysis ---
+        forced_strategy = self._cfg.get('forced_opening_strategy_name')
+        if self.current_step == 0 and forced_strategy:
+            action_index = self.actions_to_indices.get(forced_strategy)
+            
+            # This assertion is a good safety net for the analyzer script
+            assert action_index is not None, f"Forced strategy '{forced_strategy}' is invalid."
+            
+            # Return the specific forced action. It is not considered an illegal move.
+            return action_index, False
+
+        # --- PRIORITY 2: Handle curriculum learning on Step 0 for training ---
         if self.current_step == 0:
             strategy_families = {
                 "SINGLE_LEG": lambda name: 'ATM' in name, "STRADDLE": lambda name: 'STRADDLE' in name,
@@ -290,15 +296,21 @@ class OptionsZeroGameEnv(gym.Env):
             chosen_family = strategy_families[random.choice(list(strategy_families.keys()))]
             
             valid_actions = [idx for name, idx in self.actions_to_indices.items() if name.startswith('OPEN_') and chosen_family(name)]
-            
             if not valid_actions: # Failsafe
                 valid_actions = [idx for name, idx in self.actions_to_indices.items() if name.startswith('OPEN_')]
 
             final_action = random.choice(valid_actions)
-            # On step 0, the agent's action is irrelevant; we override it.
-            # It's not "illegal," it's just part of the curriculum.
+            # The agent's action is irrelevant; we override it. This is not illegal.
             return final_action, False
 
+        # --- PRIORITY 3: Standard logic for all other steps ---
+        is_illegal = self._get_true_action_mask()[action] == 0
+        if is_illegal:
+            self.illegal_action_count += 1
+            final_action = self.actions_to_indices['HOLD']
+            return final_action, True
+        else:
+            return action, False
         # --- Standard logic for all other steps ---
         is_illegal = self._get_true_action_mask()[action] == 0
         if is_illegal:
@@ -415,6 +427,19 @@ class OptionsZeroGameEnv(gym.Env):
         This version correctly handles all game states.
         """
         action_mask = np.zeros(self.action_space_size, dtype=np.int8)
+
+        # --- NEW LOGIC FOR FORCING A STRATEGY ---
+        # This is the highest priority rule, used for targeted backtesting.
+        if self.current_step == 0 and self._cfg.get('forced_opening_strategy_name'):
+            forced_action_name = self._cfg.forced_opening_strategy_name
+            action_index = self.actions_to_indices.get(forced_action_name)
+
+            # Assert that the provided strategy name is valid
+            assert action_index is not None, f"Forced opening strategy '{forced_action_name}' not found in action space."
+
+            action_mask[action_index] = 1
+            return action_mask
+        # --- END OF NEW LOGIC ---
 
         # --- Rule 1: Expiry Day is a special case that overrides everything else ---
         current_day = self.current_step // self._cfg.steps_per_day
