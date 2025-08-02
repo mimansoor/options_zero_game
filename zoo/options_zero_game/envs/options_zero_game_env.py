@@ -320,16 +320,48 @@ class OptionsZeroGameEnv(gym.Env):
         
     def _get_true_action_mask(self) -> np.ndarray:
         """
-        Calculates the complete, rule-based action mask by querying the portfolio manager.
-        This is the full-logic version, equivalent to the original implementation.
+        Calculates the complete, rule-based action mask.
+        SPECIAL RULE: On step 0, forces the agent to open a position from a
+        randomly selected family of strategies to ensure diverse exploration.
         """
         action_mask = np.zeros(self.action_space_size, dtype=np.int8)
+
+        # --- DIVERSE EXPLORATION LOGIC FOR STEP 0 ---
+        if self.current_step == 0:
+            # 1. Define families of related strategies.
+            strategy_families = {
+                "SINGLE_LEG": lambda name: 'ATM' in name,
+                "STRADDLE": lambda name: 'STRADDLE' in name,
+                "STRANGLE": lambda name: 'STRANGLE' in name,
+                "VERTICAL": lambda name: 'VERTICAL' in name,
+                "IRON_FLY_CONDOR": lambda name: 'IRON' in name,
+                "BUTTERFLY": lambda name: 'FLY' in name and 'IRON' not in name,
+            }
+            
+            # 2. Randomly select one family for this episode.
+            chosen_family_name = random.choice(list(strategy_families.keys()))
+            is_in_family = strategy_families[chosen_family_name]
+
+            # 3. Build an action mask that only allows opening actions from that family.
+            for action_name, index in self.actions_to_indices.items():
+                if action_name.startswith('OPEN_') and is_in_family(action_name):
+                    action_mask[index] = 1
+            
+            # Failsafe: If the random choice results in an empty mask (e.g., a typo),
+            # default to allowing all open actions to prevent a crash.
+            if not np.any(action_mask):
+                for name, index in self.actions_to_indices.items():
+                    if name.startswith('OPEN_'): action_mask[index] = 1
+            
+            return action_mask
+            
+        # --- Standard logic for all subsequent steps (current_step > 0) ---
+        
         action_mask[self.actions_to_indices['HOLD']] = 1
 
         current_day = self.current_step // self._cfg.steps_per_day
         is_expiry_day = current_day >= (self._cfg.time_to_expiry_days - 1)
-
-        # On expiry day, only closing actions are allowed
+        
         if is_expiry_day:
             if not self.portfolio_manager.portfolio.empty:
                 action_mask[self.actions_to_indices['CLOSE_ALL']] = 1
@@ -338,12 +370,7 @@ class OptionsZeroGameEnv(gym.Env):
                         action_mask[self.actions_to_indices[f'CLOSE_POSITION_{i}']] = 1
             return action_mask
 
-        # --- Logic for non-expiry days ---
-
-        is_strategy_open = not self.portfolio_manager.portfolio.empty
-
-        if is_strategy_open:
-            # If a position exists, allow closing and shifting
+        if not self.portfolio_manager.portfolio.empty:
             action_mask[self.actions_to_indices['CLOSE_ALL']] = 1
             for i in range(len(self.portfolio_manager.portfolio)):
                 if f'CLOSE_POSITION_{i}' in self.actions_to_indices:
@@ -352,28 +379,7 @@ class OptionsZeroGameEnv(gym.Env):
                      action_mask[self.actions_to_indices[f'SHIFT_UP_POS_{i}']] = 1
                 if f'SHIFT_DOWN_POS_{i}' in self.actions_to_indices:
                      action_mask[self.actions_to_indices[f'SHIFT_DOWN_POS_{i}']] = 1
-        else:
-            # If the portfolio is empty, allow all OPEN actions based on slot requirements
-            available_slots = self.portfolio_manager.max_positions - len(self.portfolio_manager.portfolio)
-
-            # This simplified logic allows all open actions if slots are available.
-            # For a 1-to-1 match, you would copy the complex delta-based masking here.
-            # But the "one strategy at a time" rule makes that logic less critical now.
-            if available_slots >= 4:
-                 for name in self.actions_to_indices:
-                     if name.startswith('OPEN_') and ('CONDOR' in name or 'FLY' in name):
-                         action_mask[self.actions_to_indices[name]] = 1
-
-            if available_slots >= 2:
-                for name in self.actions_to_indices:
-                     if name.startswith('OPEN_') and ('STRADDLE' in name or 'STRANGLE' in name or 'VERTICAL' in name):
-                         action_mask[self.actions_to_indices[name]] = 1
-
-            if available_slots >= 1:
-                for name in self.actions_to_indices:
-                     if name.startswith('OPEN_') and 'ATM' in name:
-                         action_mask[self.actions_to_indices[name]] = 1
-
+        
         return action_mask
 
     def render(self, mode: str = 'human') -> None:
