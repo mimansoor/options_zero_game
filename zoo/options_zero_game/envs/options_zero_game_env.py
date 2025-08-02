@@ -31,7 +31,7 @@ class OptionsZeroGameEnv(gym.Env):
     # instantiated on its own without errors.
     config = dict(
         # Price Action Manager Config
-        price_source='mixed',
+        price_source='historical',
         historical_data_path='zoo/options_zero_game/data/market_data_cache',
         market_regimes = [
             {'name': 'Stable_LowVol', 'mu': 0.00005, 'omega': 0.000005, 'alpha': 0.09, 'beta': 0.90, 'overnight_vol_multiplier': 1.5},
@@ -293,6 +293,7 @@ class OptionsZeroGameEnv(gym.Env):
                 "STRANGLE": lambda name: 'STRANGLE' in name, "VERTICAL": lambda name: 'VERTICAL' in name,
                 "IRON_FLY_CONDOR": lambda name: 'IRON' in name, "BUTTERFLY": lambda name: 'FLY' in name and 'IRON' not in name,
             }
+
             chosen_family = strategy_families[random.choice(list(strategy_families.keys()))]
             
             valid_actions = [idx for name, idx in self.actions_to_indices.items() if name.startswith('OPEN_') and chosen_family(name)]
