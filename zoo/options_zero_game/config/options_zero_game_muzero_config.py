@@ -14,7 +14,7 @@ num_simulations = 50
 update_per_collect = 500
 max_env_step = int(5e6)
 reanalyze_ratio = 0.
-n_episode = 8
+n_episode = 64
 
 market_regimes = [
     # Name, mu, omega, alpha, beta, overnight_vol_multiplier

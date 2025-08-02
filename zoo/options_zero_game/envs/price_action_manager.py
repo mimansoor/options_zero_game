@@ -19,6 +19,18 @@ class PriceActionManager:
         self.total_steps = cfg['time_to_expiry_days'] * cfg['steps_per_day']
         self.steps_per_day = cfg['steps_per_day']
         self.momentum_window_steps = cfg['momentum_window_steps']
+
+        # --- NEW: Load the expert models ---
+        self.trend_expert = None
+        self.volatility_expert = None
+        self.expert_lookback = 20 # Must match the lookback used in training
+        try:
+            self.trend_expert = joblib.load('zoo/options_zero_game/experts/trend_expert.joblib')
+            self.volatility_expert = joblib.load('zoo/options_zero_game/experts/volatility_expert.joblib')
+            print("Successfully loaded expert prediction models.")
+        except FileNotFoundError:
+            print("Warning: Expert prediction models not found. Running without them. Train experts using expert_trainer.py.")
+
         self.np_random = np_random
         self._available_tickers = self._load_tickers()
         
@@ -37,6 +49,8 @@ class PriceActionManager:
         self.current_regime_name: str = ""
         self.garch_implied_vol: float = 0.2
         self.trend: float = 0.0
+        self.expert_trend_pred: np.ndarray = np.array([0.33, 0.34, 0.33]) # Default to neutral
+        self.expert_vol_pred: float = 0.0
 
     def _load_tickers(self) -> List[str]:
         if self.price_source in ['historical', 'mixed']:
@@ -95,6 +109,32 @@ class PriceActionManager:
             self.momentum_signal = math.tanh((self.current_price / current_sma) - 1.0)
         else:
             self.momentum_signal = 0.0
+
+        # --- NEW: Get predictions from experts ---
+        if self.trend_expert and self.volatility_expert:
+            features = self._get_features_for_experts(current_step)
+            if features is not None:
+                self.expert_trend_pred = self.trend_expert.predict_proba(features)[0]
+                self.expert_vol_pred = self.volatility_expert.predict(features)[0]
+
+    def _get_features_for_experts(self, current_step: int) -> np.ndarray:
+        """Prepares the exact same feature vector as the offline training script."""
+        if current_step < self.expert_lookback:
+            return None # Not enough data to create a full feature vector yet
+
+        # 1. Get lagged log returns
+        log_returns = np.log(self.price_path[current_step - self.expert_lookback + 1 : current_step + 1] / self.price_path[current_step - self.expert_lookback : current_step])
+
+        # 2. Get momentum
+        momentum = (self.current_price / self.sma_path[current_step]) - 1.0
+
+        # 3. Combine into a single feature vector, ensuring correct order
+        # The first `self.expert_lookback` features are the returns, the last is momentum
+        feature_vector = np.zeros(self.expert_lookback + 1)
+        feature_vector[:self.expert_lookback] = log_returns
+        feature_vector[self.expert_lookback] = momentum
+
+        return feature_vector.reshape(1, -1) # Reshape for a single prediction
 
     def _generate_historical_price_path(self):
         selected_ticker = random.choice(self._available_tickers)
