@@ -195,15 +195,34 @@ class OptionsZeroGameEnv(gym.Env):
         return BaseEnvTimestep({'observation': obs, 'action_mask': action_mask, 'to_play': -1}, final_reward, terminated, info)
 
     def _handle_action(self, action: int) -> bool:
-        """Checks action legality and delegates to the PortfolioManager."""
-        if self._get_true_action_mask()[action] == 0:
-            self.illegal_action_count += 1
-            return True
-
-        action_name = self.indices_to_actions.get(action, 'INVALID')
+        """
+        Checks action legality, handles overrides for illegal actions based on game state,
+        and delegates the final, valid action to the PortfolioManager.
+        Returns True if the *original* action was illegal (for penalty purposes).
+        """
+        action_mask = self._get_true_action_mask()
+        was_illegal = (action_mask[action] == 0)
         
+        final_action_to_execute = action
+
+        if was_illegal:
+            self.illegal_action_count += 1
+            
+            # Default to HOLD for any illegal action.
+            final_action_to_execute = self.actions_to_indices['HOLD']
+            
+            # Handle the special case for step 0.
+            if self.current_step == 0:
+                # On Day 0, override HOLD with a random LEGAL opening action.
+                legal_openings = np.where(action_mask == 1)[0]
+                if len(legal_openings) > 0:
+                    final_action_to_execute = random.choice(legal_openings)
+                # If no legal openings (failsafe), it will remain HOLD, which is acceptable.
+
+        # Now, execute the final, guaranteed-to-be-valid action
+        action_name = self.indices_to_actions.get(final_action_to_execute, 'INVALID')
+
         if action_name.startswith('OPEN_'):
-            # This logic is correct now because the constants exist on self
             current_day = self.current_step // self._cfg.steps_per_day
             days_to_expiry = (self._cfg.time_to_expiry_days - current_day) * (self.TOTAL_DAYS_IN_WEEK / self.TRADING_DAYS_IN_WEEK)
             self.portfolio_manager.open_strategy(action_name, self.price_manager.current_price, self.iv_bin_index, self.current_step, days_to_expiry)
@@ -215,7 +234,9 @@ class OptionsZeroGameEnv(gym.Env):
             self.portfolio_manager.shift_position(action_name, self.price_manager.current_price, self.iv_bin_index, self.current_step)
 
         self.portfolio_manager.sort_portfolio()
-        return False
+        
+        # Return whether the *original* action was illegal so the `step` function can apply the penalty.
+        return was_illegal
 
     def _get_observation(self) -> np.ndarray:
         # Market State
