@@ -4,8 +4,8 @@
 import copy
 import math
 import random
-import time
 from typing import Tuple, Dict, Any, List
+import time
 
 import gymnasium as gym
 import numpy as np
@@ -167,7 +167,25 @@ class OptionsZeroGameEnv(gym.Env):
 
     def step(self, action: int) -> BaseEnvTimestep:
         equity_before = self.portfolio_manager.get_current_equity(self.price_manager.current_price, self.iv_bin_index)
-        was_illegal_action = self._handle_action(action)
+        
+        # 1. Get the final action and the illegal flag from the handler
+        final_action, was_illegal_action = self._handle_action(action)
+        
+        # 2. Execute the final action
+        final_action_name = self.indices_to_actions.get(final_action, 'INVALID')
+        if final_action_name.startswith('OPEN_'):
+            current_day = self.current_step // self._cfg.steps_per_day
+            days_to_expiry = (self._cfg.time_to_expiry_days - current_day) * (self.TOTAL_DAYS_IN_WEEK / self.TRADING_DAYS_IN_WEEK)
+            self.portfolio_manager.open_strategy(final_action_name, self.price_manager.current_price, self.iv_bin_index, self.current_step, days_to_expiry)
+        elif final_action_name.startswith('CLOSE_POSITION_'):
+            self.portfolio_manager.close_position(int(final_action_name.split('_')[-1]), self.price_manager.current_price, self.iv_bin_index)
+        elif final_action_name == 'CLOSE_ALL':
+            self.portfolio_manager.close_all_positions(self.price_manager.current_price, self.iv_bin_index)
+        elif final_action_name.startswith('SHIFT_'):
+            self.portfolio_manager.shift_position(final_action_name, self.price_manager.current_price, self.iv_bin_index, self.current_step)
+        self.portfolio_manager.sort_portfolio()
+        # --- END OF ACTION EXECUTION ---
+
         self.current_step += 1
         self.price_manager.step(self.current_step)
         self._update_realized_vol()
@@ -179,64 +197,57 @@ class OptionsZeroGameEnv(gym.Env):
         if terminated: self.portfolio_manager.close_all_positions(self.price_manager.current_price, self.iv_bin_index)
 
         equity_after = self.portfolio_manager.get_current_equity(self.price_manager.current_price, self.iv_bin_index)
-        shaped_reward, raw_reward = self._calculate_shaped_reward(equity_after, equity_before)
+        shaped_reward, raw_reward = self._calculate_shaped_reward(equity_after, equity_after)
         self.final_eval_reward += raw_reward
         final_reward = self._cfg.illegal_action_penalty if was_illegal_action else shaped_reward
 
         obs = self._get_observation()
         action_mask = self._get_true_action_mask() if not self._cfg.ignore_legal_actions else np.ones(self.action_space_size, dtype=np.int8)
+        
         info = {
             'price': self.price_manager.current_price,
             'eval_episode_return': self.final_eval_reward,
             'illegal_actions_in_episode': self.illegal_action_count,
-            'was_illegal_action': was_illegal_action
+            'was_illegal_action': bool(was_illegal_action),
+            # Pass the name of the action that was ACTUALLY executed for the logger
+            'executed_action_name': final_action_name 
         }
 
         return BaseEnvTimestep({'observation': obs, 'action_mask': action_mask, 'to_play': -1}, final_reward, terminated, info)
 
-    def _handle_action(self, action: int) -> bool:
+    def _handle_action(self, action: int) -> Tuple[int, bool]:
         """
-        Checks action legality, handles overrides for illegal actions based on game state,
-        and delegates the final, valid action to the PortfolioManager.
-        Returns True if the *original* action was illegal (for penalty purposes).
+        Determines the final executed action and if the agent's original action was illegal.
+        On step 0, it forces a diverse, random opening, overriding the agent's choice.
+        Returns: (final_action_index, was_illegal_flag)
         """
-        action_mask = self._get_true_action_mask()
-        was_illegal = (action_mask[action] == 0)
-        
-        final_action_to_execute = action
+        # --- Rule: Force a diverse opening on Step 0 ---
+        if self.current_step == 0:
+            strategy_families = {
+                "SINGLE_LEG": lambda name: 'ATM' in name, "STRADDLE": lambda name: 'STRADDLE' in name,
+                "STRANGLE": lambda name: 'STRANGLE' in name, "VERTICAL": lambda name: 'VERTICAL' in name,
+                "IRON_FLY_CONDOR": lambda name: 'IRON' in name, "BUTTERFLY": lambda name: 'FLY' in name and 'IRON' not in name,
+            }
+            chosen_family = strategy_families[random.choice(list(strategy_families.keys()))]
+            
+            valid_actions = [idx for name, idx in self.actions_to_indices.items() if name.startswith('OPEN_') and chosen_family(name)]
+            
+            if not valid_actions: # Failsafe
+                valid_actions = [idx for name, idx in self.actions_to_indices.items() if name.startswith('OPEN_')]
 
-        if was_illegal:
+            final_action = random.choice(valid_actions)
+            # On step 0, the agent's action is irrelevant; we override it.
+            # It's not "illegal," it's just part of the curriculum.
+            return final_action, False
+
+        # --- Standard logic for all other steps ---
+        is_illegal = self._get_true_action_mask()[action] == 0
+        if is_illegal:
             self.illegal_action_count += 1
-            
-            # Default to HOLD for any illegal action.
-            final_action_to_execute = self.actions_to_indices['HOLD']
-            
-            # Handle the special case for step 0.
-            if self.current_step == 0:
-                # On Day 0, override HOLD with a random LEGAL opening action.
-                legal_openings = np.where(action_mask == 1)[0]
-                if len(legal_openings) > 0:
-                    final_action_to_execute = random.choice(legal_openings)
-                # If no legal openings (failsafe), it will remain HOLD, which is acceptable.
-
-        # Now, execute the final, guaranteed-to-be-valid action
-        action_name = self.indices_to_actions.get(final_action_to_execute, 'INVALID')
-
-        if action_name.startswith('OPEN_'):
-            current_day = self.current_step // self._cfg.steps_per_day
-            days_to_expiry = (self._cfg.time_to_expiry_days - current_day) * (self.TOTAL_DAYS_IN_WEEK / self.TRADING_DAYS_IN_WEEK)
-            self.portfolio_manager.open_strategy(action_name, self.price_manager.current_price, self.iv_bin_index, self.current_step, days_to_expiry)
-        elif action_name.startswith('CLOSE_POSITION_'):
-            self.portfolio_manager.close_position(int(action_name.split('_')[-1]), self.price_manager.current_price, self.iv_bin_index)
-        elif action_name == 'CLOSE_ALL':
-            self.portfolio_manager.close_all_positions(self.price_manager.current_price, self.iv_bin_index)
-        elif action_name.startswith('SHIFT_'):
-            self.portfolio_manager.shift_position(action_name, self.price_manager.current_price, self.iv_bin_index, self.current_step)
-
-        self.portfolio_manager.sort_portfolio()
-        
-        # Return whether the *original* action was illegal so the `step` function can apply the penalty.
-        return was_illegal
+            final_action = self.actions_to_indices['HOLD']
+            return final_action, True
+        else:
+            return action, False
 
     def _get_observation(self) -> np.ndarray:
         # Market State

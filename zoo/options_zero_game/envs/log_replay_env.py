@@ -94,15 +94,14 @@ class LogReplayEnv(gym.Wrapper):
 
         log_info = info if info is not None else {}
         
-        # --- LOGIC FOR ILLEGAL ACTIONS ---
-        # Determine the final action name based on the 'was_illegal_action' flag from the env's info dict.
-        intended_action_name = self.env.indices_to_actions.get(action, 'N/A')
-        was_illegal = log_info.get('was_illegal_action', False)
-        final_action_name = 'HOLD' if was_illegal else intended_action_name
-        
-        # Assign the CORRECT final action name to the log.
-        log_info['action_name'] = final_action_name
-        
+        # Prioritize the 'executed_action_name' from the info dict if it exists.
+        # This correctly handles step 0 overrides and illegal action conversions.
+        if 'executed_action_name' in log_info:
+            log_info['action_name'] = log_info['executed_action_name']
+        else:
+            # Fallback for the initial state log, which has no action
+            log_info['action_name'] = self.env.indices_to_actions.get(action, 'N/A')
+       
         # Calculate last price change for the visualizer
         last_price_change_pct = ((current_price / self._last_price) - 1) * 100 if self._last_price and self._last_price > 0 else 0.0
         self._last_price = current_price
