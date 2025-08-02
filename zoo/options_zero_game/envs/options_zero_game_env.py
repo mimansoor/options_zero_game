@@ -62,6 +62,7 @@ class OptionsZeroGameEnv(gym.Env):
         strategy_profit_target_pct=50.0, # Set to 0 to disable.
         
         # Rule 3: Stop-Loss (based on the initial trade cost)
+        stop_loss_multiple_of_cost=2.0, 
         use_stop_loss=True, # Set to False to disable.
 
         strategy_name_to_id = {
@@ -218,7 +219,7 @@ class OptionsZeroGameEnv(gym.Env):
             # For a debit, initial_net_premium > 0. For a credit, initial_net_premium < 0.
             # The absolute value handles both cases correctly.
             initial_cost = abs(self.portfolio_manager.initial_net_premium * self.portfolio_manager.lot_size)
-            if current_pnl <= -initial_cost:
+            if current_pnl <= -(initial_cost * stop_loss_multiple_of_cost):
                 terminated_by_rule = True
 
         # Profit-taking rules are only checked if not already stopped out
