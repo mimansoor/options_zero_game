@@ -52,7 +52,18 @@ class OptionsZeroGameEnv(gym.Env):
         ignore_legal_actions=True,
         otm_delta_threshold=0.15,
         itm_delta_threshold=0.85,
-        profit_target_pct=3.0,
+        profit_target_pct=3.0, # Set to 0 to disable
+
+        # --- NEW ADVANCED TRADING RULES ---
+        # Rule 1: Jackpot Reward
+        jackpot_reward=1.0, # The special reward for hitting the fixed profit target.
+
+        # Rule 2: Dynamic Take-Profit (as a percentage of the strategy's max profit)
+        strategy_profit_target_pct=50.0, # Set to 0 to disable.
+        
+        # Rule 3: Stop-Loss (based on the initial trade cost)
+        use_stop_loss=True, # Set to False to disable.
+
         strategy_name_to_id = {
             # --- Base Strategies ---
             'LONG_CALL': 0, 'SHORT_CALL': 1, 'LONG_PUT': 2, 'SHORT_PUT': 3,
@@ -193,30 +204,64 @@ class OptionsZeroGameEnv(gym.Env):
         
         time_decay_days = self._calculate_time_decay()
         self.portfolio_manager.update_positions_after_time_step(time_decay_days, self.price_manager.current_price, self.iv_bin_index)
-        
-        # 1. Check if the profit target is enabled.
-        terminated = self.current_step >= self.total_steps
-        profit_target = self._cfg.profit_target_pct
-        if profit_target > 0:
-            # 2. Calculate current PnL as a percentage of initial cash.
-            current_pnl = self.portfolio_manager.get_total_pnl(self.price_manager.current_price, self.iv_bin_index)
-            pnl_pct = (current_pnl / self.portfolio_manager.initial_cash) * 100
-            
-            # 3. If target is met, force the episode to terminate.
-            if pnl_pct >= profit_target:
-                # Set the 'terminated' flag to True to end the episode
-                terminated = True
 
-        if terminated: self.portfolio_manager.close_all_positions(self.price_manager.current_price, self.iv_bin_index)
+        # --- NEW, ROBUST TERMINATION AND REWARD LOGIC ---
+        terminated_by_rule = False
+        final_shaped_reward_override = None # For the jackpot reward
+
+        # Get the current PnL once for all checks
+        current_pnl = self.portfolio_manager.get_total_pnl(self.price_manager.current_price, self.iv_bin_index)
+
+        # Rule 3: Stop-Loss Check
+        if self._cfg.use_stop_loss and not self.portfolio_manager.portfolio.empty:
+            # The stop-loss is triggered if the current PnL drops below the negative of the initial trade cost.
+            # For a debit, initial_net_premium > 0. For a credit, initial_net_premium < 0.
+            # The absolute value handles both cases correctly.
+            initial_cost = abs(self.portfolio_manager.initial_net_premium * self.portfolio_manager.lot_size)
+            if current_pnl <= -initial_cost:
+                terminated_by_rule = True
+
+        # Profit-taking rules are only checked if not already stopped out
+        if not terminated_by_rule and not self.portfolio_manager.portfolio.empty:
+            # Rule 1: Fixed 3% Take-Profit Check
+            if self._cfg.profit_target_pct > 0:
+                pnl_pct = (current_pnl / self.portfolio_manager.initial_cash) * 100
+                if pnl_pct >= self._cfg.profit_target_pct:
+                    terminated_by_rule = True
+                    # Set the special jackpot reward
+                    final_shaped_reward_override = self._cfg.jackpot_reward
+            
+            # Rule 2: Dynamic 50% Max Profit Check
+            if not terminated_by_rule and self._cfg.strategy_profit_target_pct > 0:
+                max_profit = self.portfolio_manager.portfolio.iloc[0]['strategy_max_profit']
+                # Ensure max_profit is positive before checking
+                if max_profit > 0 and current_pnl >= max_profit * (self._cfg.strategy_profit_target_pct / 100):
+                    terminated_by_rule = True
+        
+        # Final termination condition combines rules with the time limit
+        terminated_by_time = self.current_step >= self.total_steps
+        terminated = terminated_by_rule or terminated_by_time
+        
+        if terminated: 
+            self.portfolio_manager.close_all_positions(self.price_manager.current_price, self.iv_bin_index)
 
         equity_after = self.portfolio_manager.get_current_equity(self.price_manager.current_price, self.iv_bin_index)
+        
+        # Calculate the standard shaped reward
         shaped_reward, raw_reward = self._calculate_shaped_reward(equity_before, equity_after)
         self.final_eval_reward += raw_reward
-        final_reward = self._cfg.illegal_action_penalty if was_illegal_action else shaped_reward
+        
+        # Determine the final reward passed to the agent
+        if final_shaped_reward_override is not None:
+            final_reward = final_shaped_reward_override
+        elif was_illegal_action:
+            final_reward = self._cfg.illegal_action_penalty
+        else:
+            final_reward = shaped_reward
 
         obs = self._get_observation()
         action_mask = self._get_true_action_mask() if not self._cfg.ignore_legal_actions else np.ones(self.action_space_size, dtype=np.int8)
-        
+       
         info = {
             'price': self.price_manager.current_price,
             'eval_episode_return': self.final_eval_reward,

@@ -29,6 +29,7 @@ class PortfolioManager:
         self.realized_pnl: float = 0.0
         self.high_water_mark: float = 0.0
         self.next_creation_id: int = 0
+        self.initial_net_premium: float = 0.0
         self.portfolio_columns = ['type', 'direction', 'entry_step', 'strike_price', 'entry_premium', 'days_to_expiry', 'creation_id', 'strategy_id', 'strategy_max_profit', 'strategy_max_loss']
         self.portfolio_dtypes = {'type': 'object', 'direction': 'object', 'entry_step': 'int64', 'strike_price': 'float64', 'entry_premium': 'float64', 'days_to_expiry': 'float64', 'creation_id': 'int64', 'strategy_id': 'int64', 'strategy_max_profit': 'float64', 'strategy_max_loss': 'float64'}
     
@@ -38,6 +39,7 @@ class PortfolioManager:
         self.realized_pnl = 0.0
         self.high_water_mark = self.initial_cash
         self.next_creation_id = 0
+        self.initial_net_premium = 0.0
 
     # --- Public Methods (called by the main environment) ---
 
@@ -320,6 +322,13 @@ class PortfolioManager:
             f"  - This means a strategy's canonical name did not have a key in the strategy_name_to_id dictionary.\n"
             f"  - The PnL object that caused the failure was: {strategy_pnl}\n"
             f"  - Please check the logic in the `_open_*` method that was called and ensure the derived strategy name is correct.\n"
+        )
+
+        # --- NEW LOGIC: Calculate and store the net premium ---
+        # This is the initial debit (positive) or credit (negative) of the trade.
+        self.initial_net_premium = sum(
+            leg['entry_premium'] * (1 if leg['direction'] == 'long' else -1)
+            for leg in trades_to_execute
         )
 
         for trade in trades_to_execute:
