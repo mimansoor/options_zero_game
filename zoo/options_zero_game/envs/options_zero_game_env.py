@@ -52,6 +52,7 @@ class OptionsZeroGameEnv(gym.Env):
         ignore_legal_actions=True,
         otm_delta_threshold=0.15,
         itm_delta_threshold=0.85,
+        profit_target_pct=3.0,
         strategy_name_to_id = {
             # --- Base Strategies ---
             'LONG_CALL': 0, 'SHORT_CALL': 1, 'LONG_PUT': 2, 'SHORT_PUT': 3,
@@ -193,11 +194,23 @@ class OptionsZeroGameEnv(gym.Env):
         time_decay_days = self._calculate_time_decay()
         self.portfolio_manager.update_positions_after_time_step(time_decay_days, self.price_manager.current_price, self.iv_bin_index)
         
+        # 1. Check if the profit target is enabled.
         terminated = self.current_step >= self.total_steps
+        profit_target = self._cfg.profit_target_pct
+        if profit_target > 0:
+            # 2. Calculate current PnL as a percentage of initial cash.
+            current_pnl = self.portfolio_manager.get_total_pnl(self.price_manager.current_price, self.iv_bin_index)
+            pnl_pct = (current_pnl / self.portfolio_manager.initial_cash) * 100
+            
+            # 3. If target is met, force the episode to terminate.
+            if pnl_pct >= profit_target:
+                # Set the 'terminated' flag to True to end the episode
+                terminated = True
+
         if terminated: self.portfolio_manager.close_all_positions(self.price_manager.current_price, self.iv_bin_index)
 
         equity_after = self.portfolio_manager.get_current_equity(self.price_manager.current_price, self.iv_bin_index)
-        shaped_reward, raw_reward = self._calculate_shaped_reward(equity_after, equity_after)
+        shaped_reward, raw_reward = self._calculate_shaped_reward(equity_before, equity_after)
         self.final_eval_reward += raw_reward
         final_reward = self._cfg.illegal_action_penalty if was_illegal_action else shaped_reward
 
