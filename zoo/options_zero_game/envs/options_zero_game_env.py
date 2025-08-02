@@ -49,11 +49,11 @@ class OptionsZeroGameEnv(gym.Env):
         
         # Options and Portfolio Config
         start_price=20000.0,
-        initial_cash=100000.0,
+        initial_cash=500000.0,
         lot_size=75,
         max_positions=4,
         strike_distance=50.0,
-        bid_ask_spread_pct=0.002,
+        bid_ask_spread_pct=0.0015,
         
         # Black-Scholes Manager Config
         risk_free_rate=0.10,
@@ -63,15 +63,15 @@ class OptionsZeroGameEnv(gym.Env):
         },
 
         # Reward and Penalty Config
-        pnl_scaling_factor=1000,
+        pnl_scaling_factor=10000,
         drawdown_penalty_weight=0.1,
         illegal_action_penalty=-1.0,
         
         # Advanced Trading Rules
-        profit_target_pct=3.0,
+        profit_target_pct=5.0,
         jackpot_reward=1.0,
-        strategy_profit_target_pct=50.0,
-        stop_loss_multiple_of_cost=2.0, # NEW: Added stop loss multiple
+        strategy_profit_target_pct=25.0,
+        stop_loss_multiple_of_cost=3.0, # NEW: Added stop loss multiple
         use_stop_loss=True,
         forced_opening_strategy_name=None,
         
