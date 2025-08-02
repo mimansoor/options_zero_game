@@ -107,7 +107,7 @@ class OptionsZeroGameEnv(gym.Env):
             'MOMENTUM_NORM': 5, 'PORTFOLIO_DELTA': 6, 'PORTFOLIO_GAMMA': 7, 'PORTFOLIO_THETA': 8, 'PORTFOLIO_VEGA': 9,
             'PORTFOLIO_MAX_PROFIT_NORM': 10, 'PORTFOLIO_MAX_LOSS_NORM': 11, 'PORTFOLIO_RR_RATIO_NORM': 12, 'PORTFOLIO_PROB_PROFIT': 13,
             # --- NEW EXPERT FEATURES ---
-            'EXPERT_PRED_TREND_DOWN': 14, 'EXPERT_PRED_TREND_FLAT': 15, 'EXPERT_PRED_TREND_UP': 16, 'EXPERT_PRED_VOL_NORM': 17,
+            'EXPERT_EMA_RATIO': 14, 'EXPERT_RSI_OVERSOLD': 15, 'EXPERT_RSI_NEUTRAL': 16, 'EXPERT_RSI_OVERBOUGHT': 17, 'EXPERT_VOL_NORM': 18,
         }
         self.POS_IDX = {
             'IS_OCCUPIED': 0, 'TYPE_NORM': 1, 'DIRECTION_NORM': 2, 'STRIKE_DIST_NORM': 3, 'DAYS_HELD_NORM': 4,
@@ -352,14 +352,15 @@ class OptionsZeroGameEnv(gym.Env):
         # Probability is already in a [0, 1] range, we can scale it to [-1, 1]
         vec[self.OBS_IDX['PORTFOLIO_PROB_PROFIT']] = (summary['prob_profit'] * 2) - 1.0
 
-        # --- NEW: Add expert predictions to the observation vector ---
-        expert_trend_probs = self.price_manager.expert_trend_pred
-        vec[self.OBS_IDX['EXPERT_PRED_TREND_DOWN']] = expert_trend_probs[0]
-        vec[self.OBS_IDX['EXPERT_PRED_TREND_FLAT']] = expert_trend_probs[1]
-        vec[self.OBS_IDX['EXPERT_PRED_TREND_UP']] = expert_trend_probs[2]
+        # --- NEW: Add Holy Trinity predictions ---
+        vec[self.OBS_IDX['EXPERT_EMA_RATIO']] = math.tanh(self.price_manager.expert_ema_pred - 1.0)
         
-        # Normalize the predicted volatility using tanh for stability
-        vec[self.OBS_IDX['EXPERT_PRED_VOL_NORM']] = math.tanh(self.price_manager.expert_vol_pred)
+        rsi_probs = self.price_manager.expert_rsi_pred
+        vec[self.OBS_IDX['EXPERT_RSI_OVERSOLD']] = rsi_probs[0]
+        vec[self.OBS_IDX['EXPERT_RSI_NEUTRAL']] = rsi_probs[1]
+        vec[self.OBS_IDX['EXPERT_RSI_OVERBOUGHT']] = rsi_probs[2]
+        
+        vec[self.OBS_IDX['EXPERT_VOL_NORM']] = math.tanh(self.price_manager.expert_vol_pred)
 
         # Per-Position State
         self.portfolio_manager.get_positions_state(vec, self.PORTFOLIO_START_IDX, self.PORTFOLIO_STATE_SIZE_PER_POS, self.POS_IDX, self.price_manager.current_price, self.iv_bin_index, self.current_step, self.total_steps)

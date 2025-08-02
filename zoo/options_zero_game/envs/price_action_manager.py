@@ -1,11 +1,9 @@
 # zoo/options_zero_game/envs/price_action_manager.py
-import os
-import random
-import math
+import os, random, math, joblib
 import numpy as np
 import pandas as pd
+import pandas_ta as ta
 from typing import Dict, List, Any
-import joblib
 
 class PriceActionManager:
     """
@@ -24,13 +22,18 @@ class PriceActionManager:
         # --- NEW: Load the expert models ---
         self.trend_expert = None
         self.volatility_expert = None
-        self.expert_lookback = 20 # Must match the lookback used in training
+        self.expert_lookback = 30 # Must match the lookback used in training
+        self.volatility_period = 14 # Match the trainer
+
+        # --- THE FIX: Load ONLY the Holy Trinity expert models ---
+        self.ema_expert, self.rsi_expert, self.volatility_expert = None, None, None
         try:
-            self.trend_expert = joblib.load('zoo/options_zero_game/experts/trend_expert.joblib')
+            self.ema_expert = joblib.load('zoo/options_zero_game/experts/ema_expert.joblib')
+            self.rsi_expert = joblib.load('zoo/options_zero_game/experts/rsi_expert.joblib')
             self.volatility_expert = joblib.load('zoo/options_zero_game/experts/volatility_expert.joblib')
-            print("Successfully loaded expert prediction models.")
+            print("Successfully loaded Holy Trinity expert models.")
         except FileNotFoundError:
-            print("Warning: Expert prediction models not found. Running without them. Train experts using expert_trainer.py.")
+            print("Warning: Holy Trinity models not found. Running without experts. Run holy_trinity_trainer.py.")
 
         self.np_random = np_random
         self._available_tickers = self._load_tickers()
@@ -50,7 +53,9 @@ class PriceActionManager:
         self.current_regime_name: str = ""
         self.garch_implied_vol: float = 0.2
         self.trend: float = 0.0
-        self.expert_trend_pred: np.ndarray = np.array([0.33, 0.34, 0.33]) # Default to neutral
+        # State variables for Holy Trinity expert predictions
+        self.expert_ema_pred: float = 0.0
+        self.expert_rsi_pred: np.ndarray = np.array([0.33, 0.34, 0.33]) # [P(Sell), P(Neu), P(Buy)]
         self.expert_vol_pred: float = 0.0
 
     def _load_tickers(self) -> List[str]:
@@ -111,31 +116,39 @@ class PriceActionManager:
         else:
             self.momentum_signal = 0.0
 
-        # --- NEW: Get predictions from experts ---
-        if self.trend_expert and self.volatility_expert:
+        # --- THE FIX: Get predictions ONLY from the Holy Trinity experts ---
+        if self.ema_expert and self.rsi_expert and self.volatility_expert:
             features = self._get_features_for_experts(current_step)
             if features is not None:
-                self.expert_trend_pred = self.trend_expert.predict_proba(features)[0]
-                self.expert_vol_pred = self.volatility_expert.predict(features)[0]
+                self.expert_ema_pred = self.ema_expert.predict(features)[0]
+                self.expert_rsi_pred = self.rsi_expert.predict_proba(features)[0]
+                self.expert_vol_pred = self.volatility_expert.predict(features)[0]    
 
     def _get_features_for_experts(self, current_step: int) -> np.ndarray:
-        """Prepares the exact same feature vector as the offline training script."""
-        if current_step < self.expert_lookback:
-            return None # Not enough data to create a full feature vector yet
+        """Prepares the feature vector for the Holy Trinity experts."""
+        if current_step < self.expert_lookback: 
+            return None
 
-        # 1. Get lagged log returns
-        log_returns = np.log(self.price_path[current_step - self.expert_lookback + 1 : current_step + 1] / self.price_path[current_step - self.expert_lookback : current_step])
+        # A more robust start index calculation
+        start_index = max(0, current_step - self.expert_lookback - 30) 
+        end_index = current_step + 1
+        history_df = pd.DataFrame({'Close': self.price_path[start_index:end_index]})
+        
+        # Calculate indicators needed for features
+        history_df.ta.rsi(length=14, append=True)
+        history_df['log_return'] = np.log(history_df['Close'] / history_df['Close'].shift(1))
+        
+        if len(history_df.dropna()) < self.expert_lookback:
+            return None
 
-        # 2. Get momentum
-        momentum = (self.current_price / self.sma_path[current_step]) - 1.0
-
-        # 3. Combine into a single feature vector, ensuring correct order
-        # The first `self.expert_lookback` features are the returns, the last is momentum
-        feature_vector = np.zeros(self.expert_lookback + 1)
-        feature_vector[:self.expert_lookback] = log_returns
-        feature_vector[self.expert_lookback] = momentum
-
-        return feature_vector.reshape(1, -1) # Reshape for a single prediction
+        valid_history = history_df.dropna().tail(self.expert_lookback)
+        
+        log_return_features = valid_history['log_return'].values
+        rsi_features = valid_history['RSI_14'].values
+        
+        feature_vector = np.concatenate([log_return_features, rsi_features])
+            
+        return feature_vector.reshape(1, -1)
 
     def _generate_historical_price_path(self):
         selected_ticker = random.choice(self._available_tickers)
