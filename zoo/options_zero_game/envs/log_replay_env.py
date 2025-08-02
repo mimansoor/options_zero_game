@@ -1,3 +1,6 @@
+# zoo/options_zero_game/envs/log_replay_env.py
+# <<< VERSION 2.1 - REFACTORED AND CORRECTED LOGIC >>>
+
 import json
 import gymnasium as gym
 from easydict import EasyDict
@@ -12,59 +15,74 @@ from ding.envs.env.base_env import BaseEnvTimestep
 class LogReplayEnv(gym.Wrapper):
     """
     A gym.Wrapper that logs all interactions and saves them to a JSON file.
-    This version is updated to work with the final, refactored OptionsZeroGameEnv.
+    This version is updated to work with the refactored, modular OptionsZeroGameEnv
+    and correctly logs 'HOLD' for illegal actions.
     """
     
     def __init__(self, cfg: dict):
+        # Create an instance of our (now refactored) base environment
         base_env = OptionsZeroGameEnv(cfg)
         super().__init__(base_env)
+        
         self.log_file_path = cfg.log_file_path
         self._episode_history = []
-        self._last_price = None # <<< NEW: Track the last price for change calculation
+        self._last_price = None
         print(f"LogReplayEnv initialized. Replay will be saved to: {self.log_file_path}")
 
+    # --- Standard Wrapper Methods ---
     def seed(self, seed: int, dynamic_seed: int = None):
         return self.env.seed(seed, dynamic_seed)
 
     def reset(self, **kwargs):
         self._episode_history = []
         obs = self.env.reset(**kwargs)
-        self._last_price = self.env.start_price # Initialize last price
+        # Initialize the last price from the price manager
+        self._last_price = self.env.price_manager.start_price
         return obs
 
     def step(self, action):
-        # <<< MODIFIED: Check for illegal action *before* logging
-        true_legal_actions_mask = self.env._get_true_action_mask()
-        was_illegal_action = true_legal_actions_mask[action] == 0
-        
-        # Get the name of the action the agent *intended* to take
-        intended_action_name = self.env.indices_to_actions.get(action, 'INVALID')
-        
-        # If the action was illegal, we log it as HOLD, as per the new rule
-        final_action_name = 'HOLD' if was_illegal_action else intended_action_name
-
+        # Log the state of the environment *before* the action is taken.
+        # This is crucial for the replayer to show the state on which the decision was based.
         if self.env.current_step == 0:
-            self._log_step(self.env._get_observation(), is_initial_state=True)
+            self._log_step(is_initial_state=True)
 
-        self._log_step(self.env._get_observation(), action=action, info_override={'action_name': final_action_name})
-
+        # Execute the step in the main environment. It will return an info dict
+        # telling us if the action was illegal.
         timestep = self.env.step(action)
         
-        self._log_step(timestep.obs, reward=timestep.reward, done=timestep.done, info=timestep.info)
+        # Log the outcome of the step, passing along the original action and the full info dict.
+        self._log_step(action=action, reward=timestep.reward, done=timestep.done, info=timestep.info)
         
         if timestep.done:
             self.save_log()
             
         return timestep
 
-    def _log_step(self, obs, action=None, reward=None, done=False, info=None, is_initial_state=False, info_override=None):
+    def _log_step(self, action=None, reward=None, done=False, info=None, is_initial_state=False):
+        """Builds and appends a single serializable log entry for the current state."""
+        
+        # Correctly access the portfolio from the portfolio manager
+        portfolio_df = self.env.portfolio_manager.portfolio
         serializable_portfolio = []
         
-        for index, pos in self.env.portfolio.iterrows():
-            mid_price, _, _ = self.env._get_option_details(self.env.current_price, pos['strike_price'], pos['days_to_expiry'], pos['type'])
-            current_premium = self.env._get_option_price(mid_price, is_buy=(pos['direction'] == 'short'))
-            if pos['direction'] == 'long': pnl = (current_premium - pos['entry_premium']) * self.env.lot_size
-            else: pnl = (pos['entry_premium'] - current_premium) * self.env.lot_size
+        # Correctly get current price from the price manager
+        current_price = self.env.price_manager.current_price
+        
+        # Re-calculate live PnL for each position for accurate logging
+        for index, pos in portfolio_df.iterrows():
+            is_call = pos['type'] == 'call'
+            atm_price = int(current_price / self.env._cfg.strike_distance + 0.5) * self.env._cfg.strike_distance
+            offset = round((pos['strike_price'] - atm_price) / self.env._cfg.strike_distance)
+            
+            vol = self.env.bs_manager.get_implied_volatility(offset, pos['type'], self.env.iv_bin_index)
+            greeks = self.env.bs_manager.get_all_greeks_and_price(current_price, pos['strike_price'], pos['days_to_expiry'], vol, is_call)
+            
+            mid_price = greeks['price']
+            current_premium = self.env.bs_manager.get_price_with_spread(mid_price, is_buy=(pos['direction'] == 'short'), bid_ask_spread_pct=self.env._cfg.bid_ask_spread_pct)
+            
+            pnl_multiplier = 1 if pos['direction'] == 'long' else -1
+            pnl = (current_premium - pos['entry_premium']) * self.env.portfolio_manager.lot_size * pnl_multiplier
+                
             serializable_portfolio.append({
                 'type': pos['type'], 'direction': pos['direction'],
                 'strike_price': round(pos['strike_price'], 2),
@@ -75,38 +93,46 @@ class LogReplayEnv(gym.Wrapper):
             })
 
         log_info = info if info is not None else {}
-        if info_override:
-            log_info.update(info_override)
-            
-        # <<< NEW: Calculate and add the last price change percentage
-        current_price = self.env.current_price
-        last_price_change_pct = ((current_price / self._last_price) - 1) * 100 if self._last_price else 0.0
-        self._last_price = current_price # Update for the next step
+        
+        # --- LOGIC FOR ILLEGAL ACTIONS ---
+        # Determine the final action name based on the 'was_illegal_action' flag from the env's info dict.
+        intended_action_name = self.env.indices_to_actions.get(action, 'N/A')
+        was_illegal = log_info.get('was_illegal_action', False)
+        final_action_name = 'HOLD' if was_illegal else intended_action_name
+        
+        # Assign the CORRECT final action name to the log.
+        log_info['action_name'] = final_action_name
+        
+        # Calculate last price change for the visualizer
+        last_price_change_pct = ((current_price / self._last_price) - 1) * 100 if self._last_price and self._last_price > 0 else 0.0
+        self._last_price = current_price
+        
+        # Populate the rest of the info dict by correctly accessing the managers
         log_info['last_price_change_pct'] = last_price_change_pct
-
         log_info['price'] = float(current_price)
         log_info['eval_episode_return'] = float(self._get_safe_pnl())
-        log_info['start_price'] = float(self.env.start_price)
-        log_info['volatility'] = float(getattr(self.env, 'garch_implied_vol', 0.0))
-        log_info['risk_free_rate'] = float(self.env.risk_free_rate)
-        log_info['market_regime'] = str(getattr(self.env, 'current_regime_name', 'N/A'))
+        log_info['start_price'] = float(self.env.price_manager.start_price)
+        log_info['volatility'] = float(self.env.price_manager.garch_implied_vol)
+        log_info['risk_free_rate'] = float(self.env.bs_manager.risk_free_rate)
+        log_info['market_regime'] = str(self.env.price_manager.current_regime_name)
         log_info['illegal_actions_in_episode'] = int(self.env.illegal_action_count)
 
         log_entry = {
             'step': int(self.env.current_step),
-            'day': int(self.env.current_step // self.env.steps_per_day + 1),
+            'day': int(self.env.current_step // self.env._cfg.steps_per_day + 1),
             'portfolio': serializable_portfolio,
-            'action': int(action) if action is not None else None,
+            'action': int(action) if action is not None else None, # Log the agent's raw action index
             'reward': float(reward) if reward is not None else None,
             'done': bool(done),
-            'info': log_info,
+            'info': log_info, # The info dict contains the true action name
         }
         
         self._episode_history.append(log_entry)
 
-    def _get_safe_pnl(self):
+    def _get_safe_pnl(self) -> float:
+        """Helper to get total PnL safely by calling the portfolio manager."""
         try:
-            return self.env._get_total_pnl()
+            return self.env.portfolio_manager.get_total_pnl(self.env.price_manager.current_price, self.env.iv_bin_index)
         except Exception:
             return 0.0
 
@@ -119,6 +145,7 @@ class LogReplayEnv(gym.Wrapper):
         except Exception as e:
             print(f"Error saving replay log: {e}")
 
+    # --- Static methods remain the same for framework compatibility ---
     @staticmethod
     def create_collector_env_cfg(cfg: dict) -> list:
         return OptionsZeroGameEnv.create_collector_env_cfg(cfg)

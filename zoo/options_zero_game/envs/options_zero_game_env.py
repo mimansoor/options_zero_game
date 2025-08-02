@@ -4,6 +4,7 @@
 import copy
 import math
 import random
+import time
 from typing import Tuple, Dict, Any, List
 
 import gymnasium as gym
@@ -143,6 +144,12 @@ class OptionsZeroGameEnv(gym.Env):
 
     def reset(self, seed: int = None, **kwargs) -> Dict:
         if seed is not None: self.seed(seed)
+        else:
+            # If the framework or user does not provide a seed, we create a
+            # random one. This is useful for standalone testing.
+            # During normal training, the framework will ALWAYS provide a seed.
+            new_seed = int(time.time())
+            self.seed(new_seed)
         
         self.price_manager.reset()
         self.portfolio_manager.reset()
@@ -178,7 +185,12 @@ class OptionsZeroGameEnv(gym.Env):
 
         obs = self._get_observation()
         action_mask = self._get_true_action_mask() if not self._cfg.ignore_legal_actions else np.ones(self.action_space_size, dtype=np.int8)
-        info = {'price': self.price_manager.current_price, 'eval_episode_return': self.final_eval_reward, 'illegal_actions_in_episode': self.illegal_action_count}
+        info = {
+            'price': self.price_manager.current_price,
+            'eval_episode_return': self.final_eval_reward,
+            'illegal_actions_in_episode': self.illegal_action_count,
+            'was_illegal_action': was_illegal_action
+        }
 
         return BaseEnvTimestep({'observation': obs, 'action_mask': action_mask, 'to_play': -1}, final_reward, terminated, info)
 
