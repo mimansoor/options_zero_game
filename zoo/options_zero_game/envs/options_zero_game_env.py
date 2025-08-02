@@ -219,7 +219,7 @@ class OptionsZeroGameEnv(gym.Env):
             # For a debit, initial_net_premium > 0. For a credit, initial_net_premium < 0.
             # The absolute value handles both cases correctly.
             initial_cost = abs(self.portfolio_manager.initial_net_premium * self.portfolio_manager.lot_size)
-            if current_pnl <= -(initial_cost * stop_loss_multiple_of_cost):
+            if current_pnl <= -(initial_cost * self._cfg.stop_loss_multiple_of_cost):
                 terminated_by_rule = True
 
         # Profit-taking rules are only checked if not already stopped out
