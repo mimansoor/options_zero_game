@@ -320,57 +320,33 @@ class OptionsZeroGameEnv(gym.Env):
         
     def _get_true_action_mask(self) -> np.ndarray:
         """
-        Calculates the complete, rule-based action mask.
-        SPECIAL RULE: On step 0, forces the agent to open a position from a
-        randomly selected family of strategies to ensure diverse exploration.
+        Calculates the complete, rule-based action mask with simplified logic.
+        This version correctly handles all game states.
         """
         action_mask = np.zeros(self.action_space_size, dtype=np.int8)
 
-        # --- DIVERSE EXPLORATION LOGIC FOR STEP 0 ---
-        if self.current_step == 0:
-            # 1. Define families of related strategies.
-            strategy_families = {
-                "SINGLE_LEG": lambda name: 'ATM' in name,
-                "STRADDLE": lambda name: 'STRADDLE' in name,
-                "STRANGLE": lambda name: 'STRANGLE' in name,
-                "VERTICAL": lambda name: 'VERTICAL' in name,
-                "IRON_FLY_CONDOR": lambda name: 'IRON' in name,
-                "BUTTERFLY": lambda name: 'FLY' in name and 'IRON' not in name,
-            }
-            
-            # 2. Randomly select one family for this episode.
-            chosen_family_name = random.choice(list(strategy_families.keys()))
-            is_in_family = strategy_families[chosen_family_name]
-
-            # 3. Build an action mask that only allows opening actions from that family.
-            for action_name, index in self.actions_to_indices.items():
-                if action_name.startswith('OPEN_') and is_in_family(action_name):
-                    action_mask[index] = 1
-            
-            # Failsafe: If the random choice results in an empty mask (e.g., a typo),
-            # default to allowing all open actions to prevent a crash.
-            if not np.any(action_mask):
-                for name, index in self.actions_to_indices.items():
-                    if name.startswith('OPEN_'): action_mask[index] = 1
-            
-            return action_mask
-            
-        # --- Standard logic for all subsequent steps (current_step > 0) ---
-        
-        action_mask[self.actions_to_indices['HOLD']] = 1
-
+        # --- Rule 1: Expiry Day is a special case that overrides everything else ---
         current_day = self.current_step // self._cfg.steps_per_day
         is_expiry_day = current_day >= (self._cfg.time_to_expiry_days - 1)
-        
+
         if is_expiry_day:
-            if not self.portfolio_manager.portfolio.empty:
+            if self.portfolio_manager.portfolio.empty:
+                # If portfolio is empty on expiry, the only thing to do is wait.
+                action_mask[self.actions_to_indices['HOLD']] = 1
+            else:
+                # If there are positions, the only legal actions are to close them.
                 action_mask[self.actions_to_indices['CLOSE_ALL']] = 1
                 for i in range(len(self.portfolio_manager.portfolio)):
                     if f'CLOSE_POSITION_{i}' in self.actions_to_indices:
                         action_mask[self.actions_to_indices[f'CLOSE_POSITION_{i}']] = 1
             return action_mask
 
+        # --- Rule 2: Main logic for all non-expiry days ---
+        
         if not self.portfolio_manager.portfolio.empty:
+            # Case A: A position is already open.
+            # The agent can hold, close, or roll/shift the position.
+            action_mask[self.actions_to_indices['HOLD']] = 1
             action_mask[self.actions_to_indices['CLOSE_ALL']] = 1
             for i in range(len(self.portfolio_manager.portfolio)):
                 if f'CLOSE_POSITION_{i}' in self.actions_to_indices:
@@ -379,7 +355,31 @@ class OptionsZeroGameEnv(gym.Env):
                      action_mask[self.actions_to_indices[f'SHIFT_UP_POS_{i}']] = 1
                 if f'SHIFT_DOWN_POS_{i}' in self.actions_to_indices:
                      action_mask[self.actions_to_indices[f'SHIFT_DOWN_POS_{i}']] = 1
-        
+        else:
+            # Case B: The portfolio is empty. The agent must open a position.
+            # This correctly handles BOTH step 0 and any later step where the portfolio is empty.
+            if self.current_step == 0:
+                # Sub-case B1: It's the first step. Force a DIVERSE opening. HOLD is illegal.
+                strategy_families = {
+                    "SINGLE_LEG": lambda name: 'ATM' in name, "STRADDLE": lambda name: 'STRADDLE' in name,
+                    "STRANGLE": lambda name: 'STRANGLE' in name, "VERTICAL": lambda name: 'VERTICAL' in name,
+                    "IRON_FLY_CONDOR": lambda name: 'IRON' in name, "BUTTERFLY": lambda name: 'FLY' in name and 'IRON' not in name,
+                }
+                chosen_family_name = random.choice(list(strategy_families.keys()))
+                is_in_family = strategy_families[chosen_family_name]
+                for action_name, index in self.actions_to_indices.items():
+                    if action_name.startswith('OPEN_') and is_in_family(action_name):
+                        action_mask[index] = 1
+                if not np.any(action_mask): # Failsafe
+                    for name, index in self.actions_to_indices.items():
+                        if name.startswith('OPEN_'): action_mask[index] = 1
+            else:
+                # Sub-case B2: It's a later step. Allow any opening, and also allow holding.
+                action_mask[self.actions_to_indices['HOLD']] = 1
+                for name, index in self.actions_to_indices.items():
+                    if name.startswith('OPEN_'):
+                        action_mask[index] = 1
+
         return action_mask
 
     def render(self, mode: str = 'human') -> None:
