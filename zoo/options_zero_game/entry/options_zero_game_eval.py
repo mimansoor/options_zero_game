@@ -8,6 +8,30 @@ import zoo.options_zero_game.envs.options_zero_game_env
 import zoo.options_zero_game.envs.log_replay_env
 
 if __name__ == "__main__":
+    import argparse
+    import time
+
+    # 1. Set up the argument parser
+    parser = argparse.ArgumentParser(description="Evaluate the Options-Zero-Game MuZero Agent.")
+    parser.add_argument(
+        '--seed', 
+        type=int, 
+        default=0, 
+        help="Master seed for the experiment. Defaults to 0 for reproducibility. "
+             "Use a negative value (e.g., -1) to generate a random seed based on the current time."
+    )
+    args = parser.parse_args()
+
+    # 2. Determine the final seed value
+    if args.seed < 0:
+        # User requested a random seed
+        final_seed = int(time.time())
+        print(f"--- Running with a RANDOM seed: {final_seed} ---")
+    else:
+        # User provided a specific seed or is using the default
+        final_seed = args.seed
+        print(f"--- Running with a FIXED seed: {final_seed} ---")
+
     # ==============================================================
     # 1. Set the path to your trained model checkpoint
     # ==============================================================
@@ -38,7 +62,7 @@ if __name__ == "__main__":
     # This function will now succeed because the underlying environment bugs are fixed.
     returns_mean, returns = eval_muzero(
         [main_config, create_config],
-        seed=50,  # Use a fixed seed for reproducible evaluations
+        seed=final_seed,  # Use a fixed seed for reproducible evaluations
         num_episodes_each_seed=1,
         print_seed_details=True,
         model_path=model_path

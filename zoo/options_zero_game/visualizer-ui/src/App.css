@@ -48,18 +48,26 @@
 }
 
 .metric-item {
+  flex: 1;
+  min-width: 120px;
+  padding: 10px; /* Reduced padding slightly */
+  border-radius: 8px;
+  background-color: #333;
+  margin: 5px;
   text-align: center;
 }
 
 .metric-item h2 {
-  margin: 0;
-  font-size: 1.2em;
+  margin-top: 0;
+  margin-bottom: 5px; /* Reduced margin */
+  font-size: 0.8em;   /* Slightly smaller label */
   color: #aaa;
+  text-transform: uppercase;
 }
 
 .metric-item p {
-  margin: 5px 0 0 0;
-  font-size: 1.8em;
+  margin: 0;
+  font-size: 1.25em; /* <<< THE MAIN FIX: Significantly smaller value text */
   font-weight: bold;
 }
 

@@ -20,6 +20,7 @@ from ding.utils import ENV_REGISTRY
 from .black_scholes_manager import BlackScholesManager
 from .price_action_manager import PriceActionManager
 from .portfolio_manager import PortfolioManager
+from ..entry.bias_meter import BiasMeter
 
 @ENV_REGISTRY.register('options_zero_game')
 class OptionsZeroGameEnv(gym.Env):
@@ -192,11 +193,18 @@ class OptionsZeroGameEnv(gym.Env):
         self.portfolio_manager.sort_portfolio()
         # --- END OF ACTION EXECUTION ---
 
+        # --- THE FIX ---
+        # 1. First, calculate the time decay based on the CURRENT step.
+        time_decay_days = self._calculate_time_decay()
+        
+        # 2. THEN, increment the step to prepare for the next state.
         self.current_step += 1
+
+        # 3. The rest of the logic proceeds as before.
         self.price_manager.step(self.current_step)
         self._update_realized_vol()
         
-        time_decay_days = self._calculate_time_decay()
+        # Now we apply the correctly calculated decay
         self.portfolio_manager.update_positions_after_time_step(time_decay_days, self.price_manager.current_price, self.iv_bin_index)
 
         # --- NEW, ROBUST TERMINATION AND REWARD LOGIC ---
@@ -253,15 +261,27 @@ class OptionsZeroGameEnv(gym.Env):
 
         obs = self._get_observation()
         action_mask = self._get_true_action_mask() if not self._cfg.ignore_legal_actions else np.ones(self.action_space_size, dtype=np.int8)
-       
+
+        # --- THE FIX: Add Bias Meter to the Info Dict ---
+
+        # 1. Get the current observation state (without the action mask)
+        current_obs_vector = obs[:self.market_and_portfolio_state_size]
+
+        # 2. Instantiate the meter to get the synthesized biases
+        meter = BiasMeter(current_obs_vector, self.OBS_IDX)
+
+        # 3. Create the standard info dictionary
         info = {
             'price': self.price_manager.current_price,
             'eval_episode_return': self.final_eval_reward,
             'illegal_actions_in_episode': self.illegal_action_count,
             'was_illegal_action': bool(was_illegal_action),
-            # Pass the name of the action that was ACTUALLY executed for the logger
-            'executed_action_name': final_action_name 
+            'executed_action_name': self.indices_to_actions.get(final_action, 'INVALID')
         }
+
+        # 4. Add the new bias information to the dictionary
+        info['directional_bias'] = meter.directional_bias
+        info['volatility_bias'] = meter.volatility_bias
 
         # If the episode is done, add the final duration to the info dict.
         if terminated:
@@ -388,10 +408,32 @@ class OptionsZeroGameEnv(gym.Env):
         return math.tanh(scaled_reward), raw_reward
 
     def _calculate_time_decay(self) -> float:
+        """
+        Calculates the total time decay in days for the current step.
+        This version correctly accounts for the Friday overnight period.
+        """
+        # The decay from the trading session itself
         time_decay = self.decay_per_step_trading
-        if (self.current_step + 1) % self._cfg.steps_per_day == 0:
-            day_of_week = (self.current_step // self._cfg.steps_per_day) % self.TRADING_DAYS_IN_WEEK
-            time_decay += self.decay_weekend if day_of_week == 4 else self.decay_overnight
+
+        # We only add overnight/weekend decay at the end of a trading day.
+        is_end_of_day = (self.current_step + 1) % self._cfg.steps_per_day == 0
+        if not is_end_of_day:
+            return time_decay # Return only the intra-day decay
+
+        # --- End of Day Logic ---
+        # Add the standard overnight decay for every day
+        time_decay += self.decay_overnight
+
+        # Determine the day of the week to check for a weekend
+        trading_day_index = self.current_step // self._cfg.steps_per_day
+        day_of_week = trading_day_index % self.TRADING_DAYS_IN_WEEK
+
+        is_friday = (day_of_week == 4)
+
+        # If it's Friday, add the additional 2 full days for the weekend
+        if is_friday:
+            time_decay += self.decay_weekend
+
         return time_decay
 
     def _update_realized_vol(self):
@@ -533,7 +575,17 @@ class OptionsZeroGameEnv(gym.Env):
         return action_mask
 
     def render(self, mode: str = 'human') -> None:
-        self.portfolio_manager.render(self.price_manager.current_price, self.current_step, self.iv_bin_index, self._cfg.steps_per_day)
+        total_pnl = self.portfolio_manager.get_total_pnl(self.price_manager.current_price, self.iv_bin_index)
+        print(f"\nStep: {self.current_step:04d} | Day: {self.current_step // self._cfg.steps_per_day + 1:02d} | Price: ${self.price_manager.current_price:9.2f} | Positions: {len(self.portfolio_manager.portfolio):1d} | Total PnL: ${total_pnl:9.2f}")
+        
+        if not self.portfolio_manager.portfolio.empty:
+            print(self.portfolio_manager.portfolio.to_string(index=False))
+
+        # --- NEW: Add the Bias Meter Summary ---
+        # We get the observation vector but slice off the action mask at the end.
+        current_obs_vector = self._get_observation()[:self.market_and_portfolio_state_size]
+        meter = BiasMeter(current_obs_vector, self.OBS_IDX)
+        meter.summary()
 
     # --- Properties and Static Methods ---
     @property

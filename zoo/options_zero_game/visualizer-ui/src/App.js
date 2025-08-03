@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import './App.css';
 
 // <<< MODIFIED: The MetricsDashboard now accepts and displays the price change
-function MetricsDashboard({ day, price, pnl, actionName, startPrice, marketRegime, illegalActions, lastPriceChangePct }) {
+function MetricsDashboard({ day, price, pnl, actionName, startPrice, marketRegime, illegalActions, lastPriceChangePct, directionalBias, volatilityBias }) {
   const pnlColor = pnl > 0 ? '#4CAF50' : pnl < 0 ? '#F44336' : 'white';
   const cumulativeChange = price && startPrice ? ((price / startPrice) - 1) * 100 : 0;
   const cumulativeChangeColor = cumulativeChange > 0 ? '#4CAF50' : cumulativeChange < 0 ? '#F44336' : 'white';
@@ -44,6 +44,14 @@ function MetricsDashboard({ day, price, pnl, actionName, startPrice, marketRegim
       <div className="metric-item">
         <h2>Illegal Attempts</h2>
         <p style={{color: illegalActions > 0 ? '#FFC107' : 'white'}}>{illegalActions}</p>
+      </div>
+      <div className="metric-item">
+        <h2>Directional Bias</h2>
+        <p style={{color: '#FFC107'}}>{directionalBias || 'N/A'}</p>
+      </div>
+      <div className="metric-item">
+        <h2>Volatility Bias</h2>
+        <p style={{color: '#03A9F4'}}>{volatilityBias || 'N/A'}</p>
       </div>
     </div>
   );
@@ -147,6 +155,8 @@ function App() {
                   marketRegime={stepData.info.market_regime}
                   illegalActions={stepData.info.illegal_actions_in_episode}
                   lastPriceChangePct={stepData.info.last_price_change_pct} // <<< Pass the new prop
+		  directionalBias={stepData.info.directional_bias}
+		  volatilityBias={stepData.info.volatility_bias}
                 />
                 <h2 style={{marginTop: '40px'}}>Positions at Step {currentStep}</h2>
                 <PortfolioTable portfolio={stepData.portfolio} />
