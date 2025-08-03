@@ -116,7 +116,7 @@ class BlackScholesManager:
         return binned_ivs
 
     def get_implied_volatility(self, offset: int, option_type: str, iv_bin_index: int) -> float:
-        clamped_offset = str(max(-5, min(5, offset)))
+        clamped_offset = str(max(-self.max_strike_offset, min(self.max_strike_offset, offset)))
         return self.iv_bins[option_type][clamped_offset][iv_bin_index]
 
     def get_all_greeks_and_price(self, S: float, K: float, T_days: float, sigma: float, is_call: bool) -> Dict:

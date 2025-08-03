@@ -53,14 +53,36 @@ class OptionsZeroGameEnv(gym.Env):
         initial_cash=500000.0,
         lot_size=75,
         max_positions=4,
-        strike_distance=100.0,
+        strike_distance=50.0,
+        max_strike_offset=20,
         bid_ask_spread_pct=0.002,
         
         # Black-Scholes Manager Config
         risk_free_rate=0.10,
+
         iv_skew_table={
-            'call': {'-5':(13.5,16.0),'-4':(13.3,15.8),'-3':(13.2,15.7),'-2':(13.1,15.5),'-1':(13.0,15.4),'0':(13.0,15.3),'1':(13.0,15.4),'2':(13.1,15.6),'3':(13.2,15.7),'4':(13.3,15.8),'5':(13.5,16.0)},
-            'put':  {'-5':(14.0,16.5),'-4':(13.8,16.3),'-3':(13.8,16.1),'-2':(13.6,16.0),'-1':(13.5,15.8),'0':(13.5,15.8),'1':(13.5,15.8),'2':(13.6,16.0),'3':(13.8,16.1),'4':(13.8,16.3),'5':(14.0,16.5)},
+            'call': {
+                '-20':(18.0,20.5),'-19':(17.8,20.3),'-18':(17.6,20.1),'-17':(17.4,19.9),'-16':(17.2,19.7),
+                '-15':(17.0,19.5),'-14':(16.8,19.3),'-13':(16.6,19.1),'-12':(16.4,18.9),'-11':(16.2,18.7),
+                '-10':(16.0,18.5),'-9':(15.8,18.3),'-8':(15.6,18.1),'-7':(15.4,17.9),'-6':(15.2,17.7),
+                '-5':(15.0,17.5),'-4':(14.8,17.3),'-3':(14.6,17.1),'-2':(14.4,16.9),'-1':(14.2,16.7),
+                '0': (14.0,16.5),
+                '1':(14.2,16.7),'2':(14.4,16.9),'3':(14.6,17.1),'4':(14.8,17.3),'5':(15.0,17.5),
+                '6':(15.2,17.7),'7':(15.4,17.9),'8':(15.6,18.1),'9':(15.8,18.3),'10':(16.0,18.5),
+                '11':(16.2,18.7),'12':(16.4,18.9),'13':(16.6,19.1),'14':(16.8,19.3),'15':(17.0,19.5),
+                '16':(17.2,19.7),'17':(17.4,19.9),'18':(17.6,20.1),'19':(17.8,20.3),'20':(18.0,20.5)
+            },
+            'put':  {
+                '-20':(18.5,21.0),'-19':(18.3,20.8),'-18':(18.1,20.6),'-17':(17.9,20.4),'-16':(17.7,20.2),
+                '-15':(17.5,20.0),'-14':(17.3,19.8),'-13':(17.1,19.6),'-12':(16.9,19.4),'-11':(16.7,19.2),
+                '-10':(16.5,19.0),'-9':(16.3,18.8),'-8':(16.1,18.6),'-7':(15.9,18.4),'-6':(15.7,18.2),
+                '-5':(15.5,18.0),'-4':(15.3,17.8),'-3':(15.1,17.6),'-2':(14.9,17.4),'-1':(14.7,17.2),
+                '0': (14.5,17.0),
+                '1':(14.7,17.2),'2':(14.9,17.4),'3':(15.1,17.6),'4':(15.3,17.8),'5':(15.5,18.0),
+                '6':(15.7,18.2),'7':(15.9,18.4),'8':(16.1,18.6),'9':(16.3,18.8),'10':(16.5,19.0),
+                '11':(16.7,19.2),'12':(16.9,19.4),'13':(17.1,19.6),'14':(17.3,19.8),'15':(17.5,20.0),
+                '16':(17.7,20.2),'17':(17.9,20.4),'18':(18.1,20.6),'19':(18.3,20.8),'20':(18.5,21.0)
+            },
         },
 
         # Reward and Penalty Config
@@ -173,16 +195,20 @@ class OptionsZeroGameEnv(gym.Env):
         return {'observation': obs, 'action_mask': action_mask, 'to_play': -1}
 
     def step(self, action: int) -> BaseEnvTimestep:
+        """
+        The complete, definitive step function incorporating all bug fixes and features.
+        """
+        # --- 1. Get State BEFORE Action ---
         equity_before = self.portfolio_manager.get_current_equity(self.price_manager.current_price, self.iv_bin_index)
         
-        # 1. Get the final action and the illegal flag from the handler
+        # --- 2. Determine and Execute the Final Action ---
         final_action, was_illegal_action = self._handle_action(action)
         
-        # 2. Execute the final action
         final_action_name = self.indices_to_actions.get(final_action, 'INVALID')
         if final_action_name.startswith('OPEN_'):
             current_day = self.current_step // self._cfg.steps_per_day
-            days_to_expiry = (self._cfg.time_to_expiry_days - current_day) * (self.TOTAL_DAYS_IN_WEEK / self.TRADING_DAYS_IN_WEEK)
+            days_to_expiry_float = (self._cfg.time_to_expiry_days - current_day) * (self.TOTAL_DAYS_IN_WEEK / self.TRADING_DAYS_IN_WEEK)
+            days_to_expiry = int(round(days_to_expiry_float))
             self.portfolio_manager.open_strategy(final_action_name, self.price_manager.current_price, self.iv_bin_index, self.current_step, days_to_expiry)
         elif final_action_name.startswith('CLOSE_POSITION_'):
             self.portfolio_manager.close_position(int(final_action_name.split('_')[-1]), self.price_manager.current_price, self.iv_bin_index)
@@ -191,67 +217,56 @@ class OptionsZeroGameEnv(gym.Env):
         elif final_action_name.startswith('SHIFT_'):
             self.portfolio_manager.shift_position(final_action_name, self.price_manager.current_price, self.iv_bin_index, self.current_step)
         self.portfolio_manager.sort_portfolio()
-        # --- END OF ACTION EXECUTION ---
 
-        # --- THE FIX ---
-        # 1. First, calculate the time decay based on the CURRENT step.
+        # --- 3. Advance Time and Market (CORRECT ORDER) ---
+        # First, calculate decay based on the CURRENT step.
         time_decay_days = self._calculate_time_decay()
-        
-        # 2. THEN, increment the step to prepare for the next state.
+        # THEN, increment the step counter.
         self.current_step += 1
-
-        # 3. The rest of the logic proceeds as before.
+        # Now, update the market to the new step.
         self.price_manager.step(self.current_step)
         self._update_realized_vol()
-        
-        # Now we apply the correctly calculated decay
+        # Finally, apply the correctly calculated decay to the portfolio.
         self.portfolio_manager.update_positions_after_time_step(time_decay_days, self.price_manager.current_price, self.iv_bin_index)
-
-        # --- NEW, ROBUST TERMINATION AND REWARD LOGIC ---
+        
+        # --- 4. Check for Episode Termination ---
         terminated_by_rule = False
-        final_shaped_reward_override = None # For the jackpot reward
+        final_shaped_reward_override = None
 
-        # Get the current PnL once for all checks
         current_pnl = self.portfolio_manager.get_total_pnl(self.price_manager.current_price, self.iv_bin_index)
-        # Rule 3: Stop-Loss Check (with multiplier)
+
+        # Stop-Loss Rule
         if self._cfg.use_stop_loss and not self.portfolio_manager.portfolio.empty:
-            # The stop-loss is triggered if the current PnL drops below the negative of the initial trade cost*multiplier.
             initial_cost = abs(self.portfolio_manager.initial_net_premium * self.portfolio_manager.lot_size)
             stop_loss_level = initial_cost * self._cfg.stop_loss_multiple_of_cost
             if current_pnl <= -stop_loss_level:
                 terminated_by_rule = True
+                final_shaped_reward_override = -1.0
 
-        # Profit-taking rules are only checked if not already stopped out
+        # Take-Profit Rules
         if not terminated_by_rule and not self.portfolio_manager.portfolio.empty:
-            # Rule 1: Fixed 3% Take-Profit Check
             if self._cfg.profit_target_pct > 0:
                 pnl_pct = (current_pnl / self.portfolio_manager.initial_cash) * 100
                 if pnl_pct >= self._cfg.profit_target_pct:
                     terminated_by_rule = True
-                    # Set the special jackpot reward
                     final_shaped_reward_override = self._cfg.jackpot_reward
-            
-            # Rule 2: Dynamic 50% Max Profit Check
             if not terminated_by_rule and self._cfg.strategy_profit_target_pct > 0:
                 max_profit = self.portfolio_manager.portfolio.iloc[0]['strategy_max_profit']
-                # Ensure max_profit is positive before checking
                 if max_profit > 0 and current_pnl >= max_profit * (self._cfg.strategy_profit_target_pct / 100):
                     terminated_by_rule = True
-        
-        # Final termination condition combines rules with the time limit
+                    final_shaped_reward_override = self._cfg.jackpot_reward
+
         terminated_by_time = self.current_step >= self.total_steps
         terminated = terminated_by_rule or terminated_by_time
         
         if terminated: 
             self.portfolio_manager.close_all_positions(self.price_manager.current_price, self.iv_bin_index)
 
+        # --- 5. Calculate Reward ---
         equity_after = self.portfolio_manager.get_current_equity(self.price_manager.current_price, self.iv_bin_index)
-        
-        # Calculate the standard shaped reward
         shaped_reward, raw_reward = self._calculate_shaped_reward(equity_before, equity_after)
         self.final_eval_reward += raw_reward
         
-        # Determine the final reward passed to the agent
         if final_shaped_reward_override is not None:
             final_reward = final_shaped_reward_override
         elif was_illegal_action:
@@ -259,6 +274,7 @@ class OptionsZeroGameEnv(gym.Env):
         else:
             final_reward = shaped_reward
 
+        # --- 6. Prepare and Return Timestep ---
         obs = self._get_observation()
         action_mask = self._get_true_action_mask() if not self._cfg.ignore_legal_actions else np.ones(self.action_space_size, dtype=np.int8)
 
@@ -271,17 +287,17 @@ class OptionsZeroGameEnv(gym.Env):
         meter = BiasMeter(current_obs_vector, self.OBS_IDX)
 
         # 3. Create the standard info dictionary
+        
         info = {
             'price': self.price_manager.current_price,
             'eval_episode_return': self.final_eval_reward,
             'illegal_actions_in_episode': self.illegal_action_count,
             'was_illegal_action': bool(was_illegal_action),
             'executed_action_name': self.indices_to_actions.get(final_action, 'INVALID')
+            # Add the bias information to the dictionary for logging
+            'directional_bias': meter.directional_bias,
+            'volatility_bias': meter.volatility_bias
         }
-
-        # 4. Add the new bias information to the dictionary
-        info['directional_bias'] = meter.directional_bias
-        info['volatility_bias'] = meter.volatility_bias
 
         # If the episode is done, add the final duration to the info dict.
         if terminated:
@@ -447,11 +463,16 @@ class OptionsZeroGameEnv(gym.Env):
 
     def _build_action_space(self) -> Dict[str, int]:
         actions = {'HOLD': 0}; i = 1
-        for offset in range(-5, 6):
+
+        # Use the configurable max_strike_offset instead of a hardcoded range.
+        for offset in range(-self._cfg.max_strike_offset, self._cfg.max_strike_offset + 1):
             sign = '+' if offset >= 0 else ''
+            # We can simplify the action name for offsets > 9, e.g., ATM+10 instead of ATM+ 10
+            offset_str = f"{sign}{offset}"
             for t in ['CALL', 'PUT']:
                 for d in ['LONG', 'SHORT']:
-                    actions[f'OPEN_{d}_{t}_ATM{sign}{offset}'] = i; i+=1
+                    actions[f'OPEN_{d}_{t}_ATM{offset_str}'] = i; i+=1
+
         for d in ['LONG', 'SHORT']:
             actions[f'OPEN_{d}_STRADDLE_ATM'] = i; i+=1
         for w in [1, 2]:

@@ -20,6 +20,7 @@ class PortfolioManager:
         self.strike_distance = cfg['strike_distance']
         self.undefined_risk_cap = self.initial_cash * 10
         self.strategy_name_to_id = cfg.get('strategy_name_to_id', {})
+        self.max_strike_offset = cfg['max_strike_offset']
         
         # Managers
         self.bs_manager = bs_manager
@@ -83,7 +84,7 @@ class PortfolioManager:
             vec[current_pos_idx + pos_idx_map['IS_OCCUPIED']] = 1.0
             vec[current_pos_idx + pos_idx_map['TYPE_NORM']] = 1.0 if is_call else -1.0
             vec[current_pos_idx + pos_idx_map['DIRECTION_NORM']] = direction_multiplier
-            vec[current_pos_idx + pos_idx_map['STRIKE_DIST_NORM']] = (pos['strike_price'] - atm_price) / (5 * self.strike_distance)
+            vec[current_pos_idx + pos_idx_map['STRIKE_DIST_NORM']] = (pos['strike_price'] - atm_price) / (self._cfg.max_strike_offset * self.strike_distance)
             vec[current_pos_idx + pos_idx_map['DAYS_HELD_NORM']] = (current_step - pos.get('entry_step', current_step)) / total_steps
 
             # --- THE FIX IS HERE ---
@@ -463,8 +464,7 @@ class PortfolioManager:
         smallest_delta_diff = float('inf')
         
         # Search a reasonable range of strikes around the at-the-money price
-        # e.g., +/- 15 strikes from ATM
-        for offset in range(-15, 16):
+        for offset in range(-self.max_strike_offset, self.max_strike_offset + 1):
             strike_price = atm_price + (offset * self.strike_distance)
             if strike_price <= 0: continue
 
