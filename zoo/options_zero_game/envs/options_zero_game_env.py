@@ -480,9 +480,29 @@ class OptionsZeroGameEnv(gym.Env):
             for i in range(len(self.portfolio_manager.portfolio)):
                 if f'CLOSE_POSITION_{i}' in self.actions_to_indices:
                     action_mask[self.actions_to_indices[f'CLOSE_POSITION_{i}']] = 1
-                if f'SHIFT_UP_POS_{i}' in self.actions_to_indices:
+
+                # --- THE FIX: ADD GUARD RAILS FOR SHIFT ACTIONS ---
+                original_pos = portfolio_df.iloc[i]
+
+                # Check legality of SHIFT UP
+                new_strike_up = original_pos['strike_price'] + self._cfg.strike_distance
+                is_conflict_up = False
+                # Check against all *other* positions in the portfolio
+                for j, other_pos in portfolio_df.drop(i).iterrows():
+                    if other_pos['strike_price'] == new_strike_up and other_pos['type'] == original_pos['type']:
+                        is_conflict_up = True
+                        break
+                if not is_conflict_up and f'SHIFT_UP_POS_{i}' in self.actions_to_indices:
                      action_mask[self.actions_to_indices[f'SHIFT_UP_POS_{i}']] = 1
-                if f'SHIFT_DOWN_POS_{i}' in self.actions_to_indices:
+
+                # Check legality of SHIFT DOWN
+                new_strike_down = original_pos['strike_price'] - self._cfg.strike_distance
+                is_conflict_down = False
+                for j, other_pos in portfolio_df.drop(i).iterrows():
+                    if other_pos['strike_price'] == new_strike_down and other_pos['type'] == original_pos['type']:
+                        is_conflict_down = True
+                        break
+                if not is_conflict_down and f'SHIFT_DOWN_POS_{i}' in self.actions_to_indices:
                      action_mask[self.actions_to_indices[f'SHIFT_DOWN_POS_{i}']] = 1
         else:
             # Case B: The portfolio is empty. The agent must open a position.
