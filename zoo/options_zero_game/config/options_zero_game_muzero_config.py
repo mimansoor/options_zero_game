@@ -7,14 +7,14 @@ from zoo.options_zero_game.envs.options_zero_game_env import OptionsZeroGameEnv
 # ==============================================================
 #                 Static Parameters
 # ==============================================================
-collector_env_num = 16
-evaluator_env_num = 8
+collector_env_num = 24
+evaluator_env_num = 24
 batch_size = 512
-num_simulations = 50
-update_per_collect = 500
+num_simulations = 100
+update_per_collect = 1000
 max_env_step = int(5e6)
 reanalyze_ratio = 0.
-n_episode = 64
+n_episode = 256
 
 market_regimes = [
     # Name, mu, omega, alpha, beta, overnight_vol_multiplier
@@ -160,7 +160,7 @@ create_config = dict(
         type='options_zero_game',
         import_names=['zoo.options_zero_game.envs.options_zero_game_env'],
     ),
-    env_manager=dict(type='base'),
+    env_manager=dict(type='subprocess'),
     policy=dict(
         type='muzero',
         import_names=['lzero.policy.muzero'],
