@@ -84,7 +84,7 @@ class PortfolioManager:
             vec[current_pos_idx + pos_idx_map['IS_OCCUPIED']] = 1.0
             vec[current_pos_idx + pos_idx_map['TYPE_NORM']] = 1.0 if is_call else -1.0
             vec[current_pos_idx + pos_idx_map['DIRECTION_NORM']] = direction_multiplier
-            vec[current_pos_idx + pos_idx_map['STRIKE_DIST_NORM']] = (pos['strike_price'] - atm_price) / (self._cfg.max_strike_offset * self.strike_distance)
+            vec[current_pos_idx + pos_idx_map['STRIKE_DIST_NORM']] = (pos['strike_price'] - atm_price) / (self.max_strike_offset * self.strike_distance)
             vec[current_pos_idx + pos_idx_map['DAYS_HELD_NORM']] = (current_step - pos.get('entry_step', current_step)) / total_steps
 
             # --- THE FIX IS HERE ---
