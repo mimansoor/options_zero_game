@@ -68,10 +68,10 @@ class OptionsZeroGameEnv(gym.Env):
         illegal_action_penalty=-1.0,
         
         # Advanced Trading Rules
-        profit_target_pct=5.0,
+        profit_target_pct=3.0,
         jackpot_reward=1.0,
-        strategy_profit_target_pct=25.0,
-        stop_loss_multiple_of_cost=3.0, # NEW: Added stop loss multiple
+        strategy_profit_target_pct=50.0,
+        stop_loss_multiple_of_cost=1.5, # NEW: Added stop loss multiple
         use_stop_loss=True,
         forced_opening_strategy_name=None,
         

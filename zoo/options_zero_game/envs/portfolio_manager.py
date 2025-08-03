@@ -449,62 +449,161 @@ class PortfolioManager:
         pnl['strategy_id'] = self.strategy_name_to_id.get(canonical_strategy_name, -1)
         self._execute_trades(legs, pnl)
 
-    def _open_iron_condor(self, action_name: str, current_price: float, iv_bin_index: int, current_step: int, days_to_expiry: float):
-        """Opens a four-leg iron condor strategy."""
-        if len(self.portfolio) > self.max_positions - 4: return
-        
-        direction = 'long' if 'LONG' in action_name else 'short'
+    def _find_strike_for_delta(
+        self, target_delta: float, option_type: str,
+        current_price: float, iv_bin_index: int, days_to_expiry: float
+    ) -> float:
+        """
+        Iteratively finds the strike price for an option that is closest to a target delta.
+        """
+        is_call = option_type == 'call'
         atm_price = int(current_price / self.strike_distance + 0.5) * self.strike_distance
         
-        # A long iron condor is a bull put spread and a bear call spread
-        # It's a short strangle + a wider long strangle
-        short_dir = 'short' if direction == 'long' else 'long'
-        long_dir = 'long' if direction == 'long' else 'short'
+        best_strike = atm_price
+        smallest_delta_diff = float('inf')
         
-        legs = [
-            {'type': 'put', 'direction': short_dir, 'strike_price': atm_price - self.strike_distance},
-            {'type': 'call', 'direction': short_dir, 'strike_price': atm_price + self.strike_distance},
-            {'type': 'put', 'direction': long_dir, 'strike_price': atm_price - (2 * self.strike_distance)},
-            {'type': 'call', 'direction': long_dir, 'strike_price': atm_price + (2 * self.strike_distance)}
-        ]
+        # Search a reasonable range of strikes around the at-the-money price
+        # e.g., +/- 15 strikes from ATM
+        for offset in range(-15, 16):
+            strike_price = atm_price + (offset * self.strike_distance)
+            if strike_price <= 0: continue
 
+            vol = self.bs_manager.get_implied_volatility(offset, option_type, iv_bin_index)
+            greeks = self.bs_manager.get_all_greeks_and_price(current_price, strike_price, days_to_expiry, vol, is_call)
+            
+            current_delta = greeks['delta']
+            delta_diff = abs(current_delta - target_delta)
+            
+            if delta_diff < smallest_delta_diff:
+                smallest_delta_diff = delta_diff
+                best_strike = strike_price
+                
+        return best_strike
+
+    def _open_iron_condor(self, action_name: str, current_price: float, iv_bin_index: int, current_step: int, days_to_expiry: float):
+        """
+        Opens a SHORT Iron Condor using the 30/15 Delta rule, with guard rails.
+        If dynamic strikes are invalid, it falls back to a fixed-width condor.
+        """
+        if len(self.portfolio) > self.max_positions - 4: return
+
+        direction = 'long' if 'LONG' in action_name else 'short'
+        legs = []
+
+        if direction == 'short':
+            # --- Attempt Dynamic Strike Selection ---
+            strike_short_put = self._find_strike_for_delta(-0.30, 'put', current_price, iv_bin_index, days_to_expiry)
+            strike_short_call = self._find_strike_for_delta(0.30, 'call', current_price, iv_bin_index, days_to_expiry)
+            strike_long_put = self._find_strike_for_delta(-0.15, 'put', current_price, iv_bin_index, days_to_expiry)
+            strike_long_call = self._find_strike_for_delta(0.15, 'call', current_price, iv_bin_index, days_to_expiry)
+
+            # --- THE GUARD RAIL ---
+            # Check if the strikes are logical (longs are outside the shorts).
+            are_strikes_valid = (strike_long_put < strike_short_put < strike_short_call < strike_long_call)
+
+            if are_strikes_valid:
+                # If valid, use the dynamically selected strikes.
+                legs = [
+                    {'type': 'put', 'direction': 'short', 'strike_price': strike_short_put},
+                    {'type': 'call', 'direction': 'short', 'strike_price': strike_short_call},
+                    {'type': 'put', 'direction': 'long', 'strike_price': strike_long_put},
+                    {'type': 'call', 'direction': 'long', 'strike_price': strike_long_call}
+                ]
+            else:
+                print(f"Warning: Dynamic delta strikes for Iron Condor were illogical. Falling back to fixed-width.")
+                # The `legs` list remains empty, triggering the fallback below.
+
+        # --- Fallback Logic for LONG condor or FAILED dynamic selection ---
+        if not legs:
+            atm_price = int(current_price / self.strike_distance + 0.5) * self.strike_distance
+            body_direction = 'long' if direction == 'long' else 'short'
+            wing_direction = 'short' if direction == 'long' else 'long'
+
+            legs = [
+                {'type': 'put', 'direction': body_direction, 'strike_price': atm_price - self.strike_distance},
+                {'type': 'call', 'direction': body_direction, 'strike_price': atm_price + self.strike_distance},
+                {'type': 'put', 'direction': wing_direction, 'strike_price': atm_price - (2 * self.strike_distance)},
+                {'type': 'call', 'direction': wing_direction, 'strike_price': atm_price + (2 * self.strike_distance)}
+            ]
+
+        # Finalize the trade
         for leg in legs:
             leg['entry_step'] = current_step
             leg['days_to_expiry'] = days_to_expiry
-            
+
         legs = self._price_legs(legs, current_price, iv_bin_index)
+        canonical_strategy_name = action_name.replace('OPEN_', '')
         pnl = self._calculate_strategy_pnl(legs, action_name)
-        pnl['strategy_id'] = self.strategy_name_to_id.get(action_name.replace('OPEN_',''), -1)
+        pnl['strategy_id'] = self.strategy_name_to_id.get(canonical_strategy_name, -1)
         self._execute_trades(legs, pnl)
 
     def _open_iron_fly(self, action_name: str, current_price: float, iv_bin_index: int, current_step: int, days_to_expiry: float):
-        """Opens a four-leg iron fly strategy."""
+        """
+        Opens a SHORT Iron Fly with dynamic wings, with guard rails.
+        If dynamic wings are too wide, it falls back to a fixed-width fly.
+        """
         if len(self.portfolio) > self.max_positions - 4: return
-
+        
         direction = 'long' if 'LONG' in action_name else 'short'
         atm_price = int(current_price / self.strike_distance + 0.5) * self.strike_distance
+        legs = []
 
-        # An iron fly is a short straddle + a long strangle
-        straddle_dir = 'short' if direction == 'long' else 'long'
-        strangle_dir = 'long' if direction == 'long' else 'short'
+        if direction == 'short':
+            # --- Attempt Dynamic Wing Placement ---
+            body_legs = [
+                {'type': 'call', 'direction': 'short', 'strike_price': atm_price, 'days_to_expiry': days_to_expiry},
+                {'type': 'put', 'direction': 'short', 'strike_price': atm_price, 'days_to_expiry': days_to_expiry}
+            ]
+            body_legs = self._price_legs(body_legs, current_price, iv_bin_index)
+            net_credit_received = body_legs[0]['entry_premium'] + body_legs[1]['entry_premium']
+            wing_width = round(net_credit_received / self.strike_distance) * self.strike_distance
+            
+            # --- THE GUARD RAIL ---
+            # Define a maximum sensible width, e.g., 5 strikes wide.
+            # This prevents the wings from being placed ridiculously far out.
+            MAX_SENSIBLE_WIDTH = 5 * self.strike_distance
+            
+            if self.strike_distance <= wing_width <= MAX_SENSIBLE_WIDTH:
+                # If width is valid, use the dynamically placed wings.
+                strike_long_put = atm_price - wing_width
+                strike_long_call = atm_price + wing_width
+                
+                wing_legs = [
+                    {'type': 'put', 'direction': 'long', 'strike_price': strike_long_put, 'days_to_expiry': days_to_expiry},
+                    {'type': 'call', 'direction': 'long', 'strike_price': strike_long_call, 'days_to_expiry': days_to_expiry}
+                ]
+                legs = body_legs + wing_legs
+                legs = self._price_legs(legs, current_price, iv_bin_index)
+            else:
+                print(f"Warning: Dynamic wing width ({wing_width}) for Iron Fly was out of bounds. Falling back to fixed-width.")
+                # The `legs` list remains empty, triggering the fallback below.
 
-        hedge_strike_call = atm_price + self.strike_distance # Width is typically 1
-        hedge_strike_put = atm_price - self.strike_distance
+        # --- Fallback Logic for LONG fly or FAILED dynamic selection ---
+        if not legs:
+            body_direction = 'long' if direction == 'long' else 'short'
+            wing_direction = 'short' if direction == 'long' else 'long'
+            wing_width = self.strike_distance # Safe, fixed width
+            
+            strike_long_put = atm_price - wing_width
+            strike_long_call = atm_price + wing_width
 
-        legs = [
-            {'type': 'call', 'direction': straddle_dir, 'strike_price': atm_price},
-            {'type': 'put', 'direction': straddle_dir, 'strike_price': atm_price},
-            {'type': 'call', 'direction': strangle_dir, 'strike_price': hedge_strike_call},
-            {'type': 'put', 'direction': strangle_dir, 'strike_price': hedge_strike_put}
-        ]
+            legs = [
+                {'type': 'call', 'direction': body_direction, 'strike_price': atm_price},
+                {'type': 'put', 'direction': body_direction, 'strike_price': atm_price},
+                {'type': 'call', 'direction': wing_direction, 'strike_price': strike_long_call},
+                {'type': 'put', 'direction': wing_direction, 'strike_price': strike_long_put}
+            ]
+            legs = self._price_legs(legs, current_price, iv_bin_index)
 
+        # Finalize the trade
         for leg in legs:
             leg['entry_step'] = current_step
-            leg['days_to_expiry'] = days_to_expiry
-
-        legs = self._price_legs(legs, current_price, iv_bin_index)
+            if 'days_to_expiry' not in leg:
+                leg['days_to_expiry'] = days_to_expiry
+        
+        canonical_strategy_name = action_name.replace('OPEN_', '')
         pnl = self._calculate_strategy_pnl(legs, action_name)
-        pnl['strategy_id'] = self.strategy_name_to_id.get(action_name.replace('OPEN_',''), -1)
+        pnl['strategy_id'] = self.strategy_name_to_id.get(canonical_strategy_name, -1)
         self._execute_trades(legs, pnl)
 
     def _open_vertical_spread(self, action_name: str, current_price: float, iv_bin_index: int, current_step: int, days_to_expiry: float):
