@@ -106,6 +106,7 @@ class BlackScholesManager:
     def __init__(self, cfg: Dict):
         self.risk_free_rate = cfg['risk_free_rate']
         self.iv_bins = self._discretize_iv_skew(cfg['iv_skew_table'])
+        self.max_strike_offset = cfg['max_strike_offset']
 
     def _discretize_iv_skew(self, skew_table: Dict, num_bins: int = 5) -> Dict:
         binned_ivs = {'call': {}, 'put': {}}
