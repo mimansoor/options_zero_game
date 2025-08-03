@@ -477,7 +477,8 @@ class OptionsZeroGameEnv(gym.Env):
             # The agent can hold, close, or roll/shift the position.
             action_mask[self.actions_to_indices['HOLD']] = 1
             action_mask[self.actions_to_indices['CLOSE_ALL']] = 1
-            for i in range(len(self.portfolio_manager.portfolio)):
+            portfolio_df = self.portfolio_manager.portfolio
+            for i in range(len(portfolio_df)):
                 if f'CLOSE_POSITION_{i}' in self.actions_to_indices:
                     action_mask[self.actions_to_indices[f'CLOSE_POSITION_{i}']] = 1
 
