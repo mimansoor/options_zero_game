@@ -52,8 +52,8 @@ class OptionsZeroGameEnv(gym.Env):
         initial_cash=500000.0,
         lot_size=75,
         max_positions=4,
-        strike_distance=50.0,
-        bid_ask_spread_pct=0.0015,
+        strike_distance=100.0,
+        bid_ask_spread_pct=0.002,
         
         # Black-Scholes Manager Config
         risk_free_rate=0.10,
