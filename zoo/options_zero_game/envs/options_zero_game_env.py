@@ -293,7 +293,7 @@ class OptionsZeroGameEnv(gym.Env):
             'eval_episode_return': self.final_eval_reward,
             'illegal_actions_in_episode': self.illegal_action_count,
             'was_illegal_action': bool(was_illegal_action),
-            'executed_action_name': self.indices_to_actions.get(final_action, 'INVALID')
+            'executed_action_name': self.indices_to_actions.get(final_action, 'INVALID'),
             # Add the bias information to the dictionary for logging
             'directional_bias': meter.directional_bias,
             'volatility_bias': meter.volatility_bias
