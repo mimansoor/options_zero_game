@@ -520,16 +520,15 @@ class PortfolioManager:
             wing_direction = 'short' if direction == 'long' else 'long'
 
             legs = [
-                {'type': 'put', 'direction': body_direction, 'strike_price': atm_price - self.strike_distance},
-                {'type': 'call', 'direction': body_direction, 'strike_price': atm_price + self.strike_distance},
-                {'type': 'put', 'direction': wing_direction, 'strike_price': atm_price - (2 * self.strike_distance)},
-                {'type': 'call', 'direction': wing_direction, 'strike_price': atm_price + (2 * self.strike_distance)}
+                {'type': 'put', 'direction': body_direction, 'strike_price': atm_price - self.strike_distance, 'days_to_expiry': days_to_expiry},
+                {'type': 'call', 'direction': body_direction, 'strike_price': atm_price + self.strike_distance, 'days_to_expiry': days_to_expiry},
+                {'type': 'put', 'direction': wing_direction, 'strike_price': atm_price - (2 * self.strike_distance), 'days_to_expiry': days_to_expiry},
+                {'type': 'call', 'direction': wing_direction, 'strike_price': atm_price + (2 * self.strike_distance), 'days_to_expiry': days_to_expiry}
             ]
 
         # Finalize the trade
         for leg in legs:
             leg['entry_step'] = current_step
-            leg['days_to_expiry'] = days_to_expiry
 
         legs = self._price_legs(legs, current_price, iv_bin_index)
         canonical_strategy_name = action_name.replace('OPEN_', '')
@@ -588,19 +587,17 @@ class PortfolioManager:
             strike_long_call = atm_price + wing_width
 
             legs = [
-                {'type': 'call', 'direction': body_direction, 'strike_price': atm_price},
-                {'type': 'put', 'direction': body_direction, 'strike_price': atm_price},
-                {'type': 'call', 'direction': wing_direction, 'strike_price': strike_long_call},
-                {'type': 'put', 'direction': wing_direction, 'strike_price': strike_long_put}
+                {'type': 'call', 'direction': body_direction, 'strike_price': atm_price, 'days_to_expiry': days_to_expiry},
+                {'type': 'put', 'direction': body_direction, 'strike_price': atm_price, 'days_to_expiry': days_to_expiry},
+                {'type': 'call', 'direction': wing_direction, 'strike_price': strike_long_call, 'days_to_expiry': days_to_expiry},
+                {'type': 'put', 'direction': wing_direction, 'strike_price': strike_long_put, 'days_to_expiry': days_to_expiry}
             ]
-            legs = self._price_legs(legs, current_price, iv_bin_index)
 
         # Finalize the trade
         for leg in legs:
             leg['entry_step'] = current_step
-            if 'days_to_expiry' not in leg:
-                leg['days_to_expiry'] = days_to_expiry
         
+        legs = self._price_legs(legs, current_price, iv_bin_index)
         canonical_strategy_name = action_name.replace('OPEN_', '')
         pnl = self._calculate_strategy_pnl(legs, action_name)
         pnl['strategy_id'] = self.strategy_name_to_id.get(canonical_strategy_name, -1)
