@@ -105,8 +105,6 @@ class BlackScholesManager:
     """
     def __init__(self, cfg: Dict):
         self.risk_free_rate = cfg['risk_free_rate']
-        self.iv_bins = self._discretize_iv_skew(cfg['iv_skew_table'])
-        self.max_strike_offset = cfg['max_strike_offset']
 
     def get_all_greeks_and_price(self, S: float, K: float, T_days: float, sigma: float, is_call: bool) -> Dict:
         T_annual = T_days / 365.25

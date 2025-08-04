@@ -9,7 +9,7 @@ from zoo.options_zero_game.envs.options_zero_game_env import OptionsZeroGameEnv
 # ==============================================================
 collector_env_num = 8
 evaluator_env_num = 8
-batch_size = 128
+batch_size = 256
 num_simulations = 25
 update_per_collect = 200
 max_env_step = int(5e6)
