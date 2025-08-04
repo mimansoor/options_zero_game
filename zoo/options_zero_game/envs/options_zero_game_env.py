@@ -34,6 +34,7 @@ class OptionsZeroGameEnv(gym.Env):
     config = dict(
         # Price Action Manager Config
         price_source='historical',
+        forced_historical_symbol=None,
         historical_data_path='zoo/options_zero_game/data/market_data_cache',
         market_regimes = [
             {'name': 'Stable_LowVol', 'mu': 0.00005, 'omega': 0.000005, 'alpha': 0.09, 'beta': 0.90, 'overnight_vol_multiplier': 1.5},

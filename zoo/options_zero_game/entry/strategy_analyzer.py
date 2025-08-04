@@ -71,6 +71,12 @@ if __name__ == "__main__":
     )
     parser.add_argument('-n', '--episodes', type=int, default=10, help="The number of episodes to run per strategy.")
     parser.add_argument('--model_path', type=str, default='./best_ckpt/ckpt_best.pth.tar', help="Path to the trained model checkpoint.")
+    parser.add_argument(
+        '--symbol',
+        type=str,
+        default=None,
+        help="Force evaluation on a specific historical symbol (e.g., 'SPY', 'TSLA'). Defaults to random."
+    )
     args = parser.parse_args()
 
     # Determine which strategies to run
@@ -96,6 +102,7 @@ if __name__ == "__main__":
             current_create_config = copy.deepcopy(create_config)
             
             current_main_config.env.forced_opening_strategy_name = strategy_name
+            current_main_config.env.forced_historical_symbol = args.symbol
             current_main_config.env.n_evaluator_episode = 1
             current_main_config.env.evaluator_env_num = 1
             

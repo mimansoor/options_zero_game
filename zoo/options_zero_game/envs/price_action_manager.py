@@ -11,6 +11,7 @@ class PriceActionManager:
     Can use either a GARCH(1,1) model or historical data.
     """
     def __init__(self, cfg: Dict, np_random: Any):
+        self._cfg = cfg
         self.price_source = cfg['price_source']
         self.historical_data_path = cfg['historical_data_path']
         self.market_regimes = cfg['market_regimes']
@@ -151,7 +152,19 @@ class PriceActionManager:
         return feature_vector.reshape(1, -1)
 
     def _generate_historical_price_path(self):
-        selected_ticker = random.choice(self._available_tickers)
+        forced_symbol = self._cfg.get('forced_historical_symbol')
+        if forced_symbol:
+            # Check if the requested symbol is valid
+            if forced_symbol in self._available_tickers:
+                selected_ticker = forced_symbol
+                print(f"(INFO) Using forced historical symbol: {selected_ticker}")
+            else:
+                # Fallback if the requested symbol doesn't exist in the cache
+                print(f"(WARNING) Forced symbol '{forced_symbol}' not found. Choosing a random ticker instead.")
+                selected_ticker = random.choice(self._available_tickers)
+        else:
+            selected_ticker = random.choice(self._available_tickers)
+
         file_path = os.path.join(self.historical_data_path, f"{selected_ticker}.csv")
         data = pd.read_csv(file_path, index_col='Date', parse_dates=True)
         data.rename(columns={data.columns[0]: 'Close'}, inplace=True)
