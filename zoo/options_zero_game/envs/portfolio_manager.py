@@ -12,7 +12,7 @@ class PortfolioManager:
     PnL calculations, and constructing the portfolio observation state.
     This class is stateful and is the heart of the trading logic.
     """
-    def __init__(self, cfg: Dict, bs_manager: BlackScholesManager):
+    def __init__(self, cfg: Dict, bs_manager: BlackScholesManager, market_rules_manager: MarketRulesManager):
         # Config
         self.initial_cash = cfg['initial_cash']
         self.lot_size = cfg['lot_size']
