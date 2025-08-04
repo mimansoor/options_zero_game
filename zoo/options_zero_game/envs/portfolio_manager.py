@@ -472,7 +472,7 @@ class PortfolioManager:
 
         parts = action_name.split('_')
         direction, width_str = parts[1], parts[4]
-        strike_offset = int(width_str) * self.strike_distance
+        strike_offset = int(width_str*2) * self.strike_distance
 
         atm_price = self.market_rules_manager.get_atm_price(current_price)
         
@@ -629,7 +629,7 @@ class PortfolioManager:
         
         parts = action_name.split('_')
         direction, option_type, width_str = parts[1], parts[3].lower(), parts[4]
-        width_in_price = int(width_str) * self.strike_distance
+        width_in_price = int(width_str*2) * self.strike_distance
         
         atm_price = self.market_rules_manager.get_atm_price(current_price)
         strike1 = atm_price
@@ -666,7 +666,7 @@ class PortfolioManager:
         parts = action_name.split('_')
         # e.g., from 'OPEN_LONG_CALL_FLY_1'
         direction, option_type, width_str = parts[1], parts[2].lower(), parts[4]
-        width_in_price = int(width_str) * self.strike_distance
+        width_in_price = int(width_str*2) * self.strike_distance
 
         atm_price = self.market_rules_manager.get_atm_price(current_price)
         strike_lower = atm_price - width_in_price
