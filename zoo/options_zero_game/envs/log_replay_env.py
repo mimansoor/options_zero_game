@@ -71,10 +71,10 @@ class LogReplayEnv(gym.Wrapper):
         # Re-calculate live PnL for each position for accurate logging
         for index, pos in portfolio_df.iterrows():
             is_call = pos['type'] == 'call'
-            atm_price = int(current_price / self.env._cfg.strike_distance + 0.5) * self.env._cfg.strike_distance
+            atm_price = self.env.market_rules_manager.get_atm_price(current_price)
             offset = round((pos['strike_price'] - atm_price) / self.env._cfg.strike_distance)
             
-            vol = self.env.bs_manager.get_implied_volatility(offset, pos['type'], self.env.iv_bin_index)
+            vol = self.env.market_rules_manager.get_implied_volatility(offset, pos['type'], self.env.iv_bin_index)
             greeks = self.env.bs_manager.get_all_greeks_and_price(current_price, pos['strike_price'], pos['days_to_expiry'], vol, is_call)
             
             mid_price = greeks['price']
