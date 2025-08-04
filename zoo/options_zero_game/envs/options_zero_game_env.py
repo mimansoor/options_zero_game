@@ -191,7 +191,7 @@ class OptionsZeroGameEnv(gym.Env):
         self.final_eval_reward = 0.0
         self.illegal_action_count = 0
         self.realized_vol_series = np.zeros(self.total_steps + 1, dtype=np.float32)
-        self.iv_bin_index = random.randint(0, len(self.bs_manager.iv_bins['call']['0']) - 1)
+        self.iv_bin_index = random.randint(0, len(self.market_rules_manager.iv_bins['call']['0']) - 1)
 
         obs = self._get_observation()
         action_mask = self._get_true_action_mask() if not self._cfg.ignore_legal_actions else np.ones(self.action_space_size, dtype=np.int8)
