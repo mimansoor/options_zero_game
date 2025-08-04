@@ -167,6 +167,44 @@ class PortfolioManager:
         while not self.portfolio.empty:
             self.close_position(-1, current_price, iv_bin_index)
 
+    def shift_to_atm(self, action_name: str, current_price: float, iv_bin_index: int, current_step: int):
+        """Closes an existing position and opens a new one at the current ATM strike."""
+        try:
+            parts = action_name.split('_')
+            position_index = int(parts[3])
+
+            if not (0 <= position_index < len(self.portfolio)):
+                return
+
+            original_pos = self.portfolio.iloc[position_index].copy()
+            days_to_expiry = original_pos['days_to_expiry']
+
+            # Calculate the new at-the-money strike price
+            new_atm_strike = int(current_price / self.strike_distance + 0.5) * self.strike_distance
+
+            # Close the old position first
+            self.close_position(position_index, current_price, iv_bin_index)
+
+            # Open the new single-leg position at the ATM strike
+            new_leg = {
+                'type': original_pos['type'],
+                'direction': original_pos['direction'],
+                'strike_price': new_atm_strike,
+                'entry_step': current_step,
+                'days_to_expiry': days_to_expiry,
+            }
+
+            legs = self._price_legs([new_leg], current_price, iv_bin_index)
+            # A shifted leg is treated as a new single-leg strategy
+            strategy_name = f"{legs[0]['direction'].upper()}_{legs[0]['type'].upper()}"
+            pnl = self._calculate_strategy_pnl(legs, strategy_name)
+            pnl['strategy_id'] = self.strategy_name_to_id.get(strategy_name, -1)
+            self._execute_trades(legs, pnl)
+
+        except (ValueError, IndexError) as e:
+            print(f"Warning: Could not parse shift_to_atm action '{action_name}'. Error: {e}")
+            return
+
     def shift_position(self, action_name: str, current_price: float, iv_bin_index: int, current_step: int):
         """Closes an existing position and opens a new one one strike away."""
         try:

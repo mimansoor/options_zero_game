@@ -216,6 +216,9 @@ class OptionsZeroGameEnv(gym.Env):
             self.portfolio_manager.close_all_positions(self.price_manager.current_price, self.iv_bin_index)
         elif final_action_name.startswith('SHIFT_'):
             self.portfolio_manager.shift_position(final_action_name, self.price_manager.current_price, self.iv_bin_index, self.current_step)
+        elif final_action_name.startswith('SHIFT_TO_ATM_'):
+            self.portfolio_manager.shift_to_atm(final_action_name, self.price_manager.current_price, self.iv_bin_index, self.current_step)
+
         self.portfolio_manager.sort_portfolio()
 
         # --- 3. Advance Time and Market (CORRECT ORDER) ---
@@ -494,6 +497,9 @@ class OptionsZeroGameEnv(gym.Env):
         for j in range(self._cfg.max_positions):
             actions[f'SHIFT_UP_POS_{j}'] = i; i+=1
             actions[f'SHIFT_DOWN_POS_{j}'] = i; i+=1
+        # New actions to re-center a position directly to the ATM strike.
+        for j in range(self._cfg.max_positions):
+            actions[f'SHIFT_TO_ATM_{j}'] = i; i+=1
         actions['CLOSE_ALL'] = i
         return actions
         
@@ -568,6 +574,23 @@ class OptionsZeroGameEnv(gym.Env):
                         break
                 if not is_conflict_down and f'SHIFT_DOWN_POS_{i}' in self.actions_to_indices:
                      action_mask[self.actions_to_indices[f'SHIFT_DOWN_POS_{i}']] = 1
+
+                # --- THE FIX: ADD GUARD RAILS FOR SHIFT_TO_ATM ---
+                if f'SHIFT_TO_ATM_{i}' in self.actions_to_indices:
+                    # Condition 1: The position must not already be at the money.
+                    is_not_atm = original_pos['strike_price'] != atm_price
+                    
+                    if is_not_atm:
+                        # Condition 2: The new ATM strike must not conflict with other positions.
+                        is_conflict_atm = False
+                        for j, other_pos in portfolio_df.drop(i).iterrows():
+                            if other_pos['strike_price'] == atm_price and other_pos['type'] == original_pos['type']:
+                                is_conflict_atm = True
+                                break
+                        
+                        # Only if both conditions are met is the action legal.
+                        if not is_conflict_atm:
+                            action_mask[self.actions_to_indices[f'SHIFT_TO_ATM_{i}']] = 1
         else:
             # Case B: The portfolio is empty. The agent must open a position.
             # This correctly handles BOTH step 0 and any later step where the portfolio is empty.
