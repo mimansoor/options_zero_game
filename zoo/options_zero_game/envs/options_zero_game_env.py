@@ -20,6 +20,7 @@ from ding.utils import ENV_REGISTRY
 from .black_scholes_manager import BlackScholesManager
 from .price_action_manager import PriceActionManager
 from .portfolio_manager import PortfolioManager
+from .market_rules_manager import MarketRulesManager
 from ..entry.bias_meter import BiasMeter
 
 @ENV_REGISTRY.register('options_zero_game')
@@ -119,7 +120,10 @@ class OptionsZeroGameEnv(gym.Env):
 
         self.bs_manager = BlackScholesManager(self._cfg)
         self.price_manager = PriceActionManager(self._cfg, self.np_random)
-        self.portfolio_manager = PortfolioManager(self._cfg, self.bs_manager)
+        self.market_rules_manager = MarketRulesManager(self._cfg)
+        
+        # The PortfolioManager needs references to the other managers
+        self.portfolio_manager = PortfolioManager(self._cfg, self.bs_manager, self.market_rules_manager)
         
         self.actions_to_indices = self._build_action_space()
         self.indices_to_actions = {v: k for k, v in self.actions_to_indices.items()}
@@ -546,7 +550,10 @@ class OptionsZeroGameEnv(gym.Env):
             # The agent can hold, close, or roll/shift the position.
             action_mask[self.actions_to_indices['HOLD']] = 1
             action_mask[self.actions_to_indices['CLOSE_ALL']] = 1
+
             portfolio_df = self.portfolio_manager.portfolio
+            atm_price = self.market_rules_manager.get_atm_price(self.price_manager.current_price)
+
             for i in range(len(portfolio_df)):
                 if f'CLOSE_POSITION_{i}' in self.actions_to_indices:
                     action_mask[self.actions_to_indices[f'CLOSE_POSITION_{i}']] = 1

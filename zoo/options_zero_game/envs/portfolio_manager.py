@@ -4,6 +4,7 @@ import numpy as np
 import math
 from typing import Dict, List, Any
 from .black_scholes_manager import BlackScholesManager, _numba_cdf
+from .market_rules_manager import MarketRulesManager
 
 class PortfolioManager:
     """
@@ -24,6 +25,7 @@ class PortfolioManager:
         
         # Managers
         self.bs_manager = bs_manager
+        self.market_rules_manager = market_rules_manager
 
         # State variables
         self.portfolio = pd.DataFrame()
@@ -68,7 +70,7 @@ class PortfolioManager:
 
     def get_positions_state(self, vec: np.ndarray, start_idx: int, state_size: int, pos_idx_map: Dict, current_price: float, iv_bin_index: int, current_step: int, total_steps: int):
         """Fills the provided numpy vector `vec` with the detailed state of each open position."""
-        atm_price = int(current_price / self.strike_distance + 0.5) * self.strike_distance
+        atm_price = self.market_rules_manager.get_atm_price(current_price)
         
         for i, pos in self.portfolio.iterrows():
             if i >= self.max_positions: break
@@ -77,7 +79,7 @@ class PortfolioManager:
             direction_multiplier = 1.0 if pos['direction'] == 'long' else -1.0
             
             offset = round((pos['strike_price'] - atm_price) / self.strike_distance)
-            vol = self.bs_manager.get_implied_volatility(offset, pos['type'], iv_bin_index)
+            vol = self.market_rules_manager.get_implied_volatility(offset, pos['type'], iv_bin_index)
             greeks = self.bs_manager.get_all_greeks_and_price(current_price, pos['strike_price'], pos['days_to_expiry'], vol, is_call)
             
             current_pos_idx = start_idx + i * state_size
@@ -107,9 +109,9 @@ class PortfolioManager:
         
         def pnl_calculator(row):
             is_call = row['type'] == 'call'
-            atm_price = int(current_price / self.strike_distance + 0.5) * self.strike_distance
+            atm_price = self.market_rules_manager.get_atm_price(current_price)
             offset = round((row['strike_price'] - atm_price) / self.strike_distance)
-            vol = self.bs_manager.get_implied_volatility(offset, row['type'], iv_bin_index)
+            vol = self.market_rules_manager.get_implied_volatility(offset, row['type'], iv_bin_index)
             greeks = self.bs_manager.get_all_greeks_and_price(current_price, row['strike_price'], row['days_to_expiry'], vol, is_call)
             
             current_premium = self.bs_manager.get_price_with_spread(greeks['price'], row['direction'] == 'short', self.bid_ask_spread_pct)
@@ -151,9 +153,9 @@ class PortfolioManager:
         # The rest of the method logic remains the same.
         pos_to_close = self.portfolio.iloc[position_index]
         is_call = pos_to_close['type'] == 'call'
-        atm_price = int(current_price / self.strike_distance + 0.5) * self.strike_distance
+        atm_price = self.market_rules_manager.get_atm_price(current_price)
         offset = round((pos_to_close['strike_price'] - atm_price) / self.strike_distance)
-        vol = self.bs_manager.get_implied_volatility(offset, pos_to_close['type'], iv_bin_index)
+        vol = self.market_rules_manager.get_implied_volatility(offset, pos_to_close['type'], iv_bin_index)
         greeks = self.bs_manager.get_all_greeks_and_price(current_price, pos_to_close['strike_price'], pos_to_close['days_to_expiry'], vol, is_call)
         
         is_short = pos_to_close['direction'] == 'short'
@@ -180,7 +182,7 @@ class PortfolioManager:
             days_to_expiry = original_pos['days_to_expiry']
 
             # Calculate the new at-the-money strike price
-            new_atm_strike = int(current_price / self.strike_distance + 0.5) * self.strike_distance
+            new_atm_strike = self.market_rules_manager.get_atm_price(current_price)
 
             # Close the old position first
             self.close_position(position_index, current_price, iv_bin_index)
@@ -257,7 +259,7 @@ class PortfolioManager:
         abs_max_loss = abs(max_loss)
         rr_ratio = abs(max_profit) / abs_max_loss if abs_max_loss > 1e-6 else 0.0
 
-        atm_price = int(current_price / self.strike_distance + 0.5) * self.strike_distance
+        atm_price = self.market_rules_manager.get_atm_price(current_price)
         
         all_greeks = []
         for _, pos in self.portfolio.iterrows():
@@ -266,7 +268,7 @@ class PortfolioManager:
             # --- THE FIX IS HERE ---
             # 1. We must calculate the volatility (sigma) for the leg first.
             offset = round((pos['strike_price'] - atm_price) / self.strike_distance)
-            vol = self.bs_manager.get_implied_volatility(offset, pos['type'], iv_bin_index)
+            vol = self.market_rules_manager.get_implied_volatility(offset, pos['type'], iv_bin_index)
             
             # 2. Now we can call the function with all 5 required arguments.
             greeks = self.bs_manager.get_all_greeks_and_price(
@@ -300,7 +302,7 @@ class PortfolioManager:
         if self.portfolio.empty:
             return {'delta_norm': 0.0, 'gamma_norm': 0.0, 'theta_norm': 0.0, 'vega_norm': 0.0}
 
-        atm_price = int(current_price / self.strike_distance + 0.5) * self.strike_distance
+        atm_price = self.market_rules_manager.get_atm_price(current_price)
 
         for _, pos in self.portfolio.iterrows():
             direction_multiplier = 1 if pos['direction'] == 'long' else -1
@@ -309,7 +311,7 @@ class PortfolioManager:
             # --- THE FIX IS HERE ---
             # 1. We must first calculate sigma (implied volatility) for the leg.
             offset = round((pos['strike_price'] - atm_price) / self.strike_distance)
-            vol = self.bs_manager.get_implied_volatility(offset, pos['type'], iv_bin_index)
+            vol = self.market_rules_manager.get_implied_volatility(offset, pos['type'], iv_bin_index)
             
             # 2. Now we can call get_all_greeks_and_price with all 5 required arguments.
             greeks = self.bs_manager.get_all_greeks_and_price(
@@ -381,10 +383,10 @@ class PortfolioManager:
         self.portfolio = pd.concat([self.portfolio, new_positions_df], ignore_index=True)
 
     def _price_legs(self, legs: List[Dict], current_price: float, iv_bin_index: int) -> List[Dict]:
-        atm_price = int(current_price / self.strike_distance + 0.5) * self.strike_distance
+        atm_price = self.market_rules_manager.get_atm_price(current_price)
         for leg in legs:
             offset = round((leg['strike_price'] - atm_price) / self.strike_distance)
-            vol = self.bs_manager.get_implied_volatility(offset, leg['type'], iv_bin_index)
+            vol = self.market_rules_manager.get_implied_volatility(offset, leg['type'], iv_bin_index)
             greeks = self.bs_manager.get_all_greeks_and_price(current_price, leg['strike_price'], leg['days_to_expiry'], vol, leg['type'] == 'call')
             leg['entry_premium'] = self.bs_manager.get_price_with_spread(greeks['price'], is_buy=(leg['direction'] == 'long'), bid_ask_spread_pct=self.bid_ask_spread_pct)
         return legs
@@ -441,7 +443,7 @@ class PortfolioManager:
         if len(self.portfolio) >= self.max_positions: return
         _, direction, type, strike_str = action_name.split('_')
         offset = int(strike_str.replace('ATM', ''))
-        atm_price = int(current_price / self.strike_distance + 0.5) * self.strike_distance
+        atm_price = self.market_rules_manager.get_atm_price(current_price)
         strike_price = atm_price + (offset * self.strike_distance)
         legs = [{'type': type.lower(), 'direction': direction.lower(), 'strike_price': strike_price, 'entry_step': current_step, 'days_to_expiry': days_to_expiry}]
         legs = self._price_legs(legs, current_price, iv_bin_index)
@@ -454,7 +456,7 @@ class PortfolioManager:
         assert len(self.portfolio) <= self.max_positions - 2, "Illegal attempt to open a straddle when there are less than two positions available."
         if len(self.portfolio) > self.max_positions - 2: return
         direction = 'long' if 'LONG' in action_name else 'short'
-        atm_price = int(current_price / self.strike_distance + 0.5) * self.strike_distance
+        atm_price = self.market_rules_manager.get_atm_price(current_price)
         legs = [{'type': 'call', 'direction': direction, 'strike_price': atm_price, 'entry_step': current_step, 'days_to_expiry': days_to_expiry},
                 {'type': 'put', 'direction': direction, 'strike_price': atm_price, 'entry_step': current_step, 'days_to_expiry': days_to_expiry}]
         legs = self._price_legs(legs, current_price, iv_bin_index)
@@ -472,7 +474,7 @@ class PortfolioManager:
         direction, width_str = parts[1], parts[4]
         strike_offset = int(width_str) * self.strike_distance
 
-        atm_price = int(current_price / self.strike_distance + 0.5) * self.strike_distance
+        atm_price = self.market_rules_manager.get_atm_price(current_price)
         
         legs = [
             {'type': 'call', 'direction': direction.lower(), 'strike_price': atm_price + strike_offset, 'entry_step': current_step, 'days_to_expiry': days_to_expiry},
@@ -496,7 +498,7 @@ class PortfolioManager:
         Iteratively finds the strike price for an option that is closest to a target delta.
         """
         is_call = option_type == 'call'
-        atm_price = int(current_price / self.strike_distance + 0.5) * self.strike_distance
+        atm_price = self.market_rules_manager.get_atm_price(current_price)
         
         best_strike = atm_price
         smallest_delta_diff = float('inf')
@@ -506,7 +508,7 @@ class PortfolioManager:
             strike_price = atm_price + (offset * self.strike_distance)
             if strike_price <= 0: continue
 
-            vol = self.bs_manager.get_implied_volatility(offset, option_type, iv_bin_index)
+            vol = self.market_rules_manager.get_implied_volatility(offset, option_type, iv_bin_index)
             greeks = self.bs_manager.get_all_greeks_and_price(current_price, strike_price, days_to_expiry, vol, is_call)
             
             current_delta = greeks['delta']
@@ -543,7 +545,7 @@ class PortfolioManager:
                 print(f"Warning: Dynamic delta strikes for Iron Condor were illogical. Falling back to fixed-width.")
 
         if not legs:
-            atm_price = int(current_price / self.strike_distance + 0.5) * self.strike_distance
+            atm_price = self.market_rules_manager.get_atm_price(current_price)
             body_direction = 'long' if direction == 'long' else 'short'
             wing_direction = 'short' if direction == 'long' else 'long'
             
@@ -567,7 +569,7 @@ class PortfolioManager:
         if len(self.portfolio) > self.max_positions - 4: return
         
         direction = 'long' if 'LONG' in action_name else 'short'
-        atm_price = int(current_price / self.strike_distance + 0.5) * self.strike_distance
+        atm_price = self.market_rules_manager.get_atm_price(current_price)
         legs = []
 
         if direction == 'short':
@@ -629,7 +631,7 @@ class PortfolioManager:
         direction, option_type, width_str = parts[1], parts[3].lower(), parts[4]
         width_in_price = int(width_str) * self.strike_distance
         
-        atm_price = int(current_price / self.strike_distance + 0.5) * self.strike_distance
+        atm_price = self.market_rules_manager.get_atm_price(current_price)
         strike1 = atm_price
         strike2 = atm_price + width_in_price if option_type == 'call' else atm_price - width_in_price
 
@@ -666,7 +668,7 @@ class PortfolioManager:
         direction, option_type, width_str = parts[1], parts[2].lower(), parts[4]
         width_in_price = int(width_str) * self.strike_distance
 
-        atm_price = int(current_price / self.strike_distance + 0.5) * self.strike_distance
+        atm_price = self.market_rules_manager.get_atm_price(current_price)
         strike_lower = atm_price - width_in_price
         strike_middle = atm_price
         strike_upper = atm_price + width_in_price

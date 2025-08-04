@@ -108,18 +108,6 @@ class BlackScholesManager:
         self.iv_bins = self._discretize_iv_skew(cfg['iv_skew_table'])
         self.max_strike_offset = cfg['max_strike_offset']
 
-    def _discretize_iv_skew(self, skew_table: Dict, num_bins: int = 5) -> Dict:
-        binned_ivs = {'call': {}, 'put': {}}
-        for option_type, table in skew_table.items():
-            for offset_str, iv_range in table.items():
-                min_iv, max_iv = iv_range
-                binned_ivs[option_type][offset_str] = np.linspace(min_iv, max_iv, num_bins, dtype=np.float32) / 100.0
-        return binned_ivs
-
-    def get_implied_volatility(self, offset: int, option_type: str, iv_bin_index: int) -> float:
-        clamped_offset = str(max(-self.max_strike_offset, min(self.max_strike_offset, offset)))
-        return self.iv_bins[option_type][clamped_offset][iv_bin_index]
-
     def get_all_greeks_and_price(self, S: float, K: float, T_days: float, sigma: float, is_call: bool) -> Dict:
         T_annual = T_days / 365.25
 
