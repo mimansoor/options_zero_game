@@ -90,7 +90,7 @@ options_zero_game_muzero_config = dict(
         n_evaluator_episode=evaluator_env_num,
         manager=dict(shared_memory=False, ),
         # Pass all necessary parameters to the environment
-        price_source='historical',
+        price_source='mixed',
         historical_data_path='zoo/options_zero_game/data/market_data_cache',
         drawdown_penalty_weight=0.1,
         market_regimes=market_regimes,
