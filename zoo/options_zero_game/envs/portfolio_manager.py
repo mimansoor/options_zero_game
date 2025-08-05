@@ -239,8 +239,8 @@ class PortfolioManager:
 
     def add_hedge(self, action_name: str, current_price: float, iv_bin_index: int, current_step: int):
         """
-        Adds a protective leg to an existing naked position, dynamically transforming
-        the entire underlying strategy (e.g., Short Straddle -> Broken Wing Fly -> Iron Fly).
+        Adds a protective leg to a naked position using advanced, context-aware logic.
+        This version correctly uses the MarketRulesManager to determine the ATM strike.
         """
         try:
             position_index = int(action_name.split('_')[-1])
@@ -248,58 +248,68 @@ class PortfolioManager:
 
             naked_leg_to_hedge = self.portfolio.iloc[position_index].copy()
             
-            # --- VALIDATION ---
-            # Action is only valid if the target leg is naked and there's space.
             if naked_leg_to_hedge['is_hedged'] or len(self.portfolio) >= self.max_positions:
                 return
             
-            # This is the key: identify the original strategy we are modifying.
             original_creation_id = naked_leg_to_hedge['creation_id']
 
-            # --- 1. Define the New Hedge Leg ---
-            hedge_direction = 'long'
+            # --- 1. Determine Hedge Direction and Type ---
             hedge_type = naked_leg_to_hedge['type']
+            is_naked_leg_short = naked_leg_to_hedge['direction'] == 'short'
+            hedge_direction = 'long' if is_naked_leg_short else 'short'
             
-            if hedge_type == 'call':
-                hedge_strike = naked_leg_to_hedge['strike_price'] + self.strike_distance
-            else:
-                hedge_strike = naked_leg_to_hedge['strike_price'] - self.strike_distance
+            # --- 2. DYNAMIC HEDGE PLACEMENT LOGIC ---
+            naked_strike = naked_leg_to_hedge['strike_price']
+            
+            # Get the ATM strike from the single source of truth >>>
+            atm_strike = self.market_rules_manager.get_atm_price(current_price)
+            
+            # Determine if the naked leg is ITM
+            is_itm = False
+            if hedge_type == 'call' and current_price > naked_strike: is_itm = True
+            if hedge_type == 'put' and current_price < naked_strike: is_itm = True
 
+            if is_itm:
+                # ITM Rule: Place the hedge defensively near the current ATM strike.
+                if hedge_type == 'call':
+                    hedge_strike = atm_strike + self.strike_distance
+                else: # Put
+                    hedge_strike = atm_strike - self.strike_distance
+            else:
+                # OTM Rule: Create a standard 2-strike wide spread from the naked leg.
+                hedge_width = self.strike_distance * 2
+                if hedge_type == 'call':
+                    hedge_strike = naked_strike + hedge_width
+                else: # Put
+                    hedge_strike = naked_strike - hedge_width
+
+            # --- 3. Create and price the full strategy ---
             hedge_leg = {
                 'type': hedge_type, 'direction': hedge_direction, 'strike_price': hedge_strike,
                 'entry_step': current_step, 'days_to_expiry': naked_leg_to_hedge['days_to_expiry']
             }
             
-            # --- 2. Re-assemble the Full, Transformed Strategy ---
-            # Get all legs from the original strategy
-            original_strategy_legs = [row.to_dict() for index, row in self.portfolio.iterrows() if row['creation_id'] == original_creation_id]
-            
-            # Add the new hedge
+            original_strategy_legs = [row.to_dict() for _, row in self.portfolio.iterrows() if row['creation_id'] == original_creation_id]
             transformed_strategy_legs = original_strategy_legs + [hedge_leg]
-            
-            # Price only the new leg (the others are already priced)
             transformed_strategy_legs = self._price_legs(transformed_strategy_legs, current_price, iv_bin_index)
             
-            # --- 3. Determine the New Strategy Name and PnL ---
-            # We need a simple heuristic to identify the new, combined strategy name.
-            # This can be made more sophisticated later if needed.
+            # --- 4. Determine New Strategy Name and PnL ---
             num_legs = len(transformed_strategy_legs)
-            if num_legs == 2: new_strategy_name = f"SHORT_VERTICAL_{hedge_type.upper()}_1"
-            elif num_legs == 4: new_strategy_name = "SHORT_IRON_FLY" # Heuristic
-            else: new_strategy_name = "CUSTOM_HEDGED" # Fallback for 3-leg states
+            new_strategy_name = "CUSTOM_HEDGED" # Default
+            if num_legs == 2:
+                net_premium = sum(leg['entry_premium'] * (1 if leg['direction'] == 'long' else -1) for leg in transformed_strategy_legs)
+                spread_direction = "LONG" if net_premium > 0 else "SHORT"
+                new_strategy_name = f"{spread_direction}_VERTICAL_{hedge_type.upper()}_1"
+            elif num_legs == 4:
+                new_strategy_name = "SHORT_IRON_FLY"
             
             pnl = self._calculate_strategy_pnl(transformed_strategy_legs, new_strategy_name)
             pnl['strategy_id'] = self.strategy_name_to_id.get(new_strategy_name, -1)
             
-            # --- 4. Update the Portfolio Atomically ---
-            # First, remove ALL legs of the original strategy.
+            # --- 5. Update Portfolio Atomically ---
             self.portfolio = self.portfolio[self.portfolio['creation_id'] != original_creation_id].reset_index(drop=True)
-            
-            # Then, re-add all legs (original + new hedge) with the UPDATED strategy info.
-            # We use the original creation_id to keep them linked.
             for leg in transformed_strategy_legs:
                 leg['creation_id'] = original_creation_id
-                
             self._execute_trades(transformed_strategy_legs, pnl)
             
         except (ValueError, IndexError) as e:
@@ -533,25 +543,33 @@ class PortfolioManager:
         return legs
 
     def _calculate_strategy_pnl(self, legs: List[Dict], strategy_name: str) -> Dict:
+        """
+        Calculates the max profit and loss. This version correctly classifies ALL
+        single-leg options as having an undefined risk component.
+        """
         if not legs: return {'max_profit': 0.0, 'max_loss': 0.0}
 
-        # Single leg
         if len(legs) == 1:
             leg = legs[0]
             entry_premium_total = leg['entry_premium'] * self.lot_size
+            
             if leg['direction'] == 'long':
+                # A long option's risk is defined by the premium paid.
                 max_loss = -entry_premium_total
-                max_profit = self.undefined_risk_cap if leg['type'] == 'call' else (leg['strike_price'] * self.lot_size) - entry_premium_total
+                # A long option's potential profit is considered undefined.
+                max_profit = self.undefined_risk_cap 
             else: # short
+                # A short option's potential profit is defined by the premium received.
                 max_profit = entry_premium_total
-                max_loss = -self.undefined_risk_cap if leg['type'] == 'call' else -((leg['strike_price'] * self.lot_size) - entry_premium_total)
+                # A short option's risk is considered undefined.
+                max_loss = -self.undefined_risk_cap
+                
             return {'max_profit': max_profit, 'max_loss': max_loss}
 
-        # Multi-leg
+        # --- Multi-leg logic remains the same and is correct ---
         net_premium = sum(leg['entry_premium'] * (1 if leg['direction'] == 'long' else -1) for leg in legs)
         is_debit_spread = net_premium > 0
 
-        # Undefined Risk (Straddle/Strangle)
         if 'STRADDLE' in strategy_name or 'STRANGLE' in strategy_name:
             if is_debit_spread: # Long
                 max_loss = -net_premium * self.lot_size
@@ -560,19 +578,17 @@ class PortfolioManager:
                 max_profit = -net_premium * self.lot_size
                 max_loss = -self.undefined_risk_cap
             return {'max_profit': max_profit, 'max_loss': max_loss}
-
-        # Defined Risk (Verticals, Condors, Flies, Butterflies)
-        else:
+        else: # Defined Risk (Verticals, Condors, Flies, Butterflies)
             call_strikes = sorted([leg['strike_price'] for leg in legs if leg['type'] == 'call'])
             put_strikes = sorted([leg['strike_price'] for leg in legs if leg['type'] == 'put'])
             call_width = (call_strikes[-1] - call_strikes[0]) if len(call_strikes) > 1 else 0
             put_width = (put_strikes[-1] - put_strikes[0]) if len(put_strikes) > 1 else 0
             max_width = max(call_width, put_width) * self.lot_size
 
-            if is_debit_spread: # Long positions
+            if is_debit_spread:
                 max_loss = -net_premium * self.lot_size
                 max_profit = max_width + max_loss 
-            else: # Short positions
+            else:
                 max_profit = -net_premium * self.lot_size
                 max_loss = -max_width + max_profit
             return {'max_profit': max_profit, 'max_loss': max_loss}
