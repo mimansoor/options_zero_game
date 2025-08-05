@@ -481,12 +481,16 @@ class PortfolioManager:
 
     def _execute_trades(self, trades_to_execute: List[Dict], strategy_pnl: Dict):
         """
-        Adds a list of trade legs to the portfolio after a final assertion check.
+        The definitive method to add new legs to the portfolio. It correctly:
+        1. Asserts the strategy_id is valid.
+        2. Calculates and stores the initial net premium for the stop-loss rule.
+        3. Adds all necessary keys before creating the DataFrame.
+        4. Updates the hedge status correctly.
         """
         if not trades_to_execute: return
-
+        
         strategy_id = strategy_pnl.get('strategy_id', -1)
-
+        
         # --- Defensive Assertion ---
         # Fails fast if a strategy name was not found in the ID dictionary.
         # This prevents the agent from training on corrupted/meaningless data and
@@ -497,23 +501,26 @@ class PortfolioManager:
             f"  - The PnL object that caused the failure was: {strategy_pnl}\n"
             f"  - Please check the logic in the `_open_*` method that was called and ensure the derived strategy name is correct.\n"
         )
-
-        # --- NEW LOGIC: Calculate and store the net premium ---
-        # This is the initial debit (positive) or credit (negative) of the trade.
+        
+        # 1. First, calculate and store the net premium of the incoming trade.
         self.initial_net_premium = sum(
             leg['entry_premium'] * (1 if leg['direction'] == 'long' else -1)
             for leg in trades_to_execute
         )
-
+        
+        # 2. Then, prepare all legs for DataFrame creation.
         for trade in trades_to_execute:
+            trade['is_hedged'] = False # Default placeholder
             trade['creation_id'] = self.next_creation_id
             self.next_creation_id += 1
             trade['strategy_id'] = strategy_id
             trade['strategy_max_profit'] = strategy_pnl.get('max_profit', 0.0)
             trade['strategy_max_loss'] = strategy_pnl.get('max_loss', 0.0)
-
+        
         new_positions_df = pd.DataFrame(trades_to_execute).astype(self.portfolio_dtypes)
         self.portfolio = pd.concat([self.portfolio, new_positions_df], ignore_index=True)
+        
+        # 3. Finally, update the hedge status for the new, complete portfolio.
         self._update_hedge_status()
 
     def _price_legs(self, legs: List[Dict], current_price: float, iv_bin_index: int) -> List[Dict]:
