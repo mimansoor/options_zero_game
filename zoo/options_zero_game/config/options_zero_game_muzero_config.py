@@ -3,6 +3,7 @@ from easydict import EasyDict
 
 # Import the environment to get its version and default parameters
 from zoo.options_zero_game.envs.options_zero_game_env import OptionsZeroGameEnv
+import os
 
 # ==============================================================
 #                 Static Parameters
@@ -80,8 +81,15 @@ strategy_name_to_id = {
 # ==============================================================
 #           Main Config (The Parameters)
 # ==============================================================
+# This makes the script runnable from anywhere.
+script_dir = os.path.dirname(os.path.abspath(__file__))
+project_root = os.path.join(script_dir, '..', '..', '..') # Go up 3 levels from /config
+experiments_dir = os.path.join(project_root, 'experiments')
+os.makedirs(experiments_dir, exist_ok=True) # Create the folder if it doesn't exist
+exp_name_base = f'options_zero_game_muzero_final_agent_v{OptionsZeroGameEnv.VERSION}_ns{num_simulations}_upc{update_per_collect}_bs{batch_size}'
+
 options_zero_game_muzero_config = dict(
-    exp_name=f'options_zero_game_muzero_final_agent_v{OptionsZeroGameEnv.VERSION}_ns{num_simulations}_upc{update_per_collect}_bs{batch_size}',
+    exp_name=os.path.join(experiments_dir, exp_name_base),
     env=dict(
         env_id='OptionsZeroGame-v0',
         env_version=OptionsZeroGameEnv.VERSION,
