@@ -90,6 +90,7 @@ class LogReplayEnv(gym.Wrapper):
                 'days_to_expiry': round(pos['days_to_expiry'], 2),
                 'current_premium': round(current_premium, 2),
                 'live_pnl': round(pnl, 2),
+                'hedge_status': "Hedged" if pos['is_hedged'] else "Naked",
             })
 
         log_info = info if info is not None else {}

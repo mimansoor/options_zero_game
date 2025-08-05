@@ -140,6 +140,7 @@ class OptionsZeroGameEnv(gym.Env):
         self.POS_IDX = {
             'IS_OCCUPIED': 0, 'TYPE_NORM': 1, 'DIRECTION_NORM': 2, 'STRIKE_DIST_NORM': 3, 'DAYS_HELD_NORM': 4,
             'PROB_OF_PROFIT': 5, 'MAX_PROFIT_NORM': 6, 'MAX_LOSS_NORM': 7, 'DELTA': 8, 'GAMMA': 9, 'THETA': 10, 'VEGA': 11,
+            'IS_HEDGED': 12,
         }
         
         self.MARKET_STATE_SIZE = len(self.OBS_IDX)
@@ -223,6 +224,8 @@ class OptionsZeroGameEnv(gym.Env):
             self.portfolio_manager.shift_position(final_action_name, self.price_manager.current_price, self.iv_bin_index, self.current_step)
         elif final_action_name.startswith('SHIFT_TO_ATM_'):
             self.portfolio_manager.shift_to_atm(final_action_name, self.price_manager.current_price, self.iv_bin_index, self.current_step)
+        elif final_action_name.startswith('HEDGE_POS_'):
+            self.portfolio_manager.add_hedge(final_action_name, self.price_manager.current_price, self.iv_bin_index, self.current_step)
 
         self.portfolio_manager.sort_portfolio()
 
@@ -483,28 +486,40 @@ class OptionsZeroGameEnv(gym.Env):
 
         for d in ['LONG', 'SHORT']:
             actions[f'OPEN_{d}_STRADDLE_ATM'] = i; i+=1
+
         for w in [1, 2]:
             for d in ['LONG', 'SHORT']:
                 actions[f'OPEN_{d}_STRANGLE_ATM_{w}'] = i; i+=1
+
         for w in [1, 2]:
             for t in ['CALL', 'PUT']:
                 for d in ['LONG', 'SHORT']:
                     actions[f'OPEN_{d}_VERTICAL_{t}_{w}'] = i; i+=1
+
         for d in ['LONG', 'SHORT']:
             actions[f'OPEN_{d}_IRON_FLY'] = i; i+=1
             actions[f'OPEN_{d}_IRON_CONDOR'] = i; i+=1
+
         for w in [1, 2]:
             for t in ['CALL', 'PUT']:
                 for d in ['LONG', 'SHORT']:
                     actions[f'OPEN_{d}_{t}_FLY_{w}'] = i; i+=1
+
         for j in range(self._cfg.max_positions):
             actions[f'CLOSE_POSITION_{j}'] = i; i+=1
+
         for j in range(self._cfg.max_positions):
             actions[f'SHIFT_UP_POS_{j}'] = i; i+=1
             actions[f'SHIFT_DOWN_POS_{j}'] = i; i+=1
+
         # New actions to re-center a position directly to the ATM strike.
         for j in range(self._cfg.max_positions):
             actions[f'SHIFT_TO_ATM_{j}'] = i; i+=1
+
+        # New actions to hedge an existing naked position.
+        for j in range(self._cfg.max_positions):
+            actions[f'HEDGE_POS_{j}'] = i; i+=1
+
         actions['CLOSE_ALL'] = i
         return actions
         
@@ -599,6 +614,14 @@ class OptionsZeroGameEnv(gym.Env):
                         # Only if both conditions are met is the action legal.
                         if not is_conflict_atm:
                             action_mask[self.actions_to_indices[f'SHIFT_TO_ATM_{i}']] = 1
+
+                # --- Rule for HEDGE Action ---
+                # It's only legal if the position is currently naked AND there is space in the portfolio.
+                is_naked = not original_pos['is_hedged']
+                has_space = len(portfolio_df) < self.portfolio_manager.max_positions
+
+                if is_naked and has_space and f'HEDGE_POS_{i}' in self.actions_to_indices:
+                    action_mask[self.actions_to_indices[f'HEDGE_POS_{i}']] = 1
         else:
             # Case B: The portfolio is empty. The agent must open a position.
             # This correctly handles BOTH step 0 and any later step where the portfolio is empty.

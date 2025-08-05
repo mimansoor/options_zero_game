@@ -34,7 +34,7 @@ class PortfolioManager:
         self.next_creation_id: int = 0
         self.initial_net_premium: float = 0.0
         self.portfolio_columns = ['type', 'direction', 'entry_step', 'strike_price', 'entry_premium', 'days_to_expiry', 'creation_id', 'strategy_id', 'strategy_max_profit', 'strategy_max_loss']
-        self.portfolio_dtypes = {'type': 'object', 'direction': 'object', 'entry_step': 'int64', 'strike_price': 'float64', 'entry_premium': 'float64', 'days_to_expiry': 'float64', 'creation_id': 'int64', 'strategy_id': 'int64', 'strategy_max_profit': 'float64', 'strategy_max_loss': 'float64'}
+        self.portfolio_dtypes = {'type': 'object', 'direction': 'object', 'entry_step': 'int64', 'strike_price': 'float64', 'entry_premium': 'float64', 'days_to_expiry': 'float64', 'creation_id': 'int64', 'strategy_id': 'int64', 'strategy_max_profit': 'float64', 'strategy_max_loss': 'float64', 'is_hedged': 'bool'}
     
     def reset(self):
         """Resets the portfolio to an empty state for a new episode."""
@@ -102,6 +102,8 @@ class PortfolioManager:
             vec[current_pos_idx + pos_idx_map['GAMMA']] = math.tanh(greeks['gamma'] * self.lot_size)
             vec[current_pos_idx + pos_idx_map['THETA']] = math.tanh(greeks['theta'] * self.lot_size)
             vec[current_pos_idx + pos_idx_map['VEGA']] = math.tanh(greeks['vega'] * self.lot_size)
+            # Convert the boolean to a float for the neural network.
+            vec[current_pos_idx + pos_idx_map['IS_HEDGED']] = 1.0 if pos['is_hedged'] else 0.0
            
     def get_total_pnl(self, current_price: float, iv_bin_index: int) -> float:
         if self.portfolio.empty:
@@ -152,6 +154,8 @@ class PortfolioManager:
         
         # The rest of the method logic remains the same.
         pos_to_close = self.portfolio.iloc[position_index]
+        # Get the creation_id BEFORE we close the position.
+        creation_id_of_closed_leg = pos_to_close['creation_id']
         is_call = pos_to_close['type'] == 'call'
         atm_price = self.market_rules_manager.get_atm_price(current_price)
         offset = round((pos_to_close['strike_price'] - atm_price) / self.strike_distance)
@@ -164,10 +168,36 @@ class PortfolioManager:
         pnl = (exit_premium - pos_to_close['entry_premium']) if pos_to_close['direction'] == 'long' else (pos_to_close['entry_premium'] - exit_premium)
         self.realized_pnl += pnl * self.lot_size
         self.portfolio = self.portfolio.drop(self.portfolio.index[position_index]).reset_index(drop=True)
+        # Now that the leg is removed, update the risk profile of the rest of the strategy.
+        self._update_strategy_profile(creation_id_of_closed_leg)
 
     def close_all_positions(self, current_price: float, iv_bin_index: int):
         while not self.portfolio.empty:
             self.close_position(-1, current_price, iv_bin_index)
+
+    def _update_hedge_status(self):
+        """
+        Calculates and sets the 'is_hedged' status for every leg in the portfolio.
+        A leg is truly HEDGED only if both its max profit AND max loss are defined.
+        It is NAKED if either side has undefined risk/reward.
+        """
+        if self.portfolio.empty:
+            return
+
+        # --- THE FIX ---
+        
+        # Condition 1: Is the maximum loss defined?
+        # This is TRUE if the max_loss is greater than our "infinite" placeholder.
+        has_defined_max_loss = self.portfolio['strategy_max_loss'] > -self.undefined_risk_cap
+        
+        # Condition 2: Is the maximum profit defined?
+        # This is TRUE if the max_profit is less than our "infinite" placeholder.
+        has_defined_max_profit = self.portfolio['strategy_max_profit'] < self.undefined_risk_cap
+
+        # A position is only considered hedged if BOTH conditions are true.
+        is_hedged = has_defined_max_loss & has_defined_max_profit
+        
+        self.portfolio['is_hedged'] = is_hedged
 
     def shift_to_atm(self, action_name: str, current_price: float, iv_bin_index: int, current_step: int):
         """Closes an existing position and opens a new one at the current ATM strike."""
@@ -206,6 +236,109 @@ class PortfolioManager:
         except (ValueError, IndexError) as e:
             print(f"Warning: Could not parse shift_to_atm action '{action_name}'. Error: {e}")
             return
+
+    def add_hedge(self, action_name: str, current_price: float, iv_bin_index: int, current_step: int):
+        """
+        Adds a protective leg to an existing naked position, dynamically transforming
+        the entire underlying strategy (e.g., Short Straddle -> Broken Wing Fly -> Iron Fly).
+        """
+        try:
+            position_index = int(action_name.split('_')[-1])
+            if not (0 <= position_index < len(self.portfolio)): return
+
+            naked_leg_to_hedge = self.portfolio.iloc[position_index].copy()
+            
+            # --- VALIDATION ---
+            # Action is only valid if the target leg is naked and there's space.
+            if naked_leg_to_hedge['is_hedged'] or len(self.portfolio) >= self.max_positions:
+                return
+            
+            # This is the key: identify the original strategy we are modifying.
+            original_creation_id = naked_leg_to_hedge['creation_id']
+
+            # --- 1. Define the New Hedge Leg ---
+            hedge_direction = 'long'
+            hedge_type = naked_leg_to_hedge['type']
+            
+            if hedge_type == 'call':
+                hedge_strike = naked_leg_to_hedge['strike_price'] + self.strike_distance
+            else:
+                hedge_strike = naked_leg_to_hedge['strike_price'] - self.strike_distance
+
+            hedge_leg = {
+                'type': hedge_type, 'direction': hedge_direction, 'strike_price': hedge_strike,
+                'entry_step': current_step, 'days_to_expiry': naked_leg_to_hedge['days_to_expiry']
+            }
+            
+            # --- 2. Re-assemble the Full, Transformed Strategy ---
+            # Get all legs from the original strategy
+            original_strategy_legs = [row.to_dict() for index, row in self.portfolio.iterrows() if row['creation_id'] == original_creation_id]
+            
+            # Add the new hedge
+            transformed_strategy_legs = original_strategy_legs + [hedge_leg]
+            
+            # Price only the new leg (the others are already priced)
+            transformed_strategy_legs = self._price_legs(transformed_strategy_legs, current_price, iv_bin_index)
+            
+            # --- 3. Determine the New Strategy Name and PnL ---
+            # We need a simple heuristic to identify the new, combined strategy name.
+            # This can be made more sophisticated later if needed.
+            num_legs = len(transformed_strategy_legs)
+            if num_legs == 2: new_strategy_name = f"SHORT_VERTICAL_{hedge_type.upper()}_1"
+            elif num_legs == 4: new_strategy_name = "SHORT_IRON_FLY" # Heuristic
+            else: new_strategy_name = "CUSTOM_HEDGED" # Fallback for 3-leg states
+            
+            pnl = self._calculate_strategy_pnl(transformed_strategy_legs, new_strategy_name)
+            pnl['strategy_id'] = self.strategy_name_to_id.get(new_strategy_name, -1)
+            
+            # --- 4. Update the Portfolio Atomically ---
+            # First, remove ALL legs of the original strategy.
+            self.portfolio = self.portfolio[self.portfolio['creation_id'] != original_creation_id].reset_index(drop=True)
+            
+            # Then, re-add all legs (original + new hedge) with the UPDATED strategy info.
+            # We use the original creation_id to keep them linked.
+            for leg in transformed_strategy_legs:
+                leg['creation_id'] = original_creation_id
+                
+            self._execute_trades(transformed_strategy_legs, pnl)
+            
+        except (ValueError, IndexError) as e:
+            print(f"Warning: Could not parse HEDGE action '{action_name}'. Error: {e}")
+            return
+
+    def _update_strategy_profile(self, creation_id_to_update: int):
+        """
+        Re-evaluates a strategy's risk profile after a change (e.g., a leg was closed).
+        It finds all legs with the same creation_id, calculates their new combined
+        max profit/loss, and updates all of them.
+        """
+        if self.portfolio.empty: return
+
+        # Find all legs that are part of the strategy we need to update
+        strategy_legs_df = self.portfolio[self.portfolio['creation_id'] == creation_id_to_update]
+        if strategy_legs_df.empty: return
+
+        strategy_legs_list = [row.to_dict() for _, row in strategy_legs_df.iterrows()]
+        
+        # --- Re-calculate the PnL profile for the remaining legs ---
+        # We need a simple heuristic to guess the new strategy name
+        num_legs = len(strategy_legs_list)
+        if num_legs == 1:
+            leg = strategy_legs_list[0]
+            new_strategy_name = f"{leg['direction'].upper()}_{leg['type'].upper()}"
+        elif num_legs == 2: new_strategy_name = "CUSTOM_SPREAD" # Could be a vertical or a strangle
+        else: new_strategy_name = "CUSTOM_HEDGED"
+        
+        pnl = self._calculate_strategy_pnl(strategy_legs_list, new_strategy_name)
+        
+        # --- Update all legs of the strategy in the main portfolio DataFrame ---
+        indices_to_update = self.portfolio[self.portfolio['creation_id'] == creation_id_to_update].index
+        
+        self.portfolio.loc[indices_to_update, 'strategy_max_profit'] = pnl.get('max_profit', 0.0)
+        self.portfolio.loc[indices_to_update, 'strategy_max_loss'] = pnl.get('max_loss', 0.0)
+        
+        # Finally, call the hedge status updater which will now use the new PnL values
+        self._update_hedge_status()
 
     def shift_position(self, action_name: str, current_price: float, iv_bin_index: int, current_step: int):
         """Closes an existing position and opens a new one one strike away."""
@@ -381,6 +514,7 @@ class PortfolioManager:
 
         new_positions_df = pd.DataFrame(trades_to_execute).astype(self.portfolio_dtypes)
         self.portfolio = pd.concat([self.portfolio, new_positions_df], ignore_index=True)
+        self._update_hedge_status()
 
     def _price_legs(self, legs: List[Dict], current_price: float, iv_bin_index: int) -> List[Dict]:
         atm_price = self.market_rules_manager.get_atm_price(current_price)

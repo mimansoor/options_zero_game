@@ -73,11 +73,14 @@ function PortfolioTable({ portfolio }) {
           <th>Current Premium</th>
           <th>Live PnL</th>
           <th>DTE</th>
+	  <th>Risk</th>
         </tr>
       </thead>
       <tbody>
         {portfolio.map((pos, index) => {
           const pnlColor = pos.live_pnl > 0 ? '#4CAF50' : pos.live_pnl < 0 ? '#F44336' : 'white';
+          const riskStatus = pos.hedge_status || 'N/A';
+          const riskColor = riskStatus === 'Naked' ? '#FF9800' : '#81C784'; // Orange for Naked, Green for Hedged
           return (
             <tr key={index} className={pos.direction}>
               <td>{pos.type.toUpperCase()}</td>
@@ -87,6 +90,7 @@ function PortfolioTable({ portfolio }) {
               <td>${pos.current_premium.toFixed(2)}</td>
               <td style={{ color: pnlColor, fontWeight: 'bold' }}>${pos.live_pnl.toFixed(2)}</td>
               <td>{pos.days_to_expiry.toFixed(2)}</td>
+              <td style={{ color: riskColor, fontWeight: 'bold' }}>{riskStatus}</td>
             </tr>
           );
         })}
