@@ -5,7 +5,7 @@ import glob
 import shutil
 
 # Pattern to search for ckpt_best.pth.tar files
-source_pattern = './options_zero_game_muzero_final_agent_v2.2-Final_ns25_upc200_bs256*/ckpt/ckpt_best.pth.tar'
+source_pattern = './experiments/options_zero_game_muzero_final_agent_v2.2-Final_ns25_upc200_bs256*/ckpt/ckpt_best.pth.tar'
 target_dir = './best_ckpt/'
 target_path = os.path.join(target_dir, 'ckpt_best.pth.tar')
 
