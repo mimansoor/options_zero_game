@@ -13,42 +13,27 @@ import zoo.options_zero_game.envs.options_zero_game_env
 import zoo.options_zero_game.envs.log_replay_env
 
 if __name__ == "__main__":
-    # 1. Set up the argument parser to accept --seed and --symbol
     parser = argparse.ArgumentParser(description="Evaluate the Options-Zero-Game MuZero Agent and generate a replay log.")
+    parser.add_argument('--seed', type=int, default=42, help="Master seed for the experiment.")
+    parser.add_argument('--symbol', type=str, default=None, help="Force evaluation on a specific historical symbol.")
+    parser.add_argument('--strategy', type=str, default=None, help="Force a specific opening strategy for the replay.")
+    
+    # --- NEW ARGUMENT ---
     parser.add_argument(
-        '--seed', 
-        type=int, 
-        default=0, 
-        help="Master seed for the experiment. Defaults to 0 for reproducibility. Use a negative value for a random seed."
-    )
-    parser.add_argument(
-        '--symbol',
-        type=str,
-        default=None,
-        help="Force evaluation on a specific historical symbol (e.g., 'SPY', 'TSLA'). Defaults to random."
+        '--agents_choice',
+        action='store_true', # This makes it a boolean flag
+        help="Let the agent choose its own opening move instead of the random curriculum."
     )
     args = parser.parse_args()
 
-    # 2. Determine the final seed value
-    if args.seed < 0:
-        final_seed = int(time.time())
-        print(f"--- Running with a RANDOM seed: {final_seed} ---")
-    else:
-        final_seed = args.seed
-        print(f"--- Running with a FIXED seed: {final_seed} ---")
+    final_seed = int(time.time()) if args.seed < 0 else args.seed
+    print(f"--- Running with seed: {final_seed} ---")
 
-    # Create deep copies of the configs to avoid modifying the originals
     eval_main_config = copy.deepcopy(main_config)
     eval_create_config = copy.deepcopy(create_config)
     
-    # ==============================================================
-    # 3. Set the path to your trained model checkpoint
-    # ==============================================================
     model_path = './best_ckpt/ckpt_best.pth.tar'
 
-    # ==============================================================
-    # 4. Configure the environment for this specific evaluation run
-    # ==============================================================
     eval_create_config.env.type = 'log_replay'
     eval_main_config.env.log_file_path = 'zoo/options_zero_game/visualizer-ui/build/replay_log.json'
     
@@ -56,15 +41,23 @@ if __name__ == "__main__":
     eval_main_config.env.n_evaluator_episode = 1
     eval_create_config.env_manager.type = 'base'
 
-    # Apply the forced symbol from the command line, if provided
+    # --- THE FIX: Logic to control the opening ---
+    if args.strategy:
+        print(f"--- Forcing opening strategy: {args.strategy} ---")
+        eval_main_config.env.forced_opening_strategy_name = args.strategy
+    elif args.agents_choice:
+        print("--- Letting agent choose its opening move (curriculum disabled) ---")
+        eval_main_config.env.disable_opening_curriculum = True
+    else:
+        print("--- Using random curriculum for opening move ---")
+        # We don't need to do anything, this is the default training behavior.
+
     if args.symbol:
         print(f"--- Forcing evaluation on historical symbol: {args.symbol} ---")
         eval_main_config.env.forced_historical_symbol = args.symbol
-    else:
-        print("--- Using a random historical symbol for evaluation ---")
 
     print("--- Starting Final Evaluation Run to Generate Replay Log ---")
-    
+   
     # ==============================================================
     # 5. Call the standard evaluator function with the modified configs
     # ==============================================================

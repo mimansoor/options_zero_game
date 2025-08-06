@@ -99,6 +99,7 @@ class OptionsZeroGameEnv(gym.Env):
         stop_loss_multiple_of_cost=1.5, # NEW: Added stop loss multiple
         use_stop_loss=True,
         forced_opening_strategy_name=None,
+        disable_opening_curriculum=False,
         
         # Agent/Framework Config
         ignore_legal_actions=True,
@@ -530,12 +531,12 @@ class OptionsZeroGameEnv(gym.Env):
         
     def _get_true_action_mask(self) -> np.ndarray:
         """
-        The definitive, correct implementation of the action mask, combining all rules
-        in the correct order of priority.
+        The definitive, correct implementation of the action mask, with a flag to disable
+        the opening curriculum for true evaluation.
         """
         action_mask = np.zeros(self.action_space_size, dtype=np.int8)
 
-        # --- Rule 1: Forced Strategy for Analysis (Highest Priority) ---
+        # --- Rule 0: Forced Strategy for Analysis (Highest Priority) ---
         forced_strategy = self._cfg.get('forced_opening_strategy_name')
         if self.current_step == 0 and forced_strategy:
             action_index = self.actions_to_indices.get(forced_strategy)
@@ -543,20 +544,27 @@ class OptionsZeroGameEnv(gym.Env):
             action_mask[action_index] = 1
             return action_mask
 
-        # --- Rule 2: Step 0 - Forced Diverse Opening for Training ---
+        # --- Rule 1: Step 0 - Training Curriculum OR Agent's Choice ---
         if self.current_step == 0:
-            strategy_families = {
-                "SINGLE_LEG": lambda name: 'ATM' in name and 'STRADDLE' not in name and 'STRANGLE' not in name,
-                "STRADDLE": lambda name: 'STRADDLE' in name, "STRANGLE": lambda name: 'STRANGLE' in name,
-                "VERTICAL": lambda name: 'VERTICAL' in name, "IRON_FLY_CONDOR": lambda name: 'IRON' in name,
-                "BUTTERFLY": lambda name: 'FLY' in name and 'IRON' not in name,
-            }
-            chosen_family_name = random.choice(list(strategy_families.keys()))
-            is_in_family = strategy_families[chosen_family_name]
-            
-            for action_name, index in self.actions_to_indices.items():
-                if action_name.startswith('OPEN_') and is_in_family(action_name):
-                    action_mask[index] = 1
+            if self._cfg.disable_opening_curriculum:
+                # EVALUATION MODE: The agent is free to choose any valid opening.
+                # HOLD is illegal. The agent MUST make a move.
+                for name, index in self.actions_to_indices.items():
+                    if name.startswith('OPEN_'):
+                        action_mask[index] = 1
+            else:
+                # TRAINING MODE: Force a diverse opening from a random family.
+                strategy_families = {
+                    "SINGLE_LEG": lambda name: 'ATM' in name and 'STRADDLE' not in name and 'STRANGLE' not in name,
+                    "STRADDLE": lambda name: 'STRADDLE' in name, "STRANGLE": lambda name: 'STRANGLE' in name,
+                    "VERTICAL": lambda name: 'VERTICAL' in name, "IRON_FLY_CONDOR": lambda name: 'IRON' in name,
+                    "BUTTERFLY": lambda name: 'FLY' in name and 'IRON' not in name,
+                }
+                chosen_family_name = random.choice(list(strategy_families.keys()))
+                is_in_family = strategy_families[chosen_family_name]
+                for action_name, index in self.actions_to_indices.items():
+                    if action_name.startswith('OPEN_') and is_in_family(action_name):
+                        action_mask[index] = 1
             
             if not np.any(action_mask): # Failsafe
                 for name, index in self.actions_to_indices.items():
