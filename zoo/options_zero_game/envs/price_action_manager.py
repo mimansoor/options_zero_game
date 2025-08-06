@@ -58,6 +58,7 @@ class PriceActionManager:
         self.expert_ema_pred: float = 0.0
         self.expert_rsi_pred: np.ndarray = np.array([0.33, 0.34, 0.33]) # [P(Sell), P(Neu), P(Buy)]
         self.expert_vol_pred: float = 0.0
+        self.total_steps: int = 0
 
     def _load_tickers(self) -> List[str]:
         if self.price_source in ['historical', 'mixed']:
@@ -68,7 +69,8 @@ class PriceActionManager:
             return tickers
         return []
 
-    def reset(self):
+    def reset(self, total_steps: int):
+        self.total_steps = total_steps
         self.start_price = self.start_price_config
         source_to_use = random.choice(['garch', 'historical']) if self.price_source == 'mixed' else self.price_source
 

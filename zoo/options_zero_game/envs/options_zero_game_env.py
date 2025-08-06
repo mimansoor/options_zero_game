@@ -43,6 +43,7 @@ class OptionsZeroGameEnv(gym.Env):
         
         # Time and Episode Config
         time_to_expiry_days=20,
+        min_time_to_expiry_days=5,
         steps_per_day=1,
         trading_day_in_mins=375,
         
@@ -160,11 +161,12 @@ class OptionsZeroGameEnv(gym.Env):
         self._observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(self.obs_vector_size,), dtype=np.float32)
         self._reward_range = (-1.0, 1.0)
 
-        self.current_step = 0
-        self.total_steps = self._cfg.time_to_expiry_days * self._cfg.steps_per_day
-        self.iv_bin_index = 0
+        self.current_step: int = 0
+        self.total_steps: int = 0
+        self.episode_time_to_expiry: int = 0
+        self.iv_bin_index: int = 0
         self.final_eval_reward = 0.0
-        self.illegal_action_count = 0
+        self.illegal_action_count: int = 0
         self.realized_vol_series = np.array([])
         
         # --- THE FIX ---
@@ -191,8 +193,15 @@ class OptionsZeroGameEnv(gym.Env):
             # During normal training, the framework will ALWAYS provide a seed.
             new_seed = int(time.time())
             self.seed(new_seed)
+
+        # 1. Determine the length of THIS specific episode.
+        self.episode_time_to_expiry = random.randint(
+            self._cfg.min_time_to_expiry_days,
+            self._cfg.time_to_expiry_days
+        )
+        self.total_steps = self.episode_time_to_expiry * self._cfg.steps_per_day
         
-        self.price_manager.reset()
+        self.price_manager.reset(self.total_steps)
         self.portfolio_manager.reset()
         
         self.current_step = 0
