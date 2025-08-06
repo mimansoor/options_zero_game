@@ -88,9 +88,20 @@ options_zero_game_muzero_config = dict(
     env=dict(
         env_id='OptionsZeroGame-v0',
         env_version=OptionsZeroGameEnv.VERSION,
+        # --- Collector-Specific Settings ---
         collector_env_num=collector_env_num,
+        # The collector uses the opening curriculum.
+        disable_opening_curriculum=False,
+        
+        # --- Evaluator-Specific Settings ---
         evaluator_env_num=evaluator_env_num,
         n_evaluator_episode=evaluator_env_num,
+        # The evaluator lets the agent choose its own move.
+        # The framework will automatically use these settings for the evaluator envs.
+        evaluator_env_cfg=dict(
+            disable_opening_curriculum=True,
+        ),
+
         manager=dict(shared_memory=False, ),
         # Pass all necessary parameters to the environment
         price_source='historical',
