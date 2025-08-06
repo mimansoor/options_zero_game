@@ -243,9 +243,8 @@ class OptionsZeroGameEnv(gym.Env):
         final_action_name = self.indices_to_actions.get(final_action, 'INVALID')
         
         if final_action_name.startswith('OPEN_'):
-            current_day = self.current_step // self._cfg.steps_per_day
             # Use the DYNAMIC episode length for this calculation, not the static max length.
-            days_to_expiry_float = (self.episode_time_to_expiry - current_day) * (self.TOTAL_DAYS_IN_WEEK / self.TRADING_DAYS_IN_WEEK)
+            days_to_expiry_float = (self.episode_time_to_expiry - self.current_day_index) * (self.TOTAL_DAYS_IN_WEEK / self.TRADING_DAYS_IN_WEEK)
             days_to_expiry = int(round(days_to_expiry_float))
             self.portfolio_manager.open_strategy(final_action_name, self.price_manager.current_price, self.iv_bin_index, self.current_step, days_to_expiry)
         elif final_action_name.startswith('CLOSE_POSITION_'):
@@ -422,8 +421,7 @@ class OptionsZeroGameEnv(gym.Env):
         current_price = self.price_manager.current_price
         
         # We need a representative DTE for the market. The time left in the episode is a perfect proxy.
-        current_day = self.current_step // self._cfg.steps_per_day
-        days_to_expiry = (self.episode_time_to_expiry - current_day) * (self.TOTAL_DAYS_IN_WEEK / self.TRADING_DAYS_IN_WEEK)
+        days_to_expiry = (self.episode_time_to_expiry - self.current_day_index) * (self.TOTAL_DAYS_IN_WEEK / self.TRADING_DAYS_IN_WEEK)
         
         expected_move = 0.0
         if days_to_expiry > 0:
@@ -509,8 +507,7 @@ class OptionsZeroGameEnv(gym.Env):
         time_decay += self.decay_overnight
 
         # Determine the day of the week to check for a weekend
-        trading_day_index = self.current_step // self._cfg.steps_per_day
-        day_of_week = trading_day_index % self.TRADING_DAYS_IN_WEEK
+        day_of_week = self.current_day_index % self.TRADING_DAYS_IN_WEEK
 
         is_friday = (day_of_week == 4)
 
@@ -623,8 +620,7 @@ class OptionsZeroGameEnv(gym.Env):
             return action_mask
 
         # --- Rule 3: Expiry Day Logic ---
-        current_day = self.current_step // self._cfg.steps_per_day
-        is_expiry_day = current_day >= (self._cfg.time_to_expiry_days - 1)
+        is_expiry_day = self.current_day_index >= (self._cfg.time_to_expiry_days - 1)
         if is_expiry_day:
             action_mask[self.actions_to_indices['HOLD']] = 1
             if not self.portfolio_manager.portfolio.empty:
@@ -725,7 +721,7 @@ class OptionsZeroGameEnv(gym.Env):
 
     def render(self, mode: str = 'human') -> None:
         total_pnl = self.portfolio_manager.get_total_pnl(self.price_manager.current_price, self.iv_bin_index)
-        print(f"\nStep: {self.current_step:04d} | Day: {self.current_step // self._cfg.steps_per_day + 1:02d} | Price: ${self.price_manager.current_price:9.2f} | Positions: {len(self.portfolio_manager.portfolio):1d} | Total PnL: ${total_pnl:9.2f}")
+        print(f"\nStep: {self.current_step:04d} | Day: {self.current_day:02d} | Price: ${self.price_manager.current_price:9.2f} | Positions: {len(self.portfolio_manager.portfolio):1d} | Total PnL: ${total_pnl:9.2f}")
         
         if not self.portfolio_manager.portfolio.empty:
             print(self.portfolio_manager.portfolio.to_string(index=False))
@@ -737,6 +733,18 @@ class OptionsZeroGameEnv(gym.Env):
         meter.summary()
 
     # --- Properties and Static Methods ---
+    @property
+    def current_day_index(self) -> int:
+        """A safe, public, read-only property to get the current day index (0-indexed)."""
+        return int(self.current_step // self.steps_per_day)
+    @property
+    def current_day(self) -> int:
+        """A safe, public, read-only property to get the current day of the episode (1-indexed)."""
+        return self.current_day_index + 1
+    @property
+    def steps_per_day(self) -> int:
+        """A safe, public, read-only property to access steps_per_day."""
+        return self._cfg.steps_per_day
     @property
     def legal_actions(self): return self._get_true_action_mask()
     @property

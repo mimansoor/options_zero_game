@@ -29,6 +29,7 @@ class PortfolioManager:
 
         # State variables
         self.portfolio = pd.DataFrame()
+        self.pre_step_portfolio: pd.DataFrame = pd.DataFrame()
         self.realized_pnl: float = 0.0
         self.high_water_mark: float = 0.0
         self.next_creation_id: int = 0
@@ -39,12 +40,17 @@ class PortfolioManager:
     def reset(self):
         """Resets the portfolio to an empty state for a new episode."""
         self.portfolio = pd.DataFrame(columns=self.portfolio_columns).astype(self.portfolio_dtypes)
+        self.pre_step_portfolio = self.portfolio.copy()
         self.realized_pnl = 0.0
         self.high_water_mark = self.initial_cash
         self.next_creation_id = 0
         self.initial_net_premium = 0.0
 
     # --- Public Methods (called by the main environment) ---
+
+    def get_pre_step_portfolio(self) -> pd.DataFrame:
+        """Public API to allow the logger to get the portfolio state before the time step."""
+        return self.pre_step_portfolio
 
     def open_strategy(self, action_name: str, current_price: float, iv_bin_index: int, current_step: int, days_to_expiry: float):
         """Routes any 'OPEN_' action to the correct specialized private method."""
@@ -129,13 +135,25 @@ class PortfolioManager:
     def update_high_water_mark(self, equity: float):
         self.high_water_mark = max(self.high_water_mark, equity)
 
-    def update_positions_after_time_step(self, time_decay_days: float, current_price: float, iv_bin_index: int):
-        if not self.portfolio.empty:
-            self.portfolio['days_to_expiry'] = (self.portfolio['days_to_expiry'] - time_decay_days).clip(lower=0)
-            expired_indices = self.portfolio[self.portfolio['days_to_expiry'] <= 1e-6].index
-            if not expired_indices.empty:
-                for idx in sorted(expired_indices, reverse=True):
-                    self.close_position(idx, current_price, iv_bin_index)
+    def update_positions_after_time_step(self, days_of_decay: int, current_price: float, iv_bin_index: int):
+        """
+        Applies time decay and handles expirations. Crucially, it saves a snapshot
+        of the portfolio state *before* the time step is applied.
+        """
+        # Save a snapshot of the portfolio right after the action was taken,
+        # but BEFORE time has advanced to the next day.
+        self.pre_step_portfolio = self.portfolio.copy()
+        
+        # Now, the rest of the method proceeds as before.
+        if days_of_decay == 0 or self.portfolio.empty:
+            return
+
+        self.portfolio['days_to_expiry'] = (self.portfolio['days_to_expiry'] - days_of_decay).clip(lower=0)
+        
+        expired_indices = self.portfolio[self.portfolio['days_to_expiry'] == 0].index
+        if not expired_indices.empty:
+            for idx in sorted(expired_indices, reverse=True):
+                self.close_position(idx, current_price, iv_bin_index)
 
     def close_position(self, position_index: int, current_price: float, iv_bin_index: int):
         """
