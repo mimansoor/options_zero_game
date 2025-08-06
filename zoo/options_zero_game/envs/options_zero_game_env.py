@@ -144,6 +144,8 @@ class OptionsZeroGameEnv(gym.Env):
             'PORTFOLIO_MAX_PROFIT_NORM': 10, 'PORTFOLIO_MAX_LOSS_NORM': 11, 'PORTFOLIO_RR_RATIO_NORM': 12, 'PORTFOLIO_PROB_PROFIT': 13,
             # --- NEW EXPERT FEATURES ---
             'EXPERT_EMA_RATIO': 14, 'EXPERT_RSI_OVERSOLD': 15, 'EXPERT_RSI_NEUTRAL': 16, 'EXPERT_RSI_OVERBOUGHT': 17, 'EXPERT_VOL_NORM': 18,
+            # --- NEW MARKET EXPECTATION FEATURE ---
+            'EXPECTED_MOVE_NORM': 19,
         }
         self.POS_IDX = {
             'IS_OCCUPIED': 0, 'TYPE_NORM': 1, 'DIRECTION_NORM': 2, 'STRIKE_DIST_NORM': 3, 'DAYS_HELD_NORM': 4,
@@ -415,6 +417,27 @@ class OptionsZeroGameEnv(gym.Env):
         log_return = math.log(self.price_manager.current_price / (self.price_manager.price_path[self.current_step - 1] + 1e-8)) if self.current_step > 0 else 0.0
         vec[self.OBS_IDX['LOG_RETURN']] = np.clip(log_return, -0.1, 0.1) * 10
         vec[self.OBS_IDX['MOMENTUM_NORM']] = self.price_manager.momentum_signal
+
+        # --- NEW: Calculate the Market's Expected Move ---
+        current_price = self.price_manager.current_price
+        
+        # We need a representative DTE for the market. The time left in the episode is a perfect proxy.
+        current_day = self.current_step // self._cfg.steps_per_day
+        days_to_expiry = (self.episode_time_to_expiry - current_day) * (self.TOTAL_DAYS_IN_WEEK / self.TRADING_DAYS_IN_WEEK)
+        
+        expected_move = 0.0
+        if days_to_expiry > 0:
+            # We use the ATM volatility as the market's consensus IV.
+            atm_iv = self.market_rules_manager.get_implied_volatility(offset=0, option_type='call', iv_bin_index=self.iv_bin_index)
+            
+            # The formula: Price * IV * sqrt(DTE / 365)
+            expected_move_points = current_price * atm_iv * math.sqrt(days_to_expiry / 365.25)
+            
+            # Normalize the move by the current price to get a stable percentage.
+            # This prevents huge numbers from destabilizing the network.
+            expected_move = expected_move_points / current_price
+        
+        vec[self.OBS_IDX['EXPECTED_MOVE_NORM']] = expected_move
 
         # Portfolio Greeks
         greeks = self.portfolio_manager.get_portfolio_greeks(self.price_manager.current_price, self.iv_bin_index)
