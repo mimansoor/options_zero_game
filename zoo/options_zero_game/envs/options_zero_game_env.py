@@ -242,7 +242,8 @@ class OptionsZeroGameEnv(gym.Env):
         
         if final_action_name.startswith('OPEN_'):
             current_day = self.current_step // self._cfg.steps_per_day
-            days_to_expiry_float = (self._cfg.time_to_expiry_days - current_day) * (self.TOTAL_DAYS_IN_WEEK / self.TRADING_DAYS_IN_WEEK)
+            # Use the DYNAMIC episode length for this calculation, not the static max length.
+            days_to_expiry_float = (self.episode_time_to_expiry - current_day) * (self.TOTAL_DAYS_IN_WEEK / self.TRADING_DAYS_IN_WEEK)
             days_to_expiry = int(round(days_to_expiry_float))
             self.portfolio_manager.open_strategy(final_action_name, self.price_manager.current_price, self.iv_bin_index, self.current_step, days_to_expiry)
         elif final_action_name.startswith('CLOSE_POSITION_'):
