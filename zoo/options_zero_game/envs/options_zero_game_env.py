@@ -212,6 +212,8 @@ class OptionsZeroGameEnv(gym.Env):
         """
         # --- 1. Get State BEFORE Action ---
         equity_before = self.portfolio_manager.get_current_equity(self.price_manager.current_price, self.iv_bin_index)
+
+        final_action, was_illegal_action = self._handle_action(action)
         
         # --- 2. Determine and Execute the Final Action ---
         final_action_name = self.indices_to_actions.get(final_action, 'INVALID')
