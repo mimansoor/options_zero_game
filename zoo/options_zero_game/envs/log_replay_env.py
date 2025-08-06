@@ -52,7 +52,7 @@ class LogReplayEnv(gym.Wrapper):
             greeks = self.env.bs_manager.get_all_greeks_and_price(current_price, pos['strike_price'], pos['days_to_expiry'], vol, is_call)
             
             mid_price = greeks['price']
-            current_premium = self.env.bs_manager.get_price_with_spread(mid_price, is_buy=(pos['direction'] == 'short'), bid_ask_spread_pct=self._cfg.bid_ask_spread_pct)
+            current_premium = self.env.bs_manager.get_price_with_spread(mid_price, is_buy=(pos['direction'] == 'short'), bid_ask_spread_pct=self.env.bid_ask_spread_pct)
             
             pnl_multiplier = 1 if pos['direction'] == 'long' else -1
             pnl = (current_premium - pos['entry_premium']) * self.env.portfolio_manager.lot_size * pnl_multiplier

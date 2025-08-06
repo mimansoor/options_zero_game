@@ -734,6 +734,10 @@ class OptionsZeroGameEnv(gym.Env):
 
     # --- Properties and Static Methods ---
     @property
+    def bid_ask_spread_pct(self) -> float:
+        """A safe, public, read-only property to access strike_distance."""
+        return self._cfg.bid_ask_spread_pct
+    @property
     def strike_distance(self) -> float:
         """A safe, public, read-only property to access strike_distance."""
         return self._cfg.strike_distance
