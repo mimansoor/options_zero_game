@@ -139,23 +139,18 @@ class PortfolioManager:
 
     def close_position(self, position_index: int, current_price: float, iv_bin_index: int):
         """
-        Closes a position at a specific index, with corrected assertion logic.
+        Atomically closes a single leg and correctly re-evaluates the risk profile
+        of the entire remaining strategy.
         """
-        # --- THE FIX IS HERE ---
-        
-        # 1. First, handle the negative indexing to convert it to a positive index.
-        #    e.g., if portfolio size is 1, an index of -1 becomes 0.
         if position_index < 0:
             position_index = len(self.portfolio) + position_index
 
-        # 2. Now, assert that the *normalized*, positive index is valid.
-        #    This will now correctly check `0 <= 0 < 1`, which is True.
-        assert 0 <= position_index < len(self.portfolio), f"Attempted to close invalid or out-of-bounds index: {position_index}. Portfolio size is {len(self.portfolio)}."
+        assert 0 <= position_index < len(self.portfolio), f"Attempted to close invalid index: {position_index}."
         
-        # The rest of the method logic remains the same.
-        pos_to_close = self.portfolio.iloc[position_index]
-        # Get the creation_id BEFORE we close the position.
-        creation_id_of_closed_leg = pos_to_close['creation_id']
+        pos_to_close = self.portfolio.iloc[position_index].copy()
+        original_creation_id = pos_to_close['creation_id']
+        
+        # 1. Calculate the realized PnL for the leg being closed.
         is_call = pos_to_close['type'] == 'call'
         atm_price = self.market_rules_manager.get_atm_price(current_price)
         offset = round((pos_to_close['strike_price'] - atm_price) / self.strike_distance)
@@ -165,11 +160,31 @@ class PortfolioManager:
         is_short = pos_to_close['direction'] == 'short'
         exit_premium = self.bs_manager.get_price_with_spread(greeks['price'], is_buy=is_short, bid_ask_spread_pct=self.bid_ask_spread_pct)
         
-        pnl = (exit_premium - pos_to_close['entry_premium']) if pos_to_close['direction'] == 'long' else (pos_to_close['entry_premium'] - exit_premium)
+        pnl_multiplier = 1 if pos_to_close['direction'] == 'long' else -1
+        pnl = (exit_premium - pos_to_close['entry_premium']) * pnl_multiplier
         self.realized_pnl += pnl * self.lot_size
-        self.portfolio = self.portfolio.drop(self.portfolio.index[position_index]).reset_index(drop=True)
-        # Now that the leg is removed, update the risk profile of the rest of the strategy.
-        self._update_strategy_profile(creation_id_of_closed_leg)
+        
+        # 2. Re-assemble the remaining legs of the strategy.
+        remaining_legs = [
+            row.to_dict() for idx, row in self.portfolio.iterrows()
+            if row['creation_id'] == original_creation_id and idx != position_index
+        ]
+        
+        # 3. Atomically update the portfolio: remove all old legs.
+        self.portfolio = self.portfolio[self.portfolio['creation_id'] != original_creation_id].reset_index(drop=True)
+
+        # 4. If there are any legs left, re-profile and re-add them.
+        if remaining_legs:
+            # Determine the new strategy name and profile.
+            num_legs = len(remaining_legs)
+            new_strategy_name = f"CUSTOM_{num_legs}_LEGS" # A generic name for the new state
+            pnl_profile = self._calculate_strategy_pnl(remaining_legs, new_strategy_name)
+            pnl_profile['strategy_id'] = self.strategy_name_to_id.get(new_strategy_name, -3) # Use a unique default
+
+            # Re-add the remaining legs with their new, correct, unified risk profile.
+            for leg in remaining_legs:
+                leg['creation_id'] = original_creation_id
+            self._execute_trades(remaining_legs, pnl_profile)
 
     def close_all_positions(self, current_price: float, iv_bin_index: int):
         while not self.portfolio.empty:
