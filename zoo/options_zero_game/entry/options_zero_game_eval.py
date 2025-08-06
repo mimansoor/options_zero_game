@@ -20,6 +20,13 @@ if __name__ == "__main__":
     
     # --- NEW ARGUMENT ---
     parser.add_argument(
+        '--days',
+        type=int,
+        default=0, # Default to 0, which means the training logic (random) will be used
+        help="Force a specific episode length in days for the evaluation."
+    )
+
+    parser.add_argument(
         '--agents_choice',
         action='store_true', # This makes it a boolean flag
         help="Let the agent choose its own opening move instead of the random curriculum."
@@ -55,6 +62,10 @@ if __name__ == "__main__":
     if args.symbol:
         print(f"--- Forcing evaluation on historical symbol: {args.symbol} ---")
         eval_main_config.env.forced_historical_symbol = args.symbol
+
+    if args.days > 0:
+        print(f"--- Forcing episode length to {args.days} days ---")
+        eval_main_config.env.forced_episode_length = args.days
 
     print("--- Starting Final Evaluation Run to Generate Replay Log ---")
    

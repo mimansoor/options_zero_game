@@ -77,6 +77,12 @@ if __name__ == "__main__":
         default=None,
         help="Force evaluation on a specific historical symbol (e.g., 'SPY', 'TSLA'). Defaults to random."
     )
+    parser.add_argument(
+        '--days',
+        type=int,
+        default=20, # Default to a fixed 20 days for consistent analysis
+        help="Force a specific episode length in days for the analysis."
+    )
     args = parser.parse_args()
 
     # Determine which strategies to run
@@ -105,6 +111,7 @@ if __name__ == "__main__":
             current_main_config.env.forced_historical_symbol = args.symbol
             current_main_config.env.n_evaluator_episode = 1
             current_main_config.env.evaluator_env_num = 1
+            current_main_config.env.forced_episode_length = args.days
             
             _, returns = eval_muzero(
                 [current_main_config, current_create_config],

@@ -44,6 +44,7 @@ class OptionsZeroGameEnv(gym.Env):
         # Time and Episode Config
         time_to_expiry_days=20,
         min_time_to_expiry_days=5,
+        forced_episode_length=0,
         steps_per_day=1,
         trading_day_in_mins=375,
         
@@ -186,6 +187,11 @@ class OptionsZeroGameEnv(gym.Env):
         return [seed]
 
     def reset(self, seed: int = None, **kwargs) -> Dict:
+        """
+        Resets the environment.
+        PRIORITY 1: Uses a forced episode length if provided (for evaluation).
+        PRIORITY 2: Uses a random episode length (for training).
+        """
         if seed is not None: self.seed(seed)
         else:
             # If the framework or user does not provide a seed, we create a
@@ -194,11 +200,18 @@ class OptionsZeroGameEnv(gym.Env):
             new_seed = int(time.time())
             self.seed(new_seed)
 
-        # 1. Determine the length of THIS specific episode.
-        self.episode_time_to_expiry = random.randint(
-            self._cfg.min_time_to_expiry_days,
-            self._cfg.time_to_expiry_days
-        )
+        forced_length = self._cfg.get('forced_episode_length', 0)
+
+        if forced_length > 0:
+            # PRIORITY 1: Evaluation mode with a fixed, forced length.
+            self.episode_time_to_expiry = forced_length
+        else:
+            # PRIORITY 2: Training mode with a random length.
+            self.episode_time_to_expiry = random.randint(
+                self._cfg.min_time_to_expiry_days,
+                self._cfg.time_to_expiry_days
+            )
+
         self.total_steps = self.episode_time_to_expiry * self._cfg.steps_per_day
         
         self.price_manager.reset(self.total_steps)
