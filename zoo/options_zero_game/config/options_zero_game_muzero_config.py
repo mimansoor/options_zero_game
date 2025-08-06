@@ -100,6 +100,10 @@ options_zero_game_muzero_config = dict(
         # The framework will automatically use these settings for the evaluator envs.
         evaluator_env_cfg=dict(
             disable_opening_curriculum=True,
+
+            # The evaluator ALWAYS uses a fixed, consistent episode length.
+            # This ensures evaluations are always run on the full, max-length episode.
+            forced_episode_length=20, 
         ),
 
         manager=dict(shared_memory=False, ),
