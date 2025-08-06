@@ -29,7 +29,9 @@ class LogReplayEnv(gym.Wrapper):
         self._update_previous_log_with_outcome(timestep, action)
         if not timestep.done:
             self._log_current_state()
-        if timestep.done:
+        else:
+            # --- THE FIX: Episode is finished, log the special settlement state ---
+            self._log_settlement_state(timestep)
             self.save_log()
         return timestep
 
@@ -109,6 +111,37 @@ class LogReplayEnv(gym.Wrapper):
             
         total_live_pnl = sum(p['live_pnl'] for p in serialized_portfolio)
         return self.env.portfolio_manager.realized_pnl + total_live_pnl
+
+    def _log_settlement_state(self, final_timestep):
+        """
+        Creates and appends a final, special log entry for the end of the episode
+        to show the fully realized PnL and an empty portfolio.
+        """
+        if not self._episode_history: return
+
+        # Use the last known state as a template
+        last_log_entry = copy.deepcopy(self._episode_history[-1])
+        
+        # Create the settlement entry
+        settlement_entry = last_log_entry
+        
+        # Update to reflect the final settlement
+        settlement_entry['step'] = last_log_entry['step'] + 1
+        settlement_entry['day'] = last_log_entry['day'] + 1
+        settlement_entry['portfolio'] = [] # The portfolio is now empty
+        settlement_entry['done'] = True
+        settlement_entry['action'] = None
+        settlement_entry['reward'] = None
+        
+        # The EOD PnL is the final, realized return from the episode
+        settlement_entry['info']['eval_episode_return'] = final_timestep.info['eval_episode_return']
+        settlement_entry['info']['action_name'] = "AUTO-SETTLE"
+        
+        # Carry over the last known biases for context
+        settlement_entry['info']['directional_bias'] = last_log_entry['info']['directional_bias']
+        settlement_entry['info']['volatility_bias'] = last_log_entry['info']['volatility_bias']
+        
+        self._episode_history.append(settlement_entry)
 
     def save_log(self):
         print(f"Episode finished. Saving replay log with {len(self._episode_history)} steps...")
