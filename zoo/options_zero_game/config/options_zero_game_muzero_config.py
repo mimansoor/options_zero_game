@@ -7,14 +7,14 @@ from zoo.options_zero_game.envs.options_zero_game_env import OptionsZeroGameEnv
 # ==============================================================
 #                 Static Parameters
 # ==============================================================
-collector_env_num = 8
-evaluator_env_num = 8
+collector_env_num = 48
+evaluator_env_num = 20
 batch_size = 256
-num_simulations = 25
-update_per_collect = 200
-max_env_step = int(5e6)
+num_simulations = 50
+update_per_collect = 1000
+max_env_step = int(5e7)
 reanalyze_ratio = 0.
-n_episode = 8
+n_episode = 96
 
 market_regimes = [
     # Name, mu, omega, alpha, beta, overnight_vol_multiplier

@@ -199,48 +199,14 @@ class PortfolioManager:
         
         self.portfolio['is_hedged'] = is_hedged
 
-    def shift_to_atm(self, action_name: str, current_price: float, iv_bin_index: int, current_step: int):
-        """Closes an existing position and opens a new one at the current ATM strike."""
-        try:
-            parts = action_name.split('_')
-            position_index = int(parts[3])
-
-            if not (0 <= position_index < len(self.portfolio)):
-                return
-
-            original_pos = self.portfolio.iloc[position_index].copy()
-            days_to_expiry = original_pos['days_to_expiry']
-
-            # Calculate the new at-the-money strike price
-            new_atm_strike = self.market_rules_manager.get_atm_price(current_price)
-
-            # Close the old position first
-            self.close_position(position_index, current_price, iv_bin_index)
-
-            # Open the new single-leg position at the ATM strike
-            new_leg = {
-                'type': original_pos['type'],
-                'direction': original_pos['direction'],
-                'strike_price': new_atm_strike,
-                'entry_step': current_step,
-                'days_to_expiry': days_to_expiry,
-            }
-
-            legs = self._price_legs([new_leg], current_price, iv_bin_index)
-            # A shifted leg is treated as a new single-leg strategy
-            strategy_name = f"{legs[0]['direction'].upper()}_{legs[0]['type'].upper()}"
-            pnl = self._calculate_strategy_pnl(legs, strategy_name)
-            pnl['strategy_id'] = self.strategy_name_to_id.get(strategy_name, -1)
-            self._execute_trades(legs, pnl)
-
-        except (ValueError, IndexError) as e:
-            print(f"Warning: Could not parse shift_to_atm action '{action_name}'. Error: {e}")
-            return
-
     def add_hedge(self, action_name: str, current_price: float, iv_bin_index: int, current_step: int):
         """
         Adds a protective leg to a naked position using advanced, context-aware logic.
-        This version correctly uses the MarketRulesManager to determine the ATM strike.
+        - If the naked leg is In-The-Money (ITM), it places the hedge one strike
+          away from the current ATM strike for a defensive adjustment.
+        - If the naked leg is Out-of-the-Money (OTM), it places the hedge one strike
+          away from the naked leg's strike to create a standard spread.
+        This version is strategy-aware and correctly uses the MarketRulesManager.
         """
         try:
             position_index = int(action_name.split('_')[-1])
@@ -261,7 +227,7 @@ class PortfolioManager:
             # --- 2. DYNAMIC HEDGE PLACEMENT LOGIC ---
             naked_strike = naked_leg_to_hedge['strike_price']
             
-            # Get the ATM strike from the single source of truth >>>
+            # Get the ATM strike from the single source of truth: the MarketRulesManager
             atm_strike = self.market_rules_manager.get_atm_price(current_price)
             
             # Determine if the naked leg is ITM
@@ -270,32 +236,38 @@ class PortfolioManager:
             if hedge_type == 'put' and current_price < naked_strike: is_itm = True
 
             if is_itm:
-                # ITM Rule: Place the hedge defensively near the current ATM strike.
+                # --- ITM Rule (Your brilliant correction) ---
+                # The position is already a loser. Place the hedge defensively
+                # one strike away from the CURRENT market price (ATM).
                 if hedge_type == 'call':
                     hedge_strike = atm_strike + self.strike_distance
                 else: # Put
                     hedge_strike = atm_strike - self.strike_distance
             else:
-                # OTM Rule: Create a standard 2-strike wide spread from the naked leg.
+                # --- OTM Rule ---
+                # The position is not yet a loser. Create a standard 1-strike wide spread
+                # relative to the NAKED leg's strike.
                 hedge_width = self.strike_distance * 2
                 if hedge_type == 'call':
                     hedge_strike = naked_strike + hedge_width
                 else: # Put
                     hedge_strike = naked_strike - hedge_width
 
-            # --- 3. Create and price the full strategy ---
-            hedge_leg = {
+            # --- 3. Create, Price, and Assemble the Full Strategy ---
+            hedge_leg_definition = {
                 'type': hedge_type, 'direction': hedge_direction, 'strike_price': hedge_strike,
                 'entry_step': current_step, 'days_to_expiry': naked_leg_to_hedge['days_to_expiry']
             }
             
+            # Price ONLY the new hedge leg to avoid double-charging spreads
+            priced_hedge_leg = self._price_legs([hedge_leg_definition], current_price, iv_bin_index)[0]
+
             original_strategy_legs = [row.to_dict() for _, row in self.portfolio.iterrows() if row['creation_id'] == original_creation_id]
-            transformed_strategy_legs = original_strategy_legs + [hedge_leg]
-            transformed_strategy_legs = self._price_legs(transformed_strategy_legs, current_price, iv_bin_index)
+            transformed_strategy_legs = original_strategy_legs + [priced_hedge_leg]
             
             # --- 4. Determine New Strategy Name and PnL ---
             num_legs = len(transformed_strategy_legs)
-            new_strategy_name = "CUSTOM_HEDGED" # Default
+            new_strategy_name = "CUSTOM_HEDGED"
             if num_legs == 2:
                 net_premium = sum(leg['entry_premium'] * (1 if leg['direction'] == 'long' else -1) for leg in transformed_strategy_legs)
                 spread_direction = "LONG" if net_premium > 0 else "SHORT"
@@ -351,41 +323,78 @@ class PortfolioManager:
         self._update_hedge_status()
 
     def shift_position(self, action_name: str, current_price: float, iv_bin_index: int, current_step: int):
-        """Closes an existing position and opens a new one one strike away."""
+        """
+        Efficiently shifts a leg, inheriting the hedge status of its parent.
+        Relies on the action mask to prevent illegal shifts.
+        """
         try:
             parts = action_name.split('_')
             direction, position_index = parts[1].upper(), int(parts[3])
-
-            if not (0 <= position_index < len(self.portfolio)):
-                return
+            if not (0 <= position_index < len(self.portfolio)): return
 
             original_pos = self.portfolio.iloc[position_index].copy()
-            days_to_expiry = original_pos['days_to_expiry'] # Preserve DTE
-
-            strike_modifier = self.strike_distance if direction == 'UP' else -self.strike_distance
-            new_strike_price = original_pos['strike_price'] + strike_modifier
-
-            # Close the old position first
+            
+            # 1. Close the original leg. This removes it from the portfolio.
+            # No need to update the strategy profile of the remaining legs yet.
             self.close_position(position_index, current_price, iv_bin_index)
 
-            # Open the new single-leg position
+            # 2. Define the new leg.
+            strike_modifier = self.strike_distance if direction == 'UP' else -self.strike_distance
+            new_strike_price = original_pos['strike_price'] + strike_modifier
+            
             new_leg = {
-                'type': original_pos['type'],
-                'direction': original_pos['direction'],
-                'strike_price': new_strike_price,
-                'entry_step': current_step,
-                'days_to_expiry': days_to_expiry,
+                'type': original_pos['type'], 'direction': original_pos['direction'],
+                'strike_price': new_strike_price, 'entry_step': current_step,
+                'days_to_expiry': original_pos['days_to_expiry'],
+                # Inherit all strategy-level properties from the parent
+                'strategy_id': original_pos['strategy_id'],
+                'creation_id': original_pos['creation_id'],
+                'strategy_max_profit': original_pos['strategy_max_profit'],
+                'strategy_max_loss': original_pos['strategy_max_loss'],
+                'is_hedged': original_pos['is_hedged']
             }
-
-            legs = self._price_legs([new_leg], current_price, iv_bin_index)
-            pnl = self._calculate_strategy_pnl(legs, "SHIFT") # Strategy name is not critical here
-            strategy_name = f"{legs[0]['direction'].upper()}_{legs[0]['type'].upper()}"
-            pnl['strategy_id'] = self.strategy_name_to_id.get(strategy_name, -1)
-            self._execute_trades(legs, pnl)
-
+            
+            # 3. Add the new leg to the portfolio.
+            new_leg_priced = self._price_legs([new_leg], current_price, iv_bin_index)
+            new_pos_df = pd.DataFrame(new_leg_priced).astype(self.portfolio_dtypes)
+            self.portfolio = pd.concat([self.portfolio, new_pos_df], ignore_index=True)
+            
         except (ValueError, IndexError) as e:
             print(f"Warning: Could not parse shift action '{action_name}'. Error: {e}")
-            return
+
+    def shift_to_atm(self, action_name: str, current_price: float, iv_bin_index: int, current_step: int):
+        """
+        Efficiently shifts a leg to the ATM strike, inheriting the hedge status.
+        Relies on the action mask to prevent illegal shifts.
+        """
+        try:
+            position_index = int(action_name.split('_')[-1])
+            if not (0 <= position_index < len(self.portfolio)): return
+
+            original_pos = self.portfolio.iloc[position_index].copy()
+
+            self.close_position(position_index, current_price, iv_bin_index)
+            
+            new_atm_strike = self.market_rules_manager.get_atm_price(current_price)
+            
+            new_leg = {
+                'type': original_pos['type'], 'direction': original_pos['direction'],
+                'strike_price': new_atm_strike, 'entry_step': current_step,
+                'days_to_expiry': original_pos['days_to_expiry'],
+                # Inherit all strategy-level properties
+                'strategy_id': original_pos['strategy_id'],
+                'creation_id': original_pos['creation_id'],
+                'strategy_max_profit': original_pos['strategy_max_profit'],
+                'strategy_max_loss': original_pos['strategy_max_loss'],
+                'is_hedged': original_pos['is_hedged']
+            }
+
+            new_leg_priced = self._price_legs([new_leg], current_price, iv_bin_index)
+            new_pos_df = pd.DataFrame(new_leg_priced).astype(self.portfolio_dtypes)
+            self.portfolio = pd.concat([self.portfolio, new_pos_df], ignore_index=True)
+
+        except (ValueError, IndexError) as e:
+            print(f"Warning: Could not parse shift_to_atm action '{action_name}'. Error: {e}")
 
     def get_portfolio_summary(self, current_price: float, iv_bin_index: int) -> Dict:
         """
