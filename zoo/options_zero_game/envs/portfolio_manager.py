@@ -322,18 +322,19 @@ class PortfolioManager:
             return
 
     def shift_position(self, action_name: str, current_price: float, iv_bin_index: int, current_step: int):
-        """Efficiently shifts a leg, now relying on the robust close_position method."""
+        """
+        Atomically transforms an entire strategy by shifting one of its legs.
+        The risk profile of the complete, new structure is re-evaluated.
+        """
         try:
             parts = action_name.split('_')
             direction, position_index = parts[1].upper(), int(parts[3])
             if not (0 <= position_index < len(self.portfolio)): return
 
             original_pos = self.portfolio.iloc[position_index].copy()
+            original_creation_id = original_pos['creation_id']
             
-            # This robustly handles the removal and re-profiling of the old strategy
-            self.close_position(position_index, current_price, iv_bin_index)
-
-            # Now, open the new leg as a completely new, single-leg strategy
+            # 1. Define the new leg that will replace the original one.
             strike_modifier = self.strike_distance if direction == 'UP' else -self.strike_distance
             new_strike_price = original_pos['strike_price'] + strike_modifier
             new_leg = {
@@ -341,35 +342,63 @@ class PortfolioManager:
                 'strike_price': new_strike_price, 'entry_step': current_step,
                 'days_to_expiry': original_pos['days_to_expiry'],
             }
-            legs = self._price_legs([new_leg], current_price, iv_bin_index)
-            strategy_name = f"{legs[0]['direction'].upper()}_{legs[0]['type'].upper()}"
-            pnl = self._calculate_strategy_pnl(legs, strategy_name)
-            pnl['strategy_id'] = self.strategy_name_to_id.get(strategy_name, -1)
-            self._execute_trades(legs, pnl)
-        except Exception as e:
+
+            # 2. Re-assemble the full, transformed strategy.
+            other_legs = [row.to_dict() for idx, row in self.portfolio.iterrows() if row['creation_id'] == original_creation_id and idx != position_index]
+            transformed_strategy_legs = other_legs + [new_leg]
+
+            # 3. Price the new leg and determine the new strategy profile.
+            transformed_strategy_legs = self._price_legs(transformed_strategy_legs, current_price, iv_bin_index)
+            new_strategy_name = f"CUSTOM_SHIFTED_{len(transformed_strategy_legs)}" # A generic name for the new state
+            pnl = self._calculate_strategy_pnl(transformed_strategy_legs, new_strategy_name)
+            pnl['strategy_id'] = self.strategy_name_to_id.get(new_strategy_name, -2)
+
+            # 4. Atomically update the portfolio: remove all old legs and insert all new legs.
+            self.portfolio = self.portfolio[self.portfolio['creation_id'] != original_creation_id].reset_index(drop=True)
+            for leg in transformed_strategy_legs:
+                leg['creation_id'] = original_creation_id # Maintain the strategic link
+            self._execute_trades(transformed_strategy_legs, pnl)
+
+        except (ValueError, IndexError) as e:
             print(f"Warning: Could not parse shift action '{action_name}'. Error: {e}")
 
     def shift_to_atm(self, action_name: str, current_price: float, iv_bin_index: int, current_step: int):
-        """Efficiently shifts a leg to ATM, now relying on the robust close_position method."""
+        """
+        Atomically transforms an entire strategy by shifting one leg to the ATM strike.
+        The risk profile of the complete, new structure is re-evaluated.
+        """
         try:
             position_index = int(action_name.split('_')[-1])
             if not (0 <= position_index < len(self.portfolio)): return
-            
+
             original_pos = self.portfolio.iloc[position_index].copy()
-            self.close_position(position_index, current_price, iv_bin_index)
+            original_creation_id = original_pos['creation_id']
             
+            # 1. Define the new leg.
             new_atm_strike = self.market_rules_manager.get_atm_price(current_price)
             new_leg = {
                 'type': original_pos['type'], 'direction': original_pos['direction'],
                 'strike_price': new_atm_strike, 'entry_step': current_step,
                 'days_to_expiry': original_pos['days_to_expiry'],
             }
-            legs = self._price_legs([new_leg], current_price, iv_bin_index)
-            strategy_name = f"{legs[0]['direction'].upper()}_{legs[0]['type'].upper()}"
-            pnl = self._calculate_strategy_pnl(legs, strategy_name)
-            pnl['strategy_id'] = self.strategy_name_to_id.get(strategy_name, -1)
-            self._execute_trades(legs, pnl)
-        except Exception as e:
+
+            # 2. Re-assemble the full, transformed strategy.
+            other_legs = [row.to_dict() for idx, row in self.portfolio.iterrows() if row['creation_id'] == original_creation_id and idx != position_index]
+            transformed_strategy_legs = other_legs + [new_leg]
+
+            # 3. Price and profile the new strategy.
+            transformed_strategy_legs = self._price_legs(transformed_strategy_legs, current_price, iv_bin_index)
+            new_strategy_name = f"CUSTOM_SHIFTED_ATM_{len(transformed_strategy_legs)}"
+            pnl = self._calculate_strategy_pnl(transformed_strategy_legs, new_strategy_name)
+            pnl['strategy_id'] = self.strategy_name_to_id.get(new_strategy_name, -2)
+
+            # 4. Atomically update the portfolio.
+            self.portfolio = self.portfolio[self.portfolio['creation_id'] != original_creation_id].reset_index(drop=True)
+            for leg in transformed_strategy_legs:
+                leg['creation_id'] = original_creation_id
+            self._execute_trades(transformed_strategy_legs, pnl)
+            
+        except (ValueError, IndexError) as e:
             print(f"Warning: Could not parse shift_to_atm action '{action_name}'. Error: {e}")
 
     def get_portfolio_summary(self, current_price: float, iv_bin_index: int) -> Dict:
@@ -529,43 +558,60 @@ class PortfolioManager:
 
     def _calculate_strategy_pnl(self, legs: List[Dict], strategy_name: str) -> Dict:
         """
-        Calculates the max profit and loss. This version correctly classifies ALL
-        single-leg options as having an undefined risk component.
+        A robust, strategy-agnostic risk engine. It calculates the max profit/loss
+        by analyzing the structure of the legs, not by relying on a strategy name.
         """
         if not legs: return {'max_profit': 0.0, 'max_loss': 0.0}
 
+        # --- 1. Handle Single Leg Strategies ---
         if len(legs) == 1:
             leg = legs[0]
             entry_premium_total = leg['entry_premium'] * self.lot_size
-            
             if leg['direction'] == 'long':
-                # A long option's risk is defined by the premium paid.
                 max_loss = -entry_premium_total
-                # A long option's potential profit is considered undefined.
-                max_profit = self.undefined_risk_cap 
+                max_profit = self.undefined_risk_cap if leg['type'] == 'call' else (leg['strike_price'] * self.lot_size) - entry_premium_total
             else: # short
-                # A short option's potential profit is defined by the premium received.
                 max_profit = entry_premium_total
-                # A short option's risk is considered undefined.
-                max_loss = -self.undefined_risk_cap
-                
+                max_loss = -self.undefined_risk_cap if leg['type'] == 'call' else -((leg['strike_price'] * self.lot_size) - entry_premium_total)
             return {'max_profit': max_profit, 'max_loss': max_loss}
 
-        # --- Multi-leg logic remains the same and is correct ---
-        net_premium = sum(leg['entry_premium'] * (1 if leg['direction'] == 'long' else -1) for leg in legs)
-        is_debit_spread = net_premium > 0
+        # --- 2. For Multi-Leg, Determine if Risk is Defined or Undefined ---
+        is_defined_risk = True
+        short_calls = [l for l in legs if l['type'] == 'call' and l['direction'] == 'short']
+        long_calls = [l for l in legs if l['type'] == 'call' and l['direction'] == 'long']
+        short_puts = [l for l in legs if l['type'] == 'put' and l['direction'] == 'short']
+        long_puts = [l for l in legs if l['type'] == 'put' and l['direction'] == 'long']
 
-        if 'STRADDLE' in strategy_name or 'STRANGLE' in strategy_name:
-            if is_debit_spread: # Long
+        # Check for naked short calls: is every short call protected by a long call at a higher strike?
+        for sc in short_calls:
+            if not any(lc['strike_price'] > sc['strike_price'] for lc in long_calls):
+                is_defined_risk = False
+                break
+        if not is_defined_risk: # Check for naked short puts
+            for sp in short_puts:
+                if not any(lp['strike_price'] < sp['strike_price'] for lp in long_puts):
+                    is_defined_risk = False
+                    break
+        
+        # --- 3. Calculate PnL Based on Risk Profile ---
+        net_premium = sum(leg['entry_premium'] * (1 if leg['direction'] == 'long' else -1) for leg in legs)
+        
+        if not is_defined_risk:
+            # Undefined Risk Profile (e.g., a Straddle, Strangle, or broken spread)
+            if net_premium > 0: # Debit
                 max_loss = -net_premium * self.lot_size
                 max_profit = self.undefined_risk_cap
-            else: # Short
+            else: # Credit
                 max_profit = -net_premium * self.lot_size
                 max_loss = -self.undefined_risk_cap
             return {'max_profit': max_profit, 'max_loss': max_loss}
-        else: # Defined Risk (Verticals, Condors, Flies, Butterflies)
+        else:
+            # Defined Risk Profile (e.g., Verticals, Condors, Butterflies)
+            # The existing width-based calculation is general and correct for all defined-risk spreads.
+            is_debit_spread = net_premium > 0
             call_strikes = sorted([leg['strike_price'] for leg in legs if leg['type'] == 'call'])
             put_strikes = sorted([leg['strike_price'] for leg in legs if leg['type'] == 'put'])
+            
             call_width = (call_strikes[-1] - call_strikes[0]) if len(call_strikes) > 1 else 0
             put_width = (put_strikes[-1] - put_strikes[0]) if len(put_strikes) > 1 else 0
             max_width = max(call_width, put_width) * self.lot_size
@@ -573,7 +619,7 @@ class PortfolioManager:
             if is_debit_spread:
                 max_loss = -net_premium * self.lot_size
                 max_profit = max_width + max_loss 
-            else:
+            else: # Credit spread
                 max_profit = -net_premium * self.lot_size
                 max_loss = -max_width + max_profit
             return {'max_profit': max_profit, 'max_loss': max_loss}
