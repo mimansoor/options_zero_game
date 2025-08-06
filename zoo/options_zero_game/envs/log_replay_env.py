@@ -1,9 +1,10 @@
 # zoo/options_zero_game/envs/log_replay_env.py
-# <<< DEFINITIVE VERSION with Correct PnL Calculation >>>
+# <<< DEFINITIVE VERSION with "Settlement Day" Logging >>>
 
 import json
 import gymnasium as gym
 import pandas as pd
+import copy
 from ding.utils import ENV_REGISTRY
 from .options_zero_game_env import OptionsZeroGameEnv
 from ding.envs.env.base_env import BaseEnvTimestep
@@ -21,18 +22,20 @@ class LogReplayEnv(gym.Wrapper):
     def reset(self, **kwargs):
         self._episode_history = []
         obs = self.env.reset(**kwargs)
-        self._log_current_state() # Log the initial state at Step 0
+        self._log_current_state()
         return obs
 
     def step(self, action):
         timestep = self.env.step(action)
         self._update_previous_log_with_outcome(timestep, action)
+        
         if not timestep.done:
             self._log_current_state()
         else:
             # --- THE FIX: Episode is finished, log the special settlement state ---
             self._log_settlement_state(timestep)
             self.save_log()
+            
         return timestep
 
     def _serialize_portfolio(self, portfolio_df: pd.DataFrame, current_price: float) -> list:
