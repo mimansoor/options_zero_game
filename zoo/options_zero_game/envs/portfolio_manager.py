@@ -558,8 +558,9 @@ class PortfolioManager:
 
     def _calculate_strategy_pnl(self, legs: List[Dict], strategy_name: str) -> Dict:
         """
-        A robust, strategy-agnostic risk engine. It calculates the max profit/loss
-        by analyzing the structure of the legs, not by relying on a strategy name.
+        A robust, truly strategy-agnostic risk engine. It calculates max profit/loss
+        by analyzing the fundamental structure of the legs for all four sources of
+        undefined risk (naked short calls/puts and naked long calls/puts).
         """
         if not legs: return {'max_profit': 0.0, 'max_loss': 0.0}
 
@@ -575,29 +576,38 @@ class PortfolioManager:
                 max_loss = -self.undefined_risk_cap if leg['type'] == 'call' else -((leg['strike_price'] * self.lot_size) - entry_premium_total)
             return {'max_profit': max_profit, 'max_loss': max_loss}
 
-        # --- 2. For Multi-Leg, Determine if Risk is Defined or Undefined ---
+        # --- 2. For Multi-Leg, Determine if Risk is Truly Defined ---
         is_defined_risk = True
         short_calls = [l for l in legs if l['type'] == 'call' and l['direction'] == 'short']
         long_calls = [l for l in legs if l['type'] == 'call' and l['direction'] == 'long']
         short_puts = [l for l in legs if l['type'] == 'put' and l['direction'] == 'short']
         long_puts = [l for l in legs if l['type'] == 'put' and l['direction'] == 'long']
 
-        # Check for naked short calls: is every short call protected by a long call at a higher strike?
+        # Rule A: Is every short call covered by a long call at a higher strike?
         for sc in short_calls:
             if not any(lc['strike_price'] > sc['strike_price'] for lc in long_calls):
-                is_defined_risk = False
-                break
-        if not is_defined_risk: # Check for naked short puts
+                is_defined_risk = False; break
+        # Rule B: Is every short put covered by a long put at a lower strike?
+        if is_defined_risk:
             for sp in short_puts:
                 if not any(lp['strike_price'] < sp['strike_price'] for lp in long_puts):
-                    is_defined_risk = False
-                    break
+                    is_defined_risk = False; break
+        # Rule C: Is every long call covered by a short call at a higher strike?
+        if is_defined_risk:
+            for lc in long_calls:
+                if not any(sc['strike_price'] > lc['strike_price'] for sc in short_calls):
+                    is_defined_risk = False; break
+        # Rule D: Is every long put covered by a short put at a lower strike?
+        if is_defined_risk:
+            for lp in long_puts:
+                if not any(sp['strike_price'] < lp['strike_price'] for sp in short_puts):
+                    is_defined_risk = False; break
         
-        # --- 3. Calculate PnL Based on Risk Profile ---
+        # --- 3. Calculate PnL Based on the True Risk Profile ---
         net_premium = sum(leg['entry_premium'] * (1 if leg['direction'] == 'long' else -1) for leg in legs)
         
         if not is_defined_risk:
-            # Undefined Risk Profile (e.g., a Straddle, Strangle, or broken spread)
+            # Undefined Risk Profile (Naked)
             if net_premium > 0: # Debit
                 max_loss = -net_premium * self.lot_size
                 max_profit = self.undefined_risk_cap
@@ -606,12 +616,10 @@ class PortfolioManager:
                 max_loss = -self.undefined_risk_cap
             return {'max_profit': max_profit, 'max_loss': max_loss}
         else:
-            # Defined Risk Profile (e.g., Verticals, Condors, Butterflies)
-            # The existing width-based calculation is general and correct for all defined-risk spreads.
+            # Defined Risk Profile (Hedged)
             is_debit_spread = net_premium > 0
             call_strikes = sorted([leg['strike_price'] for leg in legs if leg['type'] == 'call'])
             put_strikes = sorted([leg['strike_price'] for leg in legs if leg['type'] == 'put'])
-            
             call_width = (call_strikes[-1] - call_strikes[0]) if len(call_strikes) > 1 else 0
             put_width = (put_strikes[-1] - put_strikes[0]) if len(put_strikes) > 1 else 0
             max_width = max(call_width, put_width) * self.lot_size
