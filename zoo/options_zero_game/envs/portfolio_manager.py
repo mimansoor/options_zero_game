@@ -188,16 +188,16 @@ class PortfolioManager:
             if row['creation_id'] == original_creation_id and idx != position_index
         ]
         
-        # 3. Atomically update the portfolio: remove all old legs.
+        # 3. Atomically update the portfolio: remove ALL old legs of the strategy.
         self.portfolio = self.portfolio[self.portfolio['creation_id'] != original_creation_id].reset_index(drop=True)
 
-        # 4. If there are any legs left, re-profile and re-add them.
+        # 4. If there are any legs left, re-profile and re-add them as a new strategy.
         if remaining_legs:
             # Determine the new strategy name and profile.
             num_legs = len(remaining_legs)
-            new_strategy_name = f"CUSTOM_{num_legs}_LEGS" # A generic name for the new state
+            new_strategy_name = f"CUSTOM_{num_legs}_LEGS"
             pnl_profile = self._calculate_strategy_pnl(remaining_legs, new_strategy_name)
-            pnl_profile['strategy_id'] = self.strategy_name_to_id.get(new_strategy_name, -3) # Use a unique default
+            pnl_profile['strategy_id'] = self.strategy_name_to_id.get(new_strategy_name, -3)
 
             # Re-add the remaining legs with their new, correct, unified risk profile.
             for leg in remaining_legs:
@@ -321,45 +321,8 @@ class PortfolioManager:
             print(f"Warning: Could not parse HEDGE action '{action_name}'. Error: {e}")
             return
 
-    def _update_strategy_profile(self, creation_id_to_update: int):
-        """
-        Re-evaluates a strategy's risk profile after a change (e.g., a leg was closed).
-        It finds all legs with the same creation_id, calculates their new combined
-        max profit/loss, and updates all of them.
-        """
-        if self.portfolio.empty: return
-
-        # Find all legs that are part of the strategy we need to update
-        strategy_legs_df = self.portfolio[self.portfolio['creation_id'] == creation_id_to_update]
-        if strategy_legs_df.empty: return
-
-        strategy_legs_list = [row.to_dict() for _, row in strategy_legs_df.iterrows()]
-        
-        # --- Re-calculate the PnL profile for the remaining legs ---
-        # We need a simple heuristic to guess the new strategy name
-        num_legs = len(strategy_legs_list)
-        if num_legs == 1:
-            leg = strategy_legs_list[0]
-            new_strategy_name = f"{leg['direction'].upper()}_{leg['type'].upper()}"
-        elif num_legs == 2: new_strategy_name = "CUSTOM_SPREAD" # Could be a vertical or a strangle
-        else: new_strategy_name = "CUSTOM_HEDGED"
-        
-        pnl = self._calculate_strategy_pnl(strategy_legs_list, new_strategy_name)
-        
-        # --- Update all legs of the strategy in the main portfolio DataFrame ---
-        indices_to_update = self.portfolio[self.portfolio['creation_id'] == creation_id_to_update].index
-        
-        self.portfolio.loc[indices_to_update, 'strategy_max_profit'] = pnl.get('max_profit', 0.0)
-        self.portfolio.loc[indices_to_update, 'strategy_max_loss'] = pnl.get('max_loss', 0.0)
-        
-        # Finally, call the hedge status updater which will now use the new PnL values
-        self._update_hedge_status()
-
     def shift_position(self, action_name: str, current_price: float, iv_bin_index: int, current_step: int):
-        """
-        Efficiently shifts a leg, inheriting the hedge status of its parent.
-        Relies on the action mask to prevent illegal shifts.
-        """
+        """Efficiently shifts a leg, now relying on the robust close_position method."""
         try:
             parts = action_name.split('_')
             direction, position_index = parts[1].upper(), int(parts[3])
@@ -367,66 +330,46 @@ class PortfolioManager:
 
             original_pos = self.portfolio.iloc[position_index].copy()
             
-            # 1. Close the original leg. This removes it from the portfolio.
-            # No need to update the strategy profile of the remaining legs yet.
+            # This robustly handles the removal and re-profiling of the old strategy
             self.close_position(position_index, current_price, iv_bin_index)
 
-            # 2. Define the new leg.
+            # Now, open the new leg as a completely new, single-leg strategy
             strike_modifier = self.strike_distance if direction == 'UP' else -self.strike_distance
             new_strike_price = original_pos['strike_price'] + strike_modifier
-            
             new_leg = {
                 'type': original_pos['type'], 'direction': original_pos['direction'],
                 'strike_price': new_strike_price, 'entry_step': current_step,
                 'days_to_expiry': original_pos['days_to_expiry'],
-                # Inherit all strategy-level properties from the parent
-                'strategy_id': original_pos['strategy_id'],
-                'creation_id': original_pos['creation_id'],
-                'strategy_max_profit': original_pos['strategy_max_profit'],
-                'strategy_max_loss': original_pos['strategy_max_loss'],
-                'is_hedged': original_pos['is_hedged']
             }
-            
-            # 3. Add the new leg to the portfolio.
-            new_leg_priced = self._price_legs([new_leg], current_price, iv_bin_index)
-            new_pos_df = pd.DataFrame(new_leg_priced).astype(self.portfolio_dtypes)
-            self.portfolio = pd.concat([self.portfolio, new_pos_df], ignore_index=True)
-            
-        except (ValueError, IndexError) as e:
+            legs = self._price_legs([new_leg], current_price, iv_bin_index)
+            strategy_name = f"{legs[0]['direction'].upper()}_{legs[0]['type'].upper()}"
+            pnl = self._calculate_strategy_pnl(legs, strategy_name)
+            pnl['strategy_id'] = self.strategy_name_to_id.get(strategy_name, -1)
+            self._execute_trades(legs, pnl)
+        except Exception as e:
             print(f"Warning: Could not parse shift action '{action_name}'. Error: {e}")
 
     def shift_to_atm(self, action_name: str, current_price: float, iv_bin_index: int, current_step: int):
-        """
-        Efficiently shifts a leg to the ATM strike, inheriting the hedge status.
-        Relies on the action mask to prevent illegal shifts.
-        """
+        """Efficiently shifts a leg to ATM, now relying on the robust close_position method."""
         try:
             position_index = int(action_name.split('_')[-1])
             if not (0 <= position_index < len(self.portfolio)): return
-
+            
             original_pos = self.portfolio.iloc[position_index].copy()
-
             self.close_position(position_index, current_price, iv_bin_index)
             
             new_atm_strike = self.market_rules_manager.get_atm_price(current_price)
-            
             new_leg = {
                 'type': original_pos['type'], 'direction': original_pos['direction'],
                 'strike_price': new_atm_strike, 'entry_step': current_step,
                 'days_to_expiry': original_pos['days_to_expiry'],
-                # Inherit all strategy-level properties
-                'strategy_id': original_pos['strategy_id'],
-                'creation_id': original_pos['creation_id'],
-                'strategy_max_profit': original_pos['strategy_max_profit'],
-                'strategy_max_loss': original_pos['strategy_max_loss'],
-                'is_hedged': original_pos['is_hedged']
             }
-
-            new_leg_priced = self._price_legs([new_leg], current_price, iv_bin_index)
-            new_pos_df = pd.DataFrame(new_leg_priced).astype(self.portfolio_dtypes)
-            self.portfolio = pd.concat([self.portfolio, new_pos_df], ignore_index=True)
-
-        except (ValueError, IndexError) as e:
+            legs = self._price_legs([new_leg], current_price, iv_bin_index)
+            strategy_name = f"{legs[0]['direction'].upper()}_{legs[0]['type'].upper()}"
+            pnl = self._calculate_strategy_pnl(legs, strategy_name)
+            pnl['strategy_id'] = self.strategy_name_to_id.get(strategy_name, -1)
+            self._execute_trades(legs, pnl)
+        except Exception as e:
             print(f"Warning: Could not parse shift_to_atm action '{action_name}'. Error: {e}")
 
     def get_portfolio_summary(self, current_price: float, iv_bin_index: int) -> Dict:
