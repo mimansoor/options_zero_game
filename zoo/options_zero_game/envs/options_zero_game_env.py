@@ -214,9 +214,8 @@ class OptionsZeroGameEnv(gym.Env):
         equity_before = self.portfolio_manager.get_current_equity(self.price_manager.current_price, self.iv_bin_index)
         
         # --- 2. Determine and Execute the Final Action ---
-        final_action, was_illegal_action = self._handle_action(action)
-        
         final_action_name = self.indices_to_actions.get(final_action, 'INVALID')
+        
         if final_action_name.startswith('OPEN_'):
             current_day = self.current_step // self._cfg.steps_per_day
             days_to_expiry_float = (self._cfg.time_to_expiry_days - current_day) * (self.TOTAL_DAYS_IN_WEEK / self.TRADING_DAYS_IN_WEEK)
@@ -226,13 +225,17 @@ class OptionsZeroGameEnv(gym.Env):
             self.portfolio_manager.close_position(int(final_action_name.split('_')[-1]), self.price_manager.current_price, self.iv_bin_index)
         elif final_action_name == 'CLOSE_ALL':
             self.portfolio_manager.close_all_positions(self.price_manager.current_price, self.iv_bin_index)
+        
+        # This new, nested structure prevents mis-routing of SHIFT actions.
         elif final_action_name.startswith('SHIFT_'):
-            self.portfolio_manager.shift_position(final_action_name, self.price_manager.current_price, self.iv_bin_index, self.current_step)
-        elif final_action_name.startswith('SHIFT_TO_ATM_'):
-            self.portfolio_manager.shift_to_atm(final_action_name, self.price_manager.current_price, self.iv_bin_index, self.current_step)
+            if 'ATM' in final_action_name:
+                self.portfolio_manager.shift_to_atm(final_action_name, self.price_manager.current_price, self.iv_bin_index, self.current_step)
+            else: # Must be UP or DOWN
+                self.portfolio_manager.shift_position(final_action_name, self.price_manager.current_price, self.iv_bin_index, self.current_step)
+
         elif final_action_name.startswith('HEDGE_POS_'):
             self.portfolio_manager.add_hedge(final_action_name, self.price_manager.current_price, self.iv_bin_index, self.current_step)
-
+            
         self.portfolio_manager.sort_portfolio()
 
         # --- 3. Advance Time and Market (CORRECT ORDER) ---
