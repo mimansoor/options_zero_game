@@ -697,7 +697,7 @@ class OptionsZeroGameEnv(gym.Env):
         else:
             # Case B Logic
             atm_price = self.market_rules_manager.get_atm_price(self.price_manager.current_price)
-            days_to_expiry = (self._cfg.time_to_expiry_days - current_day) * (self.TOTAL_DAYS_IN_WEEK / self.TRADING_DAYS_IN_WEEK)
+            days_to_expiry = (self._cfg.time_to_expiry_days - self.current_day_index) * (self.TOTAL_DAYS_IN_WEEK / self.TRADING_DAYS_IN_WEEK)
             for action_name, index in self.actions_to_indices.items():
                 if not action_name.startswith('OPEN_'): continue
                 is_legal = True
