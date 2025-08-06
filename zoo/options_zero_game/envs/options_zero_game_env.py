@@ -734,6 +734,10 @@ class OptionsZeroGameEnv(gym.Env):
 
     # --- Properties and Static Methods ---
     @property
+    def strike_distance(self) -> float:
+        """A safe, public, read-only property to access strike_distance."""
+        return self._cfg.strike_distance
+    @property
     def current_day_index(self) -> int:
         """A safe, public, read-only property to get the current day index (0-indexed)."""
         return int(self.current_step // self.steps_per_day)
