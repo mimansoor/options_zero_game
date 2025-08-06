@@ -1,5 +1,5 @@
 # zoo/options_zero_game/envs/log_replay_env.py
-# <<< DEFINITIVE VERSION Using the PortfolioManager Snapshot API >>>
+# <<< DEFINITIVE VERSION with Correct PnL Calculation >>>
 
 import json
 import gymnasium as gym
@@ -14,7 +14,7 @@ class LogReplayEnv(gym.Wrapper):
     def __init__(self, cfg: dict):
         base_env = OptionsZeroGameEnv(cfg)
         super().__init__(base_env)
-        self.log_file_path = cfg.log_file_path
+        self.log_file_path = cfg.get('log_file_path', 'replay_log.json')
         self._episode_history = []
         print(f"LogReplayEnv initialized. Replay will be saved to: {self.log_file_path}")
 
@@ -25,25 +25,19 @@ class LogReplayEnv(gym.Wrapper):
         return obs
 
     def step(self, action):
-        # 1. Execute the step. This moves the world from S_t to S_{t+1}.
-        #    Crucially, this also makes the PortfolioManager save its pre_step_portfolio snapshot.
         timestep = self.env.step(action)
-        
-        # 2. Back-patch the outcome into the log for S_t.
         self._update_previous_log_with_outcome(timestep, action)
-        
-        # 3. Log the new state, S_{t+1}, unless the episode is over.
         if not timestep.done:
             self._log_current_state()
-        
         if timestep.done:
             self.save_log()
-            
         return timestep
 
     def _serialize_portfolio(self, portfolio_df: pd.DataFrame, current_price: float) -> list:
-        # (This helper method is correct and unchanged)
         serializable_portfolio = []
+        if portfolio_df is None or portfolio_df.empty:
+            return serializable_portfolio
+            
         for index, pos in portfolio_df.iterrows():
             is_call = pos['type'] == 'call'
             atm_price = self.env.market_rules_manager.get_atm_price(current_price)
@@ -52,7 +46,7 @@ class LogReplayEnv(gym.Wrapper):
             greeks = self.env.bs_manager.get_all_greeks_and_price(current_price, pos['strike_price'], pos['days_to_expiry'], vol, is_call)
             
             mid_price = greeks['price']
-            current_premium = self.env.bs_manager.get_price_with_spread(mid_price, is_buy=(pos['direction'] == 'short'), bid_ask_spread_pct=self.env.bid_ask_spread_pct)
+            current_premium = self.env.bs_manager.get_price_with_spread(mid_price, is_buy=(pos['direction'] == 'short'), bid_ask_spread_pct=self.env._cfg.bid_ask_spread_pct)
             
             pnl_multiplier = 1 if pos['direction'] == 'long' else -1
             pnl = (current_premium - pos['entry_premium']) * self.env.portfolio_manager.lot_size * pnl_multiplier
@@ -66,11 +60,11 @@ class LogReplayEnv(gym.Wrapper):
         return serializable_portfolio
 
     def _log_current_state(self):
-        """Creates a log entry for the CURRENT EOD state and appends it."""
         current_price = self.env.price_manager.current_price
-        portfolio_to_log = self.env.portfolio_manager.portfolio # Log the EOD portfolio
-        pnl_to_log = self._get_safe_pnl(portfolio_to_log, current_price)
+        portfolio_to_log = self.env.portfolio_manager.portfolio
+        
         serialized_portfolio = self._serialize_portfolio(portfolio_to_log, current_price)
+        pnl_to_log = self._get_safe_pnl(serialized_portfolio)
         
         obs_vector = self.env._get_observation()
         meter = BiasMeter(obs_vector[:self.env.market_and_portfolio_state_size], self.env.OBS_IDX)
@@ -87,46 +81,33 @@ class LogReplayEnv(gym.Wrapper):
             'action_name': 'N/A', 'illegal_actions_in_episode': self.env.illegal_action_count
         }
 
-        # Instead of doing the calculation itself, the logger now asks the
-        # environment for the result directly. This is much cleaner.
-        log_entry = {
-            'step': int(self.env.current_step),
-            'day': self.env.current_day,
-            'portfolio': serialized_portfolio,
-            'info': info,
-            'action': None, 'reward': None, 'done': False
-        }
+        log_entry = {'step': int(self.env.current_step), 'day': self.env.current_day, 'portfolio': serialized_portfolio, 'info': info, 'action': None, 'reward': None, 'done': False}
         self._episode_history.append(log_entry)
 
     def _update_previous_log_with_outcome(self, timestep, action_taken):
-        """Updates the PREVIOUS log entry with the results of the action and the correct portfolio snapshot."""
         if not self._episode_history: return
-        
         log_entry_to_update = self._episode_history[-1]
         info = timestep.info
         
-        # Update with the action and its direct results
         log_entry_to_update.update({'action': int(action_taken), 'reward': timestep.reward, 'done': timestep.done})
         log_entry_to_update['info']['action_name'] = info.get('executed_action_name', 'N/A')
         log_entry_to_update['info']['illegal_actions_in_episode'] = info.get('illegal_actions_in_episode', 0)
         
-        # --- THE FINAL, CORRECT LOGIC ---
-        # Get the definitive portfolio state from just after the action was taken.
         post_action_portfolio = self.env.portfolio_manager.get_pre_step_portfolio()
-        
-        # We need the price from that moment in time as well.
         price_at_action_time = log_entry_to_update['info']['price']
         
-        # Reserialize the portfolio with this snapshot and update the log.
-        log_entry_to_update['portfolio'] = self._serialize_portfolio(post_action_portfolio, price_at_action_time)
-        
-        # The PnL for that step is the PnL of that specific snapshot.
-        log_entry_to_update['info']['eval_episode_return'] = self._get_safe_pnl(post_action_portfolio, price_at_action_time)
+        serialized_post_action_portfolio = self._serialize_portfolio(post_action_portfolio, price_at_action_time)
+        log_entry_to_update['portfolio'] = serialized_post_action_portfolio
+        log_entry_to_update['info']['eval_episode_return'] = self._get_safe_pnl(serialized_post_action_portfolio)
 
-    def _get_safe_pnl(self, portfolio_df: pd.DataFrame, current_price: float) -> float:
-        # (This helper method is now critical)
-        serialized_p = self._serialize_portfolio(portfolio_df, current_price)
-        total_live_pnl = sum(p['live_pnl'] for p in serialized_p)
+    def _get_safe_pnl(self, serialized_portfolio: list) -> float:
+        """
+        Calculates the total PnL by summing the 'live_pnl' from a pre-serialized portfolio list.
+        """
+        if not serialized_portfolio:
+            return self.env.portfolio_manager.realized_pnl
+            
+        total_live_pnl = sum(p['live_pnl'] for p in serialized_portfolio)
         return self.env.portfolio_manager.realized_pnl + total_live_pnl
 
     def save_log(self):
