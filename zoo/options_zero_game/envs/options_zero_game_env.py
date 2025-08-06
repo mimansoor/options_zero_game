@@ -104,6 +104,11 @@ class OptionsZeroGameEnv(gym.Env):
         ignore_legal_actions=True,
         otm_delta_threshold=0.15,
         itm_delta_threshold=0.85,
+
+        # These rules apply ONLY when opening a new LONG single-leg position.
+        otm_long_delta_threshold=0.20, # Disallow buying options with delta < 20
+        itm_long_delta_threshold=0.65, # Disallow buying options with delta > 65
+
         strategy_name_to_id={}, # Can be left empty, as it's populated from the main config
     )
 
@@ -525,42 +530,54 @@ class OptionsZeroGameEnv(gym.Env):
         
     def _get_true_action_mask(self) -> np.ndarray:
         """
-        Calculates the complete, rule-based action mask with simplified logic.
-        This version correctly handles all game states.
+        The definitive, correct implementation of the action mask, combining all rules
+        in the correct order of priority.
         """
         action_mask = np.zeros(self.action_space_size, dtype=np.int8)
 
-        # --- NEW LOGIC FOR FORCING A STRATEGY ---
-        # This is the highest priority rule, used for targeted backtesting.
-        if self.current_step == 0 and self._cfg.get('forced_opening_strategy_name'):
-            forced_action_name = self._cfg.forced_opening_strategy_name
-            action_index = self.actions_to_indices.get(forced_action_name)
-
-            # Assert that the provided strategy name is valid
-            assert action_index is not None, f"Forced opening strategy '{forced_action_name}' not found in action space."
-
+        # --- Rule 1: Forced Strategy for Analysis (Highest Priority) ---
+        forced_strategy = self._cfg.get('forced_opening_strategy_name')
+        if self.current_step == 0 and forced_strategy:
+            action_index = self.actions_to_indices.get(forced_strategy)
+            assert action_index is not None, f"Forced strategy '{forced_strategy}' is invalid."
             action_mask[action_index] = 1
             return action_mask
-        # --- END OF NEW LOGIC ---
 
-        # --- Rule 1: Expiry Day is a special case that overrides everything else ---
+        # --- Rule 2: Step 0 - Forced Diverse Opening for Training ---
+        if self.current_step == 0:
+            strategy_families = {
+                "SINGLE_LEG": lambda name: 'ATM' in name and 'STRADDLE' not in name and 'STRANGLE' not in name,
+                "STRADDLE": lambda name: 'STRADDLE' in name, "STRANGLE": lambda name: 'STRANGLE' in name,
+                "VERTICAL": lambda name: 'VERTICAL' in name, "IRON_FLY_CONDOR": lambda name: 'IRON' in name,
+                "BUTTERFLY": lambda name: 'FLY' in name and 'IRON' not in name,
+            }
+            chosen_family_name = random.choice(list(strategy_families.keys()))
+            is_in_family = strategy_families[chosen_family_name]
+            
+            for action_name, index in self.actions_to_indices.items():
+                if action_name.startswith('OPEN_') and is_in_family(action_name):
+                    action_mask[index] = 1
+            
+            if not np.any(action_mask): # Failsafe
+                for name, index in self.actions_to_indices.items():
+                    if name.startswith('OPEN_'): action_mask[index] = 1
+            return action_mask
+
+        # --- Rule 3: Expiry Day Logic ---
         current_day = self.current_step // self._cfg.steps_per_day
         is_expiry_day = current_day >= (self._cfg.time_to_expiry_days - 1)
-
         if is_expiry_day:
-            if self.portfolio_manager.portfolio.empty:
-                # If portfolio is empty on expiry, the only thing to do is wait.
-                action_mask[self.actions_to_indices['HOLD']] = 1
-            else:
-                # If there are positions, the only legal actions are to close them.
+            action_mask[self.actions_to_indices['HOLD']] = 1
+            if not self.portfolio_manager.portfolio.empty:
                 action_mask[self.actions_to_indices['CLOSE_ALL']] = 1
                 for i in range(len(self.portfolio_manager.portfolio)):
                     if f'CLOSE_POSITION_{i}' in self.actions_to_indices:
                         action_mask[self.actions_to_indices[f'CLOSE_POSITION_{i}']] = 1
             return action_mask
 
-        # --- Rule 2: Main logic for all non-expiry days ---
-        
+        # --- Rule 4: Standard Mid-Episode Logic ---
+        action_mask[self.actions_to_indices['HOLD']] = 1
+       
         if not self.portfolio_manager.portfolio.empty:
             # Case A: A position is already open.
             # The agent can hold, close, or roll/shift the position.
@@ -623,29 +640,27 @@ class OptionsZeroGameEnv(gym.Env):
                 if is_naked and has_space and f'HEDGE_POS_{i}' in self.actions_to_indices:
                     action_mask[self.actions_to_indices[f'HEDGE_POS_{i}']] = 1
         else:
-            # Case B: The portfolio is empty. The agent must open a position.
-            # This correctly handles BOTH step 0 and any later step where the portfolio is empty.
-            if self.current_step == 0:
-                # Sub-case B1: It's the first step. Force a DIVERSE opening. HOLD is illegal.
-                strategy_families = {
-                    "SINGLE_LEG": lambda name: 'ATM' in name, "STRADDLE": lambda name: 'STRADDLE' in name,
-                    "STRANGLE": lambda name: 'STRANGLE' in name, "VERTICAL": lambda name: 'VERTICAL' in name,
-                    "IRON_FLY_CONDOR": lambda name: 'IRON' in name, "BUTTERFLY": lambda name: 'FLY' in name and 'IRON' not in name,
-                }
-                chosen_family_name = random.choice(list(strategy_families.keys()))
-                is_in_family = strategy_families[chosen_family_name]
-                for action_name, index in self.actions_to_indices.items():
-                    if action_name.startswith('OPEN_') and is_in_family(action_name):
-                        action_mask[index] = 1
-                if not np.any(action_mask): # Failsafe
-                    for name, index in self.actions_to_indices.items():
-                        if name.startswith('OPEN_'): action_mask[index] = 1
-            else:
-                # Sub-case B2: It's a later step. Allow any opening, and also allow holding.
-                action_mask[self.actions_to_indices['HOLD']] = 1
-                for name, index in self.actions_to_indices.items():
-                    if name.startswith('OPEN_'):
-                        action_mask[index] = 1
+            # Case B Logic
+            atm_price = self.market_rules_manager.get_atm_price(self.price_manager.current_price)
+            days_to_expiry = (self._cfg.time_to_expiry_days - current_day) * (self.TOTAL_DAYS_IN_WEEK / self.TRADING_DAYS_IN_WEEK)
+            for action_name, index in self.actions_to_indices.items():
+                if not action_name.startswith('OPEN_'): continue
+                is_legal = True
+                parts = action_name.split('_')
+                is_single_leg = 'ATM' in action_name and 'STRADDLE' not in action_name and 'STRANGLE' not in action_name
+                if is_single_leg:
+                    direction, option_type, offset_str = parts[1], parts[2].lower(), parts[3].replace('ATM','')
+                    offset = int(offset_str)
+                    strike_price = atm_price + (offset * self._cfg.strike_distance)
+                    vol = self.market_rules_manager.get_implied_volatility(offset, option_type, self.iv_bin_index)
+                    greeks = self.bs_manager.get_all_greeks_and_price(self.price_manager.current_price, strike_price, days_to_expiry, vol, option_type == 'call')
+                    abs_delta = abs(greeks['delta'])
+                    if direction == 'LONG':
+                        if abs_delta < self._cfg.otm_long_delta_threshold or abs_delta > self._cfg.itm_long_delta_threshold: is_legal = False
+                    elif direction == 'SHORT':
+                        if abs_delta > self._cfg.itm_long_delta_threshold: is_legal = False
+                if is_legal:
+                    action_mask[index] = 1
 
         return action_mask
 
