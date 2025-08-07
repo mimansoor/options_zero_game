@@ -877,7 +877,7 @@ class PortfolioManager:
             net_credit_received = body_legs[0]['entry_premium'] + body_legs[1]['entry_premium']
             wing_width = round(net_credit_received / self.strike_distance) * self.strike_distance
             
-            MAX_SENSIBLE_WIDTH = 10 * self.strike_distance
+            MAX_SENSIBLE_WIDTH = 20 * self.strike_distance
             
             if self.strike_distance <= wing_width <= MAX_SENSIBLE_WIDTH:
                 strike_long_put = atm_price - wing_width
@@ -891,7 +891,7 @@ class PortfolioManager:
                 # Price the new wings
                 legs = self._price_legs(legs, current_price, iv_bin_index)
             else:
-                print(f"Warning: Dynamic wing width ({wing_width}) for Iron Fly was out of bounds. Falling back to fixed-width.")
+                print(f"Warning: Dynamic wing width ({self.strike_distance} <= {wing_width}) <= {MAX_SENSIBLE_WIDTH} for Iron Fly was out of bounds. Falling back to fixed-width.")
 
         if not legs:
             body_direction = 'long' if direction == 'long' else 'short'
