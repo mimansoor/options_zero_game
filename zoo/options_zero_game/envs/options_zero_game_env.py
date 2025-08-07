@@ -272,7 +272,7 @@ class OptionsZeroGameEnv(gym.Env):
         #print("-------------------------------------------------\n")
 
         self.portfolio_manager.sort_portfolio()
-        self.portfolio_manager.take_post_action_portfolio_snapshot()
+        #self.portfolio_manager.take_post_action_portfolio_snapshot()
 
         # --- 3. Advance Time and Market (CORRECT ORDER) ---
         # First, calculate decay based on the CURRENT step.

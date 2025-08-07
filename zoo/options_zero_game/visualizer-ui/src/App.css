@@ -103,3 +103,24 @@
   color: lightcoral;
   font-weight: bold;
 }
+
+.navigation-buttons {
+  display: flex;
+  gap: 10px;
+  margin: 10px 0;
+}
+
+.navigation-buttons button {
+  padding: 8px 16px;
+  background-color: #61dafb;
+  border: none;
+  border-radius: 4px;
+  color: #282c34;
+  font-weight: bold;
+  cursor: pointer;
+}
+
+.navigation-buttons button:disabled {
+  background-color: #555;
+  cursor: not-allowed;
+}

@@ -51,50 +51,13 @@ class PortfolioManager:
 
     # --- Public Methods (called by the main environment) ---
 
-    def _close_worthless_short_legs(self, current_price: float, iv_bin_index: int):
-        """
-        Automatically closes any short leg that is profitable and whose current
-        premium has decayed below a configured threshold (e.g., $1.00).
-        """
-        # Check if the rule is disabled or the portfolio is empty
-        if self.close_short_leg_on_profit_threshold <= 0 or self.portfolio.empty:
-            return
-
-        indices_to_close = []
-        for i, pos in self.portfolio.iterrows():
-            # Condition 1: Must be a short position
-            if pos['direction'] != 'short':
-                continue
-
-            # Calculate the current premium of the leg
-            is_call = pos['type'] == 'call'
-            atm_price = self.market_rules_manager.get_atm_price(current_price)
-            offset = round((pos['strike_price'] - atm_price) / self.strike_distance)
-            vol = self.market_rules_manager.get_implied_volatility(offset, pos['type'], iv_bin_index)
-            greeks = self.bs_manager.get_all_greeks_and_price(current_price, pos['strike_price'], pos['days_to_expiry'], vol, is_call)
-            
-            # The "ask" price is what we would pay to buy it back to close
-            current_premium = self.bs_manager.get_price_with_spread(greeks['price'], is_buy=True, bid_ask_spread_pct=self.bid_ask_spread_pct)
-
-            # Condition 2: The current premium must be below our threshold
-            if current_premium < self.close_short_leg_on_profit_threshold:
-                # Condition 3: The position must be profitable (entry premium was higher than what we're paying now)
-                if pos['entry_premium'] > current_premium:
-                    indices_to_close.append(i)
-
-        # Close the identified positions in reverse order to avoid index shifting issues
-        if indices_to_close:
-            #print(f"DEBUG: Auto-closing {len(indices_to_close)} worthless short positions.") # Optional debug print
-            for index in sorted(indices_to_close, reverse=True):
-                self.close_position(index, current_price, iv_bin_index)
-
     def get_portfolio(self) -> pd.DataFrame:
         """Public API to get the portfolio state."""
         return self.portfolio
 
-    def get_post_action_portfolio(self) -> pd.DataFrame:
-        """Public API to get the portfolio state immediately after an action."""
-        return self.post_action_portfolio
+    #def get_post_action_portfolio(self) -> pd.DataFrame:
+        #"""Public API to get the portfolio state immediately after an action."""
+        #return self.post_action_portfolio
 
     def open_strategy(self, action_name: str, current_price: float, iv_bin_index: int, current_step: int, days_to_expiry: float):
         """Routes any 'OPEN_' action to the correct specialized private method."""
@@ -267,6 +230,83 @@ class PortfolioManager:
     def close_all_positions(self, current_price: float, iv_bin_index: int):
         while not self.portfolio.empty:
             self.close_position(-1, current_price, iv_bin_index)
+
+    def get_pnl_verification(self, current_price: float, iv_bin_index: int) -> dict:
+        """Calculates the components for the P&L verification panel."""
+        unrealized_pnl = self.get_total_pnl(current_price, iv_bin_index) - self.realized_pnl
+        return {
+            'realized_pnl': self.realized_pnl,
+            'unrealized_pnl': unrealized_pnl,
+            'verified_total_pnl': self.realized_pnl + unrealized_pnl
+        }
+
+    def get_payoff_data(self, current_price: float) -> dict:
+        """
+        Calculates the P&L of the current portfolio at expiry across a range of prices.
+        This is used to generate the P&L payoff diagram.
+        """
+        if self.portfolio.empty:
+            return {'expiry_pnl': [], 'breakevens': []}
+
+        price_range = np.linspace(current_price * 0.85, current_price * 1.15, 100)
+        expiry_pnl = []
+        
+        for price in price_range:
+            pnl_at_price = 0
+            for _, pos in self.portfolio.iterrows():
+                pnl_multiplier = 1 if pos['direction'] == 'long' else -1
+                
+                if pos['type'] == 'call':
+                    leg_pnl = max(0, price - pos['strike_price']) - pos['entry_premium']
+                else: # Put
+                    leg_pnl = max(0, pos['strike_price'] - price) - pos['entry_premium']
+                
+                pnl_at_price += leg_pnl * pnl_multiplier * self.lot_size
+            
+            expiry_pnl.append({'price': price, 'pnl': self.realized_pnl + pnl_at_price})
+            
+        # A simple breakeven calculation (can be improved for complex spreads)
+        breakevens = [p['price'] for p in expiry_pnl if len(expiry_pnl) > 1 and np.sign(p['pnl']) != np.sign(expiry_pnl[0]['pnl'])]
+        
+        return {'expiry_pnl': expiry_pnl, 'breakevens': breakevens}
+
+    # --- Private Methods ---
+    def _close_worthless_short_legs(self, current_price: float, iv_bin_index: int):
+        """
+        Automatically closes any short leg that is profitable and whose current
+        premium has decayed below a configured threshold (e.g., $1.00).
+        """
+        # Check if the rule is disabled or the portfolio is empty
+        if self.close_short_leg_on_profit_threshold <= 0 or self.portfolio.empty:
+            return
+
+        indices_to_close = []
+        for i, pos in self.portfolio.iterrows():
+            # Condition 1: Must be a short position
+            if pos['direction'] != 'short':
+                continue
+
+            # Calculate the current premium of the leg
+            is_call = pos['type'] == 'call'
+            atm_price = self.market_rules_manager.get_atm_price(current_price)
+            offset = round((pos['strike_price'] - atm_price) / self.strike_distance)
+            vol = self.market_rules_manager.get_implied_volatility(offset, pos['type'], iv_bin_index)
+            greeks = self.bs_manager.get_all_greeks_and_price(current_price, pos['strike_price'], pos['days_to_expiry'], vol, is_call)
+            
+            # The "ask" price is what we would pay to buy it back to close
+            current_premium = self.bs_manager.get_price_with_spread(greeks['price'], is_buy=True, bid_ask_spread_pct=self.bid_ask_spread_pct)
+
+            # Condition 2: The current premium must be below our threshold
+            if current_premium < self.close_short_leg_on_profit_threshold:
+                # Condition 3: The position must be profitable (entry premium was higher than what we're paying now)
+                if pos['entry_premium'] > current_premium:
+                    indices_to_close.append(i)
+
+        # Close the identified positions in reverse order to avoid index shifting issues
+        if indices_to_close:
+            #print(f"DEBUG: Auto-closing {len(indices_to_close)} worthless short positions.") # Optional debug print
+            for index in sorted(indices_to_close, reverse=True):
+                self.close_position(index, current_price, iv_bin_index)
 
     def _update_hedge_status(self):
         """
