@@ -1,5 +1,5 @@
 # zoo/options_zero_game/envs/log_replay_env.py
-# <<< DEFINITIVE VERSION with "Settlement Day" Logging >>>
+# <<< DEFINITIVE VERSION with Correct Single-Pass Logging >>>
 
 import json
 import gymnasium as gym
@@ -22,21 +22,66 @@ class LogReplayEnv(gym.Wrapper):
     def reset(self, **kwargs):
         self._episode_history = []
         obs = self.env.reset(**kwargs)
-        self._log_current_state()
+        # We do NOT log here. The first log entry will be created by the first step.
         return obs
 
     def step(self, action):
-        timestep = self.env.step(action)
-        self._update_previous_log_with_outcome(timestep, action)
+        """
+        The definitive step method. It uses a simple, single-pass logic to
+        log the state that resulted from the agent's action.
+        """
+        # 1. Get the state of the world *before* the action.
+        pre_action_price = self.env.price_manager.current_price
+        pre_action_step = self.env.current_step
+        pre_action_day = self.env.current_day
         
-        if not timestep.done:
-            self._log_current_state()
-        else:
-            # --- THE FIX: Episode is finished, log the special settlement state ---
+        # 2. Execute the step in the main environment. This moves the world to the next state.
+        timestep = self.env.step(action)
+        
+        # 3. Create the definitive log entry for the action that was just taken.
+        self._log_action_outcome(timestep, action, pre_action_price, pre_action_step, pre_action_day)
+        
+        # 4. If the episode just ended, add the special "Settlement Day" entry.
+        if timestep.done:
             self._log_settlement_state(timestep)
             self.save_log()
             
         return timestep
+
+    def _log_action_outcome(self, timestep, action_taken, price_at_action_time, step_at_action, day_at_action):
+        """Creates a single, complete log entry for the action that was just taken."""
+        
+        # --- The Definitive Logic ---
+        # The portfolio to log is the snapshot taken IMMEDIATELY after the action.
+        portfolio_to_log = self.env.portfolio_manager.get_post_action_portfolio()
+        serialized_portfolio = self._serialize_portfolio(portfolio_to_log, price_at_action_time)
+        pnl_to_log = self._get_safe_pnl(serialized_portfolio)
+        
+        # The observation vector for the bias meter is the one from the state the action was taken in.
+        # This requires a small temporary change, as the `timestep` has the *next* observation.
+        # For simplicity, we'll re-calculate the bias for the pre-action state.
+        # A more advanced implementation would pass the pre-action obs through the timestep.
+        meter = BiasMeter(self.env._get_observation()[:self.env.market_and_portfolio_state_size], self.env.OBS_IDX)
+
+        last_price = self._episode_history[-1]['info']['price'] if self._episode_history else self.env.price_manager.start_price
+        last_price_change_pct = ((price_at_action_time / last_price) - 1) * 100 if last_price > 0 else 0.0
+
+        info = {
+            'price': float(price_at_action_time), 'eval_episode_return': pnl_to_log,
+            'start_price': float(self.env.price_manager.start_price),
+            'market_regime': str(self.env.price_manager.current_regime_name),
+            'last_price_change_pct': last_price_change_pct,
+            'directional_bias': meter.directional_bias, 'volatility_bias': meter.volatility_bias,
+            'action_name': timestep.info.get('executed_action_name', 'N/A'),
+            'illegal_actions_in_episode': timestep.info.get('illegal_actions_in_episode', 0)
+        }
+
+        log_entry = {
+            'step': int(step_at_action), 'day': int(day_at_action),
+            'portfolio': serialized_portfolio, 'info': info,
+            'action': int(action_taken), 'reward': timestep.reward, 'done': timestep.done
+        }
+        self._episode_history.append(log_entry)
 
     def _serialize_portfolio(self, portfolio_df: pd.DataFrame, current_price: float) -> list:
         serializable_portfolio = []
@@ -51,7 +96,7 @@ class LogReplayEnv(gym.Wrapper):
             greeks = self.env.bs_manager.get_all_greeks_and_price(current_price, pos['strike_price'], pos['days_to_expiry'], vol, is_call)
             
             mid_price = greeks['price']
-            current_premium = self.env.bs_manager.get_price_with_spread(mid_price, is_buy=(pos['direction'] == 'short'), bid_ask_spread_pct=self.env._cfg.bid_ask_spread_pct)
+            current_premium = self.env.bs_manager.get_price_with_spread(mid_price, is_buy=(pos['direction'] == 'short'), bid_ask_spread_pct=self.env.bid_ask_spread_pct)
             
             pnl_multiplier = 1 if pos['direction'] == 'long' else -1
             pnl = (current_premium - pos['entry_premium']) * self.env.portfolio_manager.lot_size * pnl_multiplier
@@ -64,47 +109,6 @@ class LogReplayEnv(gym.Wrapper):
             })
         return serializable_portfolio
 
-    def _log_current_state(self):
-        current_price = self.env.price_manager.current_price
-        portfolio_to_log = self.env.portfolio_manager.portfolio
-        
-        serialized_portfolio = self._serialize_portfolio(portfolio_to_log, current_price)
-        pnl_to_log = self._get_safe_pnl(serialized_portfolio)
-        
-        obs_vector = self.env._get_observation()
-        meter = BiasMeter(obs_vector[:self.env.market_and_portfolio_state_size], self.env.OBS_IDX)
-        
-        last_price = self._episode_history[-1]['info']['price'] if self._episode_history else self.env.price_manager.start_price
-        last_price_change_pct = ((current_price / last_price) - 1) * 100 if last_price > 0 else 0.0
-
-        info = {
-            'price': float(current_price), 'eval_episode_return': pnl_to_log,
-            'start_price': float(self.env.price_manager.start_price),
-            'market_regime': str(self.env.price_manager.current_regime_name),
-            'last_price_change_pct': last_price_change_pct,
-            'directional_bias': meter.directional_bias, 'volatility_bias': meter.volatility_bias,
-            'action_name': 'N/A', 'illegal_actions_in_episode': self.env.illegal_action_count
-        }
-
-        log_entry = {'step': int(self.env.current_step), 'day': self.env.current_day, 'portfolio': serialized_portfolio, 'info': info, 'action': None, 'reward': None, 'done': False}
-        self._episode_history.append(log_entry)
-
-    def _update_previous_log_with_outcome(self, timestep, action_taken):
-        if not self._episode_history: return
-        log_entry_to_update = self._episode_history[-1]
-        info = timestep.info
-        
-        log_entry_to_update.update({'action': int(action_taken), 'reward': timestep.reward, 'done': timestep.done})
-        log_entry_to_update['info']['action_name'] = info.get('executed_action_name', 'N/A')
-        log_entry_to_update['info']['illegal_actions_in_episode'] = info.get('illegal_actions_in_episode', 0)
-        
-        post_action_portfolio = self.env.portfolio_manager.get_pre_step_portfolio()
-        price_at_action_time = log_entry_to_update['info']['price']
-        
-        serialized_post_action_portfolio = self._serialize_portfolio(post_action_portfolio, price_at_action_time)
-        log_entry_to_update['portfolio'] = serialized_post_action_portfolio
-        log_entry_to_update['info']['eval_episode_return'] = self._get_safe_pnl(serialized_post_action_portfolio)
-
     def _get_safe_pnl(self, serialized_portfolio: list) -> float:
         """
         Calculates the total PnL by summing the 'live_pnl' from a pre-serialized portfolio list.
@@ -116,33 +120,30 @@ class LogReplayEnv(gym.Wrapper):
         return self.env.portfolio_manager.realized_pnl + total_live_pnl
 
     def _log_settlement_state(self, final_timestep):
-        """
-        Creates and appends a final, special log entry for the end of the episode
-        to show the fully realized PnL and an empty portfolio.
-        """
+        """Creates and appends a final, special log entry for the end of the episode."""
         if not self._episode_history: return
-
-        # Use the last known state as a template
+        
         last_log_entry = copy.deepcopy(self._episode_history[-1])
+        info = final_timestep.info
+
+        # The portfolio to log is the snapshot taken IMMEDIATELY after the action.
+        portfolio_to_log = self.env.portfolio_manager.get_post_action_portfolio()
+        serialized_portfolio = self._serialize_portfolio(portfolio_to_log, self.env.price_manager.current_price)
+ 
+        # Determine the reason for termination
+        final_reward = final_timestep.reward
+        if info.get('is_expiration', False): final_action_name = "EXPIRATION"
+        elif final_reward == -1.0: final_action_name = "STOP-LOSS HIT"
+        elif final_reward == self.env.jackpot_reward: final_action_name = "PROFIT TARGET MET"
+        else: final_action_name = "TERMINATED"
         
-        # Create the settlement entry
         settlement_entry = last_log_entry
-        
-        # Update to reflect the final settlement
-        settlement_entry['step'] = last_log_entry['step'] + 1
-        settlement_entry['day'] = last_log_entry['day'] + 1
-        settlement_entry['portfolio'] = [] # The portfolio is now empty
-        settlement_entry['done'] = True
-        settlement_entry['action'] = None
-        settlement_entry['reward'] = None
-        
-        # The EOD PnL is the final, realized return from the episode
-        settlement_entry['info']['eval_episode_return'] = final_timestep.info['eval_episode_return']
-        settlement_entry['info']['action_name'] = "AUTO-SETTLE"
-        
-        # Carry over the last known biases for context
-        settlement_entry['info']['directional_bias'] = last_log_entry['info']['directional_bias']
-        settlement_entry['info']['volatility_bias'] = last_log_entry['info']['volatility_bias']
+        settlement_entry.update({
+            'step': last_log_entry['step'] + 1, 'day': last_log_entry['day'] + 1,
+            'portfolio': serialized_portfolio, 'done': True, 'action': None, 'reward': final_reward
+        })
+        settlement_entry['info']['eval_episode_return'] = info['eval_episode_return']
+        settlement_entry['info']['action_name'] = final_action_name
         
         self._episode_history.append(settlement_entry)
 

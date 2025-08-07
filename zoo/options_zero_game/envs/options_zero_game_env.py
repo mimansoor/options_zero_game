@@ -304,51 +304,37 @@ class OptionsZeroGameEnv(gym.Env):
 
         terminated_by_time = self.current_step >= self.total_steps
         terminated = terminated_by_rule or terminated_by_time
-        
-        if terminated: 
-            self.portfolio_manager.close_all_positions(self.price_manager.current_price, self.iv_bin_index)
 
-        # --- 5. Calculate Reward ---
+        # The environment's job is to calculate the final PnL.
+        # It does NOT prematurely clean up the portfolio. The logger will handle that.
         equity_after = self.portfolio_manager.get_current_equity(self.price_manager.current_price, self.iv_bin_index)
         shaped_reward, raw_reward = self._calculate_shaped_reward(equity_before, equity_after)
         self.final_eval_reward += raw_reward
         
-        if final_shaped_reward_override is not None:
-            final_reward = final_shaped_reward_override
-        elif was_illegal_action:
-            final_reward = self._cfg.illegal_action_penalty
-        else:
-            final_reward = shaped_reward
+        if final_shaped_reward_override is not None: final_reward = final_shaped_reward_override
+        elif was_illegal_action: final_reward = self._cfg.illegal_action_penalty
+        else: final_reward = shaped_reward
 
-        # --- 6. Prepare and Return Timestep ---
+        # --- Prepare and Return Timestep ---
         obs = self._get_observation()
-        action_mask = self._get_true_action_mask() if not self._cfg.ignore_legal_actions else np.ones(self.action_space_size, dtype=np.int8)
-
-        # --- THE FIX: Add Bias Meter to the Info Dict ---
-
-        # 1. Get the current observation state (without the action mask)
-        current_obs_vector = obs[:self.market_and_portfolio_state_size]
-
-        # 2. Instantiate the meter to get the synthesized biases
-        meter = BiasMeter(current_obs_vector, self.OBS_IDX)
-
-        # 3. Create the standard info dictionary
+        action_mask = self._get_true_action_mask()
+        meter = BiasMeter(obs[:self.market_and_portfolio_state_size], self.OBS_IDX)
+        
+        # The environment correctly reports the final executed name.
+        if terminated_by_time: final_executed_name = "EXPIRATION"
+        else: final_executed_name = self.indices_to_actions.get(final_action, 'INVALID')
         
         info = {
-            'price': self.price_manager.current_price,
-            'eval_episode_return': self.final_eval_reward,
-            'illegal_actions_in_episode': self.illegal_action_count,
-            'was_illegal_action': bool(was_illegal_action),
-            'executed_action_name': self.indices_to_actions.get(final_action, 'INVALID'),
-            # Add the bias information to the dictionary for logging
-            'directional_bias': meter.directional_bias,
+            'price': self.price_manager.current_price, 'eval_episode_return': self.final_eval_reward,
+            'illegal_actions_in_episode': self.illegal_action_count, 'was_illegal_action': bool(was_illegal_action),
+            'executed_action_name': final_executed_name, 'directional_bias': meter.directional_bias,
             'volatility_bias': meter.volatility_bias
         }
 
-        # If the episode is done, add the final duration to the info dict.
         if terminated:
             info['episode_duration'] = self.current_step
-
+        
+        # The portfolio is intentionally left intact for the logger to record.
         return BaseEnvTimestep({'observation': obs, 'action_mask': action_mask, 'to_play': -1}, final_reward, terminated, info)
 
     def _handle_action(self, action: int) -> Tuple[int, bool]:
@@ -734,8 +720,12 @@ class OptionsZeroGameEnv(gym.Env):
 
     # --- Properties and Static Methods ---
     @property
+    def jackpot_reward(self) -> float:
+        """A safe, public, read-only property to access jackpot_reward."""
+        return self._cfg.jackpot_reward
+    @property
     def bid_ask_spread_pct(self) -> float:
-        """A safe, public, read-only property to access strike_distance."""
+        """A safe, public, read-only property to access bid_ask_pread_pct."""
         return self._cfg.bid_ask_spread_pct
     @property
     def strike_distance(self) -> float:
