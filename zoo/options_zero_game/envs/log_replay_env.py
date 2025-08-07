@@ -131,16 +131,12 @@ class LogReplayEnv(gym.Wrapper):
         serialized_portfolio = self._serialize_portfolio(portfolio_to_log, self.env.price_manager.current_price)
  
         # Determine the reason for termination
-        final_reward = final_timestep.reward
-        if info.get('is_expiration', False): final_action_name = "EXPIRATION"
-        elif final_reward == -1.0: final_action_name = "STOP-LOSS HIT"
-        elif final_reward == self.env.jackpot_reward: final_action_name = "PROFIT TARGET MET"
-        else: final_action_name = "TERMINATED"
+        final_action_name = info['final_action_name']
         
         settlement_entry = last_log_entry
         settlement_entry.update({
             'step': last_log_entry['step'] + 1, 'day': last_log_entry['day'] + 1,
-            'portfolio': serialized_portfolio, 'done': True, 'action': None, 'reward': final_reward
+            'portfolio': serialized_portfolio, 'done': True, 'action': None, 'reward': final_timestep.reward
         })
         settlement_entry['info']['eval_episode_return'] = info['eval_episode_return']
         settlement_entry['info']['action_name'] = final_action_name

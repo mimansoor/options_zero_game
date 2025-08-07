@@ -21,6 +21,8 @@ class PortfolioManager:
         self.strike_distance = cfg['strike_distance']
         self.undefined_risk_cap = self.initial_cash * 10
         self.strategy_name_to_id = cfg.get('strategy_name_to_id', {})
+        self.close_short_leg_on_profit_threshold = cfg.get('close_short_leg_on_profit_threshold', 0.0)
+        self.is_eval_mode = cfg.get('is_eval_mode', False)
         self.max_strike_offset = cfg['max_strike_offset']
         
         # Managers
@@ -47,6 +49,43 @@ class PortfolioManager:
         self.initial_net_premium = 0.0
 
     # --- Public Methods (called by the main environment) ---
+
+    def _close_worthless_short_legs(self, current_price: float, iv_bin_index: int):
+        """
+        Automatically closes any short leg that is profitable and whose current
+        premium has decayed below a configured threshold (e.g., $1.00).
+        """
+        # Check if the rule is disabled or the portfolio is empty
+        if self.close_short_leg_on_profit_threshold <= 0 or self.portfolio.empty:
+            return
+
+        indices_to_close = []
+        for i, pos in self.portfolio.iterrows():
+            # Condition 1: Must be a short position
+            if pos['direction'] != 'short':
+                continue
+
+            # Calculate the current premium of the leg
+            is_call = pos['type'] == 'call'
+            atm_price = self.market_rules_manager.get_atm_price(current_price)
+            offset = round((pos['strike_price'] - atm_price) / self.strike_distance)
+            vol = self.market_rules_manager.get_implied_volatility(offset, pos['type'], iv_bin_index)
+            greeks = self.bs_manager.get_all_greeks_and_price(current_price, pos['strike_price'], pos['days_to_expiry'], vol, is_call)
+            
+            # The "ask" price is what we would pay to buy it back to close
+            current_premium = self.bs_manager.get_price_with_spread(greeks['price'], is_buy=True, bid_ask_spread_pct=self.bid_ask_spread_pct)
+
+            # Condition 2: The current premium must be below our threshold
+            if current_premium < self.close_short_leg_on_profit_threshold:
+                # Condition 3: The position must be profitable (entry premium was higher than what we're paying now)
+                if pos['entry_premium'] > current_premium:
+                    indices_to_close.append(i)
+
+        # Close the identified positions in reverse order to avoid index shifting issues
+        if indices_to_close:
+            #print(f"DEBUG: Auto-closing {len(indices_to_close)} worthless short positions.") # Optional debug print
+            for index in sorted(indices_to_close, reverse=True):
+                self.close_position(index, current_price, iv_bin_index)
 
     def get_portfolio(self) -> pd.DataFrame:
         """Public API to get the portfolio state."""
@@ -155,6 +194,9 @@ class PortfolioManager:
             for idx in sorted(expired_indices, reverse=True):
                 self.close_position(idx, current_price, iv_bin_index)
 
+        # Finally, check for any profitable short legs that can be closed for cheap.
+        self._close_worthless_short_legs(current_price, iv_bin_index)
+
     def close_position(self, position_index: int, current_price: float, iv_bin_index: int):
         """
         Atomically closes a single leg and correctly re-evaluates the risk profile
@@ -210,8 +252,6 @@ class PortfolioManager:
 
         # 1. Always update the hedge status after a change.
         self._update_hedge_status()
-        # 2. Always take a snapshot of the final state.
-        self.post_action_portfolio = self.portfolio.copy()
 
         # --- THE DEBUG PRINT YOU REQUESTED ---
         # This will print the full portfolio DataFrame after every change,
@@ -547,8 +587,19 @@ class PortfolioManager:
         }
 
     def sort_portfolio(self):
+        """
+        Sorts the portfolio. Uses a simple, chronological sort for training and a
+        more complex, human-readable sort for evaluation.
+        """
         if not self.portfolio.empty:
-            self.portfolio = self.portfolio.sort_values(by=['strike_price', 'type', 'direction', 'creation_id']).reset_index(drop=True)
+            if self.is_eval_mode:
+                # The key for human analysis and debugging
+                sort_key = ['strike_price', 'type', 'direction', 'creation_id']
+            else:
+                # The simplest, most stable key for the training agent
+                sort_key = ['creation_id']
+            
+            self.portfolio = self.portfolio.sort_values(by=sort_key).reset_index(drop=True)
 
     def render(self, current_price: float, current_step: int, iv_bin_index: int, steps_per_day: int):
         total_pnl = self.get_total_pnl(current_price, iv_bin_index)
@@ -556,6 +607,11 @@ class PortfolioManager:
         print(f"Step: {current_step:04d} | Day: {day:02d} | Price: ${current_price:9.2f} | Positions: {len(self.portfolio):1d} | Total PnL: ${total_pnl:9.2f}")
         if not self.portfolio.empty:
             print(self.portfolio.to_string(index=False))
+        return
+
+    def take_post_action_portfolio_snapshot(self):
+        self.post_action_portfolio = self.portfolio.copy()
+        return
 
     def _execute_trades(self, trades_to_execute: List[Dict], strategy_pnl: Dict):
         """
@@ -570,8 +626,6 @@ class PortfolioManager:
         source of truth for updating hedge status and taking the post-action snapshot.
         """
         if not trades_to_execute:
-            # If we are just clearing the portfolio, we still need to take a snapshot.
-            self.post_action_portfolio = self.portfolio.copy()
             return
         
         strategy_id = strategy_pnl.get('strategy_id', -1)
@@ -607,8 +661,6 @@ class PortfolioManager:
 
         # 1. Always update the hedge status after a change.
         self._update_hedge_status()
-        # 2. Always take a snapshot of the final state.
-        self.post_action_portfolio = self.portfolio.copy()
 
     def _price_legs(self, legs: List[Dict], current_price: float, iv_bin_index: int) -> List[Dict]:
         atm_price = self.market_rules_manager.get_atm_price(current_price)
@@ -825,7 +877,7 @@ class PortfolioManager:
             net_credit_received = body_legs[0]['entry_premium'] + body_legs[1]['entry_premium']
             wing_width = round(net_credit_received / self.strike_distance) * self.strike_distance
             
-            MAX_SENSIBLE_WIDTH = 5 * self.strike_distance
+            MAX_SENSIBLE_WIDTH = 8 * self.strike_distance
             
             if self.strike_distance <= wing_width <= MAX_SENSIBLE_WIDTH:
                 strike_long_put = atm_price - wing_width

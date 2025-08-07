@@ -96,9 +96,11 @@ options_zero_game_muzero_config = dict(
         # --- Evaluator-Specific Settings ---
         evaluator_env_num=evaluator_env_num,
         n_evaluator_episode=evaluator_env_num,
+        is_eval_mode=False,
         # The evaluator lets the agent choose its own move.
         # The framework will automatically use these settings for the evaluator envs.
         evaluator_env_cfg=dict(
+            is_eval_mode=True,
             disable_opening_curriculum=True,
 
             # The evaluator ALWAYS uses a fixed, consistent episode length.

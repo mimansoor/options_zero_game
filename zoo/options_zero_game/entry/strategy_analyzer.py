@@ -108,6 +108,7 @@ if __name__ == "__main__":
             current_create_config = copy.deepcopy(create_config)
             
             current_main_config.env.forced_opening_strategy_name = strategy_name
+            current_main_config.env.is_eval_mode = True
             current_main_config.env.forced_historical_symbol = args.symbol
             current_main_config.env.n_evaluator_episode = 1
             current_main_config.env.evaluator_env_num = 1

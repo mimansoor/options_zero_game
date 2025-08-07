@@ -33,7 +33,7 @@ class OptionsZeroGameEnv(gym.Env):
     # instantiated on its own without errors.
     config = dict(
         # Price Action Manager Config
-        price_source='historical',
+        price_source='mixed',
         forced_historical_symbol=None,
         historical_data_path='zoo/options_zero_game/data/market_data_cache',
         market_regimes = [
@@ -95,10 +95,11 @@ class OptionsZeroGameEnv(gym.Env):
         illegal_action_penalty=-1.0,
         
         # Advanced Trading Rules
-        profit_target_pct=3.0,
+        profit_target_pct=5.0,
+        close_short_leg_on_profit_threshold=1.0,
         jackpot_reward=1.0,
-        strategy_profit_target_pct=50.0,
-        stop_loss_multiple_of_cost=1.5, # NEW: Added stop loss multiple
+        strategy_profit_target_pct=75.0,
+        stop_loss_multiple_of_cost=10.5, # NEW: Added stop loss multiple
         use_stop_loss=True,
         forced_opening_strategy_name=None,
         disable_opening_curriculum=False,
@@ -125,6 +126,9 @@ class OptionsZeroGameEnv(gym.Env):
         self._cfg = self.default_config()
         if cfg is not None: self._cfg.update(cfg)
         
+        # The environment now knows its own role.
+        self.is_eval_mode = self._cfg.get('is_eval_mode', False)
+
         self.np_random, _ = seeding.np_random(None)
 
         self.bs_manager = BlackScholesManager(self._cfg)
@@ -261,8 +265,13 @@ class OptionsZeroGameEnv(gym.Env):
 
         elif final_action_name.startswith('HEDGE_POS_'):
             self.portfolio_manager.add_hedge(final_action_name, self.price_manager.current_price, self.iv_bin_index, self.current_step)
-            
+
+        #print(f"\n--- Portfolio State After Hedge Status Update --- A:{final_action_name}")
+        #print(self.portfolio_manager.portfolio.to_string())
+        #print("-------------------------------------------------\n")
+
         self.portfolio_manager.sort_portfolio()
+        self.portfolio_manager.take_post_action_portfolio_snapshot()
 
         # --- 3. Advance Time and Market (CORRECT ORDER) ---
         # First, calculate decay based on the CURRENT step.
@@ -302,7 +311,7 @@ class OptionsZeroGameEnv(gym.Env):
                     terminated_by_rule = True
                     final_shaped_reward_override = self._cfg.jackpot_reward
 
-        terminated_by_time = self.current_step >= self.total_steps
+        terminated_by_time = self.current_step >= (self.total_steps-1)
         terminated = terminated_by_rule or terminated_by_time
 
         # The environment's job is to calculate the final PnL.
@@ -332,7 +341,11 @@ class OptionsZeroGameEnv(gym.Env):
         }
 
         if terminated:
+            if final_reward == -1.0: final_action_name = "STOP-LOSS HIT"
+            elif final_reward == self._cfg.jackpot_reward: final_action_name = "PROFIT TARGET MET"
+            else: final_action_name = "TERMINATED"
             info['episode_duration'] = self.current_step
+            info['final_action_name'] = final_action_name
         
         # The portfolio is intentionally left intact for the logger to record.
         return BaseEnvTimestep({'observation': obs, 'action_mask': action_mask, 'to_play': -1}, final_reward, terminated, info)
