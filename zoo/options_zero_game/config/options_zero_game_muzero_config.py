@@ -10,11 +10,11 @@ from zoo.options_zero_game.envs.options_zero_game_env import OptionsZeroGameEnv
 collector_env_num = 8
 evaluator_env_num = 8
 batch_size = 256
-num_simulations = 25
+num_simulations = 35
 update_per_collect = 200
 max_env_step = int(5e7)
 reanalyze_ratio = 0.
-n_episode = 16
+n_episode = 8
 
 market_regimes = [
     # Name, mu, omega, alpha, beta, overnight_vol_multiplier

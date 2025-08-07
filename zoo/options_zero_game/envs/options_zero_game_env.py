@@ -317,7 +317,7 @@ class OptionsZeroGameEnv(gym.Env):
 
         # --- Prepare and Return Timestep ---
         obs = self._get_observation()
-        action_mask = self._get_true_action_mask()
+        action_mask = self._get_true_action_mask() if not self._cfg.ignore_legal_actions else np.ones(self.action_space_size, dtype=np.int8)
         meter = BiasMeter(obs[:self.market_and_portfolio_state_size], self.OBS_IDX)
         
         # The environment correctly reports the final executed name.
