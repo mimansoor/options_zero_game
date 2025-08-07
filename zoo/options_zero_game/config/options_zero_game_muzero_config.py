@@ -8,13 +8,13 @@ from zoo.options_zero_game.envs.options_zero_game_env import OptionsZeroGameEnv
 #                 Static Parameters
 # ==============================================================
 collector_env_num = 8
-evaluator_env_num = 8
+evaluator_env_num = 4
 batch_size = 256
 num_simulations = 35
-update_per_collect = 200
+update_per_collect = 500
 max_env_step = int(5e7)
 reanalyze_ratio = 0.
-n_episode = 8
+n_episode = 16
 
 market_regimes = [
     # Name, mu, omega, alpha, beta, overnight_vol_multiplier
@@ -110,7 +110,7 @@ options_zero_game_muzero_config = dict(
 
         manager=dict(shared_memory=False, ),
         # Pass all necessary parameters to the environment
-        price_source='historical',
+        price_source='mixed',
         historical_data_path='zoo/options_zero_game/data/market_data_cache',
         drawdown_penalty_weight=0.1,
         market_regimes=market_regimes,
