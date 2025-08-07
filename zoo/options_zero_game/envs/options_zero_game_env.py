@@ -341,11 +341,7 @@ class OptionsZeroGameEnv(gym.Env):
         }
 
         if terminated:
-            if final_reward == -1.0: final_action_name = "STOP-LOSS HIT"
-            elif final_reward == self._cfg.jackpot_reward: final_action_name = "PROFIT TARGET MET"
-            else: final_action_name = "TERMINATED"
             info['episode_duration'] = self.current_step
-            info['final_action_name'] = final_action_name
         
         # The portfolio is intentionally left intact for the logger to record.
         return BaseEnvTimestep({'observation': obs, 'action_mask': action_mask, 'to_play': -1}, final_reward, terminated, info)

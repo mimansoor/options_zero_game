@@ -131,7 +131,7 @@ class LogReplayEnv(gym.Wrapper):
         serialized_portfolio = self._serialize_portfolio(portfolio_to_log, self.env.price_manager.current_price)
  
         # Determine the reason for termination
-        final_action_name = info['final_action_name']
+        final_action_name = "FINAL STELLEMENT"
         
         settlement_entry = last_log_entry
         settlement_entry.update({
