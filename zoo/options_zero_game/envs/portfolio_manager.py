@@ -877,7 +877,7 @@ class PortfolioManager:
             net_credit_received = body_legs[0]['entry_premium'] + body_legs[1]['entry_premium']
             wing_width = round(net_credit_received / self.strike_distance) * self.strike_distance
             
-            MAX_SENSIBLE_WIDTH = 8 * self.strike_distance
+            MAX_SENSIBLE_WIDTH = 10 * self.strike_distance
             
             if self.strike_distance <= wing_width <= MAX_SENSIBLE_WIDTH:
                 strike_long_put = atm_price - wing_width
