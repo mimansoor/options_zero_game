@@ -60,6 +60,7 @@ class OptionsZeroGameEnv(gym.Env):
         strike_distance=50.0,
         max_strike_offset=20,
         bid_ask_spread_pct=0.002,
+        brokerage_per_leg=20.0,
         
         # Black-Scholes Manager Config
         risk_free_rate=0.10,

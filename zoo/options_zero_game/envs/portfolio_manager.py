@@ -23,6 +23,7 @@ class PortfolioManager:
         self.strategy_name_to_id = cfg.get('strategy_name_to_id', {})
         self.close_short_leg_on_profit_threshold = cfg.get('close_short_leg_on_profit_threshold', 0.0)
         self.is_eval_mode = cfg.get('is_eval_mode', False)
+        self.brokerage_per_leg = cfg.get('brokerage_per_leg', 0.0)
         self.max_strike_offset = cfg['max_strike_offset']
         
         # Managers
@@ -223,6 +224,9 @@ class PortfolioManager:
         pnl_multiplier = 1 if pos_to_close['direction'] == 'long' else -1
         pnl = (exit_premium - pos_to_close['entry_premium']) * pnl_multiplier
         self.realized_pnl += pnl * self.lot_size
+
+        # Deduct the brokerage fee for closing this leg.
+        self.realized_pnl -= self.brokerage_per_leg
         
         # 2. Re-assemble the remaining legs of the strategy.
         remaining_legs = [
@@ -627,6 +631,10 @@ class PortfolioManager:
         """
         if not trades_to_execute:
             return
+
+        # Deduct brokerage from realized PnL for each new leg being opened.
+        opening_brokerage = len(trades_to_execute) * self.brokerage_per_leg
+        self.realized_pnl -= opening_brokerage
         
         strategy_id = strategy_pnl.get('strategy_id', -1)
         
