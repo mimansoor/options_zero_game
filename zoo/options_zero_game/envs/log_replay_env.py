@@ -127,7 +127,7 @@ class LogReplayEnv(gym.Wrapper):
         info = final_timestep.info
 
         # The portfolio to log is the snapshot taken IMMEDIATELY after the action.
-        portfolio_to_log = self.env.portfolio_manager.get_post_action_portfolio()
+        portfolio_to_log = self.env.portfolio_manager.get_portfolio()
         serialized_portfolio = self._serialize_portfolio(portfolio_to_log, self.env.price_manager.current_price)
  
         # Determine the reason for termination
