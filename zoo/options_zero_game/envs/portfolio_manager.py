@@ -548,7 +548,7 @@ class PortfolioManager:
 
     def sort_portfolio(self):
         if not self.portfolio.empty:
-            self.portfolio = self.portfolio.sort_values(by=['strike_price', 'type', 'creation_id']).reset_index(drop=True)
+            self.portfolio = self.portfolio.sort_values(by=['strike_price', 'type', 'direction', 'creation_id']).reset_index(drop=True)
 
     def render(self, current_price: float, current_step: int, iv_bin_index: int, steps_per_day: int):
         total_pnl = self.get_total_pnl(current_price, iv_bin_index)
