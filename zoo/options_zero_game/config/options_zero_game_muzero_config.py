@@ -8,13 +8,14 @@ from zoo.options_zero_game.envs.options_zero_game_env import OptionsZeroGameEnv
 #                 Static Parameters
 # ==============================================================
 collector_env_num = 8
-evaluator_env_num = 4
+n_episode = 8
+evaluator_env_num = 3
 batch_size = 256
-num_simulations = 35
+num_simulations = 50
 update_per_collect = 500
+replay_ratio = 0.25
 max_env_step = int(5e7)
 reanalyze_ratio = 0.
-n_episode = 16
 
 market_regimes = [
     # Name, mu, omega, alpha, beta, overnight_vol_multiplier
@@ -130,9 +131,9 @@ options_zero_game_muzero_config = dict(
             discrete_action_encoding_type='one_hot',
             norm_type='BN',
         ),
-        model_path = './best_ckpt/ckpt_best.pth.tar',
+        model_path='./best_ckpt/ckpt_best.pth.tar',
         cuda=True,
-        game_segment_length=OptionsZeroGameEnv.config['time_to_expiry_days'] * OptionsZeroGameEnv.config['steps_per_day'],
+        game_segment_length=2 * OptionsZeroGameEnv.config['time_to_expiry_days'] * OptionsZeroGameEnv.config['steps_per_day'],
         update_per_collect=update_per_collect,
         batch_size=batch_size,
         td_steps=10,
@@ -147,7 +148,7 @@ options_zero_game_muzero_config = dict(
         reanalyze_ratio=reanalyze_ratio,
         n_episode=n_episode,
         eval_freq=int(2e3),
-        replay_buffer_size=int(1e5),
+        replay_buffer_size=int(1e6),
         collector_env_num=collector_env_num,
         evaluator_env_num=evaluator_env_num,
     ),
