@@ -297,6 +297,7 @@ class OptionsZeroGameEnv(gym.Env):
         # --- FINAL, THREE-TIERED TERMINATION LOGIC ---
         terminated_by_rule = False
         final_shaped_reward_override = None
+        termination_reason = "RUNNING" # Default state
 
         current_pnl = self.portfolio_manager.get_total_pnl(self.price_manager.current_price, self.iv_bin_index)
 
@@ -307,6 +308,7 @@ class OptionsZeroGameEnv(gym.Env):
             if current_pnl <= -stop_loss_level:
                 terminated_by_rule = True
                 final_shaped_reward_override = -1.0
+                termination_reason = "STOP_LOSS"
 
         # 2. Take-Profit Rules (Only check if not already stopped out)
         if not terminated_by_rule and not self.portfolio_manager.portfolio.empty:
@@ -318,6 +320,7 @@ class OptionsZeroGameEnv(gym.Env):
                 if pnl_pct >= fixed_target_pct:
                     terminated_by_rule = True
                     final_shaped_reward_override = self._cfg.jackpot_reward
+                    termination_reason = "TAKE_PROFIT"
 
             # Rule 2b: Dynamic Strategy-Level Targets (only check if home run not hit)
             if not terminated_by_rule:
@@ -330,6 +333,7 @@ class OptionsZeroGameEnv(gym.Env):
                         if max_profit > 0 and current_pnl >= profit_target_pnl:
                             terminated_by_rule = True
                             final_shaped_reward_override = self._cfg.jackpot_reward
+                            termination_reason = "TAKE_PROFIT"
                 elif net_premium > 0: # Debit strategy
                     debit_target_multiple = self._cfg.debit_strategy_take_profit_multiple
                     if debit_target_multiple > 0:
@@ -338,10 +342,14 @@ class OptionsZeroGameEnv(gym.Env):
                         if current_pnl >= profit_target_pnl:
                             terminated_by_rule = True
                             final_shaped_reward_override = self._cfg.jackpot_reward
+                            termination_reason = "TAKE_PROFIT"
 
         # Final termination condition
         terminated_by_time = self.current_step >= self.total_steps
         terminated = terminated_by_rule or terminated_by_time
+
+        if terminated and termination_reason == "RUNNING":
+            termination_reason = "TIME_LIMIT"
 
         if terminated_by_rule: self.portfolio_manager.close_all_positions(self.price_manager.current_price, self.iv_bin_index)
 
@@ -370,7 +378,8 @@ class OptionsZeroGameEnv(gym.Env):
             'executed_action_name': final_executed_name, 'directional_bias': meter.directional_bias,
             'volatility_bias': meter.volatility_bias,
             'portfolio_stats': self.portfolio_manager.get_raw_portfolio_stats(self.price_manager.current_price, self.iv_bin_index),
-            'market_regime': self.price_manager.current_regime_name
+            'market_regime': self.price_manager.current_regime_name,
+            'termination_reason': termination_reason
         }
 
         if terminated:
@@ -381,50 +390,41 @@ class OptionsZeroGameEnv(gym.Env):
 
     def _handle_action(self, action: int) -> Tuple[int, bool]:
         """
-        Determines the final executed action and if the agent's original action was illegal.
-        PRIORITY 1: Force a specific strategy for analysis if configured.
-        PRIORITY 2: Force a diverse random opening on step 0 for training curriculum.
-        PRIORITY 3: Standard rule enforcement for all other steps.
-        Returns: (final_action_index, was_illegal_flag)
+        The definitive, mode-aware action handler.
+        PRIORITY 1: Forces a specific strategy for analysis.
+        PRIORITY 2: On step 0, correctly chooses between the training curriculum and the agent's choice.
+        PRIORITY 3: Enforces standard rules for all other steps.
         """
-        # --- PRIORITY 1: Handle forced strategy for analysis ---
+        # PRIORITY 1: Handle forced strategy for analysis (e.g., for strategy_analyzer.py)
         forced_strategy = self._cfg.get('forced_opening_strategy_name')
         if self.current_step == 0 and forced_strategy:
             action_index = self.actions_to_indices.get(forced_strategy)
-            
-            # This assertion is a good safety net for the analyzer script
             assert action_index is not None, f"Forced strategy '{forced_strategy}' is invalid."
-            
-            # Return the specific forced action. It is not considered an illegal move.
             return action_index, False
 
-        # --- PRIORITY 2: Handle curriculum learning on Step 0 for training ---
+        # PRIORITY 2: Handle the critical Step 0 logic
         if self.current_step == 0:
-            strategy_families = {
-                "SINGLE_LEG": lambda name: 'ATM' in name, "STRADDLE": lambda name: 'STRADDLE' in name,
-                "STRANGLE": lambda name: 'STRANGLE' in name, "VERTICAL": lambda name: 'VERTICAL' in name,
-                "IRON_FLY_CONDOR": lambda name: 'IRON' in name, "BUTTERFLY": lambda name: 'FLY' in name and 'IRON' not in name,
-            }
-
-            chosen_family = strategy_families[random.choice(list(strategy_families.keys()))]
+            # Case A: Evaluation Mode (e.g., eval.py with --agents_choice)
+            if self._cfg.disable_opening_curriculum:
+                # In this mode, we TRUST the agent's action.
+                # The action mask has already ensured it's a valid opening move.
+                return action, False
             
-            valid_actions = [idx for name, idx in self.actions_to_indices.items() if name.startswith('OPEN_') and chosen_family(name)]
-            if not valid_actions: # Failsafe
-                valid_actions = [idx for name, idx in self.actions_to_indices.items() if name.startswith('OPEN_')]
+            # Case B: Training Mode (The Curriculum)
+            else:
+                strategy_families = {
+                    "SINGLE_LEG": lambda name: 'ATM' in name and 'STRADDLE' not in name and 'STRANGLE' not in name,
+                    "STRADDLE": lambda name: 'STRADDLE' in name, "STRANGLE": lambda name: 'STRANGLE' in name,
+                    "VERTICAL": lambda name: 'VERTICAL' in name, "IRON_FLY_CONDOR": lambda name: 'IRON' in name,
+                    "BUTTERFLY": lambda name: 'FLY' in name and 'IRON' not in name,
+                }
+                chosen_family = strategy_families[random.choice(list(strategy_families.keys()))]
+                valid_actions = [idx for name, idx in self.actions_to_indices.items() if name.startswith('OPEN_') and chosen_family(name)]
+                if not valid_actions: valid_actions = [idx for name, idx in self.actions_to_indices.items() if name.startswith('OPEN_')]
+                final_action = random.choice(valid_actions)
+                return final_action, False
 
-            final_action = random.choice(valid_actions)
-            # The agent's action is irrelevant; we override it. This is not illegal.
-            return final_action, False
-
-        # --- PRIORITY 3: Standard logic for all other steps ---
-        is_illegal = self._get_true_action_mask()[action] == 0
-        if is_illegal:
-            self.illegal_action_count += 1
-            final_action = self.actions_to_indices['HOLD']
-            return final_action, True
-        else:
-            return action, False
-        # --- Standard logic for all other steps ---
+        # PRIORITY 3: Standard logic for all other steps (current_step > 0)
         is_illegal = self._get_true_action_mask()[action] == 0
         if is_illegal:
             self.illegal_action_count += 1

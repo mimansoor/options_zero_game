@@ -1,5 +1,5 @@
 # zoo/options_zero_game/envs/log_replay_env.py
-# <<< DEFINITIVE, FINAL, AND CORRECT VERSION >>>
+# <<< DEFINITIVE VERSION with Correct Settlement Logging >>>
 
 import json
 import copy
@@ -23,6 +23,10 @@ class NumpyEncoder(json.JSONEncoder):
 
 @ENV_REGISTRY.register('log_replay')
 class LogReplayEnv(gym.Wrapper):
+    """
+    The definitive, stateful logging wrapper. It captures all rich data from the
+    environment to create a complete replay log for the advanced visualizer.
+    """
     def __init__(self, cfg: dict):
         base_env = OptionsZeroGameEnv(cfg)
         super().__init__(base_env)
@@ -36,30 +40,31 @@ class LogReplayEnv(gym.Wrapper):
         self._episode_history = []
         self._closed_trades_log = []
         self._realized_pnl_at_last_step = 0.0
-        # The first log entry is created after the first step, not on reset.
         return self.env.reset(**kwargs)
 
     def step(self, action):
         """
-        The definitive step method. It uses the new, robust "snapshot" and
-        "receipt" systems to guarantee accurate logging.
+        The definitive step method that orchestrates the logging process.
         """
-        # 1. Get the pre-action state needed for correct day/step stamping.
+        # 1. Capture the pre-action state for accurate timestamping.
         step_at_action = self.env.current_step
         day_at_action = self.env.current_day
 
-        # 2. Execute the step in the main environment.
-        # This will update the portfolio and take the post-action snapshot internally.
+        # 2. Execute the step in the main environment. This updates the world
+        #    and generates the necessary snapshots and receipts internally.
         timestep = self.env.step(action)
         
-        # 3. Check for a closed trade receipt.
+        # 3. Check for a closed trade receipt from the PortfolioManager.
         receipt = self.env.portfolio_manager.last_closed_trade_receipt
         if receipt:
+            # The receipt is created when the position is closed, which is on the
+            # current day of the action.
             receipt['exit_day'] = day_at_action
             self._closed_trades_log.append(receipt)
+            # Clear the receipt after we've logged it.
             self.env.portfolio_manager.last_closed_trade_receipt = {}
             
-        # 4. Log the outcome of the action.
+        # 4. Log the outcome of the action that was just taken.
         self._log_step_outcome(timestep, step_at_action, day_at_action)
         
         # 5. If the episode just ended, add the special settlement entry and save.
@@ -74,65 +79,74 @@ class LogReplayEnv(gym.Wrapper):
         info = timestep.info
         current_price = info['price']
         
-        # --- THE CORE OF YOUR FIX ---
         # 1. Get the definitive, correctly-timed portfolio snapshot from the manager.
         portfolio_to_log = self.env.portfolio_manager.get_post_action_portfolio()
         
         # 2. Serialize this correct portfolio.
         serialized_portfolio = self._serialize_portfolio(portfolio_to_log, current_price)
         
-        # ... (The rest of the method for calculating biases, etc., is now guaranteed to be correct)
-        
+        # 3. Add all enriched data to the info dict for logging.
+        info['pnl_verification'] = self.env.portfolio_manager.get_pnl_verification(current_price, self.env.iv_bin_index)
+        info['payoff_data'] = self.env.portfolio_manager.get_payoff_data(current_price, self.env.iv_bin_index)
+        info['closed_trades_log'] = copy.deepcopy(self._closed_trades_log)
+
         log_entry = {
             'step': int(step_at_action),
             'day': int(day_at_action),
             'portfolio': serialized_portfolio,
             'info': info,
-            # ... (rest of the entry)
+            'action': int(timestep.obs['action_mask'].sum()) if isinstance(timestep.obs, dict) else None,
+            'reward': float(timestep.reward) if timestep.reward is not None else None,
+            'done': bool(timestep.done),
         }
         self._episode_history.append(log_entry)
 
     def _log_settlement_state(self, final_timestep):
         """
-        Creates and appends a final, special log entry for the end of the episode
-        to show the state after all closing/settlement logic has occurred.
+        Creates and appends a final, special log entry that correctly reflects
+        the zeroed-out state of a settled/closed portfolio.
         """
         if not self._episode_history: return
         
-        # Use a copy of the very last recorded state as a template.
         last_log_entry = copy.deepcopy(self._episode_history[-1])
         info = final_timestep.info
-
-        # Determine the reason for termination for the final action name
-        final_reward = final_timestep.reward
-        if terminated_by_time_logic_placeholder: # This would require passing the flag through info
-            final_action_name = "EXPIRATION / SETTLEMENT"
-        elif final_reward == -1.0:
-            final_action_name = "STOP-LOSS HIT"
-        elif final_reward == self.env.jackpot_reward:
-            final_action_name = "PROFIT TARGET MET"
-        else:
-            final_action_name = "EPISODE END" # Generic fallback
-        
-        # --- THE KEY ---
-        # The portfolio is now whatever is left *after* the `if terminated:` block in the env.
-        # This will be empty for rule-based terminations and potentially non-empty for settlement.
-        # But since our last fix now closes all positions on settlement, it will always be empty.
-        # The *real* final state is captured by the P&L.
         final_pnl = info['eval_episode_return']
         
-        # Create the new settlement entry
-        settlement_entry = last_log_entry
-        settlement_entry.update({
+        termination_reason = info.get('termination_reason', 'UNKNOWN')
+        
+        if termination_reason == "TIME_LIMIT": final_action_name = "EXPIRATION / SETTLEMENT"
+        elif termination_reason == "STOP_LOSS": final_action_name = "STOP-LOSS HIT"
+        elif termination_reason == "TAKE_PROFIT": final_action_name = "PROFIT TARGET MET"
+        else: final_action_name = "EPISODE END"
+        
+        # --- THE FIX: Create a clean, zeroed-out info dict for the final state ---
+        final_info = copy.deepcopy(info)
+        # An empty portfolio has no bias and no risk.
+        final_info['directional_bias'] = "Neutral"
+        final_info['volatility_bias'] = "Neutral / Low Volatility Expected"
+        final_info['executed_action_name'] = final_action_name
+        final_info['eval_episode_return'] = final_pnl
+        # All portfolio stats are now zero.
+        final_info['portfolio_stats'] = {
+            'delta': 0.0, 'gamma': 0.0, 'theta': 0.0, 'vega': 0.0,
+            'max_profit': 0.0, 'max_loss': 0.0, 'rr_ratio': 0.0, 'prob_profit': 1.0 if final_pnl > 0 else 0.0
+        }
+        # The P&L is now fully realized.
+        final_info['pnl_verification'] = {
+            'realized_pnl': final_pnl, 'unrealized_pnl': 0.0, 'verified_total_pnl': final_pnl
+        }
+        # Payoff diagram is flat for an empty portfolio.
+        final_info['payoff_data'] = {'expiry_pnl': [], 'current_pnl': [], 'spot_price': info['price'], 'sigma_levels': {}}
+
+        settlement_entry = {
             'step': last_log_entry['step'] + 1,
             'day': last_log_entry['day'] + 1,
-            'portfolio': [], # The portfolio is always empty at the very end
+            'portfolio': [],
             'done': True,
             'action': None,
-            'reward': final_reward
-        })
-        settlement_entry['info']['eval_episode_return'] = final_pnl
-        settlement_entry['info']['executed_action_name'] = final_action_name
+            'reward': final_timestep.reward,
+            'info': final_info
+        }
         
         self._episode_history.append(settlement_entry)
 
@@ -166,18 +180,11 @@ class LogReplayEnv(gym.Wrapper):
         return serializable_portfolio
 
     def save_log(self):
-        """Saves the complete episode history, including the historical context."""
+        """Saves the complete episode history to a JSON file."""
         print(f"Episode finished. Saving replay log with {len(self._episode_history)} steps...")
-
-        # Create a final log object that contains the episode steps AND the historical data.
-        final_log_object = {
-            'historical_context': self.env.price_manager.historical_context_path.tolist(),
-            'episode_data': self._episode_history
-        }
-
         try:
             with open(self.log_file_path, 'w') as f:
-                json.dump(final_log_object, f, indent=2, cls=NumpyEncoder)
+                json.dump(self._episode_history, f, indent=2, cls=NumpyEncoder)
             print(f"Successfully saved replay log to {self.log_file_path}")
         except Exception as e:
             print(f"Error saving replay log: {e}")
