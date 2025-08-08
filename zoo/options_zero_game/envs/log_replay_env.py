@@ -40,52 +40,36 @@ class LogReplayEnv(gym.Wrapper):
         return self.env.reset(**kwargs)
 
     def step(self, action):
-        # 1. Execute the step in the main environment.
+        """
+        The definitive step method. It now captures the pre-action state for
+        accurate logging and uses the receipt system for all trade closures.
+        """
+        # --- THE FIX for the Day 2 Bug ---
+        # 1. Capture the state of the world *before* the action is taken.
+        step_at_action = self.env.current_step
+        day_at_action = self.env.current_day
+
+        # 2. Execute the step in the main environment.
         timestep = self.env.step(action)
-
-        # 2. Get the portfolio state *after* the action is taken but before time is moved to St+1.
-        portfolio_before = self.env.portfolio_manager.get_post_action_portfolio()
-
-        # 3. Get the portfolio state *after* the action.
-        portfolio_after = self.env.portfolio_manager.get_portfolio()
-
-        # 4. Compare the portfolios to find and log any newly closed trades.
-        self._update_closed_trades_log(portfolio_before, portfolio_after, self.env.current_day)
-
-        # 5. Log the complete state that resulted from the action.
-        self._log_step_outcome(timestep)
-
-        # 6. If the episode just ended, save the complete log.
+        
+        # 3. Check for a closed trade receipt.
+        receipt = self.env.portfolio_manager.last_closed_trade_receipt
+        if receipt:
+            # The receipt needs the correct exit day.
+            receipt['exit_day'] = day_at_action
+            self._closed_trades_log.append(receipt)
+            self.env.portfolio_manager.last_closed_trade_receipt = {}
+            
+        # 4. Log the outcome of the action, passing the pre-action state.
+        self._log_step_outcome(timestep, step_at_action, day_at_action)
+        
+        # 5. If the episode just ended, save the log.
         if timestep.done:
             self.save_log()
-
+            
         return timestep
 
-    def _update_closed_trades_log(self, before_df, after_df, exit_day):
-        if before_df.empty: return
-        closed_ids = set(before_df['creation_id']) - set(after_df['creation_id'])
-        if not closed_ids: return
-
-        pnl_change_this_step = self.env.portfolio_manager.realized_pnl - self._realized_pnl_at_last_step
-        pnl_per_closed_leg = pnl_change_this_step / len(closed_ids) if closed_ids else 0
-
-        for trade_id in closed_ids:
-            closed_trade = before_df[before_df['creation_id'] == trade_id].iloc[0]
-            pnl_multiplier = 1 if closed_trade['direction'] == 'long' else -1
-            exit_premium = closed_trade['entry_premium'] + ((pnl_per_closed_leg / self.env.portfolio_manager.lot_size) * pnl_multiplier)
-
-            self._closed_trades_log.append({
-                'position': f"{closed_trade['direction'].upper()} {closed_trade['type'].upper()}",
-                'strike': closed_trade['strike_price'],
-                'entry_day': closed_trade['entry_step'] // self.env.steps_per_day + 1,
-                'exit_day': exit_day,
-                'entry_prem': closed_trade['entry_premium'],
-                'exit_prem': exit_premium,
-                'realized_pnl': pnl_per_closed_leg,
-            })
-        self._realized_pnl_at_last_step = self.env.portfolio_manager.realized_pnl
-
-    def _log_step_outcome(self, timestep):
+    def _log_step_outcome(self, timestep, step_at_action, day_at_action):
         info = timestep.info
         current_price = info['price']
 
@@ -96,8 +80,8 @@ class LogReplayEnv(gym.Wrapper):
         serialized_portfolio = self._serialize_portfolio(self.env.portfolio_manager.portfolio, current_price)
 
         log_entry = {
-            'step': int(self.env.current_step),
-            'day': self.env.current_day,
+            'step': int(step_at_action), # <<< USE THE CORRECT STEP
+            'day': int(day_at_action),     # <<< USE THE CORRECT DAY
             'portfolio': serialized_portfolio,
             'action': int(timestep.obs['action_mask'].sum()) if isinstance(timestep.obs, dict) else None,
             'reward': float(timestep.reward) if timestep.reward is not None else None,

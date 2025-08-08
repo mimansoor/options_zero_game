@@ -25,6 +25,7 @@ class PortfolioManager:
         self.is_eval_mode = cfg.get('is_eval_mode', False)
         self.brokerage_per_leg = cfg.get('brokerage_per_leg', 0.0)
         self.max_strike_offset = cfg['max_strike_offset']
+        self.last_closed_trade_receipt: Dict = {}
         
         # Managers
         self.bs_manager = bs_manager
@@ -48,6 +49,7 @@ class PortfolioManager:
         self.high_water_mark = self.initial_cash
         self.next_creation_id = 0
         self.initial_net_premium = 0.0
+        self.last_closed_trade_receipt = {}
 
     # --- Public Methods (called by the main environment) ---
 
@@ -223,11 +225,23 @@ class PortfolioManager:
         
         pnl_multiplier = 1 if pos_to_close['direction'] == 'long' else -1
         pnl = (exit_premium - pos_to_close['entry_premium']) * pnl_multiplier
-        self.realized_pnl += pnl * self.lot_size
+
+        pnl_for_leg = pnl * self.lot_size
+        self.realized_pnl += pnl_for_leg
 
         # Deduct the brokerage fee for closing this leg.
         self.realized_pnl -= self.brokerage_per_leg
-        
+
+        self.last_closed_trade_receipt = {
+            'position': f"{pos_to_close['direction'].upper()} {pos_to_close['type'].upper()}",
+            'strike': pos_to_close['strike_price'],
+            'entry_day': pos_to_close['entry_step'] // 24 + 1, # A good enough approximation
+            'exit_day': (pos_to_close['entry_step'] // 24) + int(pos_to_close['days_to_expiry']), # Approximation
+            'entry_prem': pos_to_close['entry_premium'],
+            'exit_prem': exit_premium,
+            'realized_pnl': pnl_for_leg
+        }
+
         # 2. Re-assemble the remaining legs of the strategy.
         remaining_legs = [
             row.to_dict() for idx, row in self.portfolio.iterrows()
@@ -525,8 +539,8 @@ class PortfolioManager:
 
     def shift_position(self, action_name: str, current_price: float, iv_bin_index: int, current_step: int):
         """
-        Atomically transforms an entire strategy by shifting one of its legs.
-        The risk profile of the complete, new structure is re-evaluated.
+        Shifts a position by one strike. This is now a two-step atomic operation
+        that correctly calls close_position to ensure proper logging.
         """
         try:
             parts = action_name.split('_')
@@ -534,57 +548,45 @@ class PortfolioManager:
             if not (0 <= position_index < len(self.portfolio)): return
 
             original_pos = self.portfolio.iloc[position_index].copy()
-            original_creation_id = original_pos['creation_id']
             
-            # (This is a simplified PnL calculation for the closed leg)
-            # 1. Realize the PnL of the leg being closed using our new, internal helper method.
-            pnl_to_realize = self._get_unrealized_pnl_for_leg(original_pos, current_price, iv_bin_index)
-            self.realized_pnl += pnl_to_realize
-
-            # 2. Define the new leg that will replace the original one.
+            # --- THE FIX ---
+            # 1. First, officially close the original position. This will generate the receipt.
+            self.close_position(position_index, current_price, iv_bin_index)
+            
+            # 2. Then, open the new, shifted leg.
             strike_modifier = self.strike_distance if direction == 'UP' else -self.strike_distance
             new_strike_price = original_pos['strike_price'] + strike_modifier
+            
             new_leg = {
                 'type': original_pos['type'], 'direction': original_pos['direction'],
                 'strike_price': new_strike_price, 'entry_step': current_step,
                 'days_to_expiry': original_pos['days_to_expiry'],
             }
-
-            # 3. Re-assemble the full, transformed strategy.
-            other_legs = [row.to_dict() for idx, row in self.portfolio.iterrows() if row['creation_id'] == original_creation_id and idx != position_index]
-            transformed_strategy_legs = other_legs + [new_leg]
-
-            # 4. Price the new leg and determine the new strategy profile.
-            transformed_strategy_legs = self._price_legs(transformed_strategy_legs, current_price, iv_bin_index)
-            new_strategy_name = f"CUSTOM_SHIFTED_{len(transformed_strategy_legs)}"
-            pnl = self._calculate_strategy_pnl(transformed_strategy_legs, new_strategy_name)
-            pnl['strategy_id'] = self.strategy_name_to_id.get(new_strategy_name, -2)
-
-            # 5. Atomically update the portfolio.
-            self.portfolio = self.portfolio[self.portfolio['creation_id'] != original_creation_id].reset_index(drop=True)
-            for leg in transformed_strategy_legs:
-                leg['creation_id'] = original_creation_id
-            self._execute_trades(transformed_strategy_legs, pnl)
+            
+            legs = self._price_legs([new_leg], current_price, iv_bin_index)
+            pnl = self._calculate_strategy_pnl(legs, "SHIFT")
+            strategy_name = f"{legs[0]['direction'].upper()}_{legs[0]['type'].upper()}"
+            pnl['strategy_id'] = self.strategy_name_to_id.get(strategy_name, -1)
+            self._execute_trades(legs, pnl)
 
         except (ValueError, IndexError) as e:
             print(f"Warning: Could not parse shift action '{action_name}'. Error: {e}")
 
     def shift_to_atm(self, action_name: str, current_price: float, iv_bin_index: int, current_step: int):
         """
-        Atomically transforms an entire strategy by shifting one leg to the ATM strike.
+        Shifts a position to the ATM strike, correctly calling close_position.
         """
         try:
             position_index = int(action_name.split('_')[-1])
             if not (0 <= position_index < len(self.portfolio)): return
 
             original_pos = self.portfolio.iloc[position_index].copy()
-            original_creation_id = original_pos['creation_id']
-            
-            # 1. Realize the PnL of the leg being closed using our new, internal helper method.
-            pnl_to_realize = self._get_unrealized_pnl_for_leg(original_pos, current_price, iv_bin_index)
-            self.realized_pnl += pnl_to_realize
 
-            # Define the new leg.
+            # --- THE FIX ---
+            # 1. First, officially close the original position.
+            self.close_position(position_index, current_price, iv_bin_index)
+            
+            # 2. Then, open the new ATM leg.
             new_atm_strike = self.market_rules_manager.get_atm_price(current_price)
             new_leg = {
                 'type': original_pos['type'], 'direction': original_pos['direction'],
@@ -592,21 +594,11 @@ class PortfolioManager:
                 'days_to_expiry': original_pos['days_to_expiry'],
             }
 
-            # Re-assemble the full, transformed strategy.
-            other_legs = [row.to_dict() for idx, row in self.portfolio.iterrows() if row['creation_id'] == original_creation_id and idx != position_index]
-            transformed_strategy_legs = other_legs + [new_leg]
-            
-            # Price and profile the new strategy.
-            transformed_strategy_legs = self._price_legs(transformed_strategy_legs, current_price, iv_bin_index)
-            new_strategy_name = f"CUSTOM_SHIFTED_ATM_{len(transformed_strategy_legs)}"
-            pnl = self._calculate_strategy_pnl(transformed_strategy_legs, new_strategy_name)
-            pnl['strategy_id'] = self.strategy_name_to_id.get(new_strategy_name, -2)
-
-            # Atomically update the portfolio.
-            self.portfolio = self.portfolio[self.portfolio['creation_id'] != original_creation_id].reset_index(drop=True)
-            for leg in transformed_strategy_legs:
-                leg['creation_id'] = original_creation_id
-            self._execute_trades(transformed_strategy_legs, pnl)
+            legs = self._price_legs([new_leg], current_price, iv_bin_index)
+            pnl = self._calculate_strategy_pnl(legs, "SHIFT_ATM")
+            strategy_name = f"{legs[0]['direction'].upper()}_{legs[0]['type'].upper()}"
+            pnl['strategy_id'] = self.strategy_name_to_id.get(strategy_name, -1)
+            self._execute_trades(legs, pnl)
             
         except (ValueError, IndexError) as e:
             print(f"Warning: Could not parse shift_to_atm action '{action_name}'. Error: {e}")
