@@ -78,6 +78,14 @@ strategy_name_to_id = {
     'LONG_PUT_FLY_2': 28, 'SHORT_PUT_FLY_2': 29,
 }
 
+# Dynamically add the new delta-based strangle strategy IDs
+next_id = max(strategy_name_to_id.values()) + 1
+for delta in range(15, 31, 5):
+    strategy_name_to_id[f'LONG_STRANGLE_DELTA_{delta}'] = next_id
+    next_id += 1
+    strategy_name_to_id[f'SHORT_STRANGLE_DELTA_{delta}'] = next_id
+    next_id += 1
+
 # ==============================================================
 #           Main Config (The Parameters)
 # ==============================================================

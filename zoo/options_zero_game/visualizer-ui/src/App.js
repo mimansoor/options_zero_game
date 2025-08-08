@@ -185,6 +185,20 @@ function PortfolioRiskDashboard({ portfolioStats }) {
   const thetaColor = theta > 0 ? '#4CAF50' : theta < 0 ? '#F44336' : 'white';
   const vegaColor = vega > 0 ? '#4CAF50' : vega < 0 ? '#F44336' : 'white';
 
+  // --- THE FIX: A new helper function to format the R:R Ratio ---
+  const formatRRRatio = (ratio) => {
+    // Handle cases where max loss is zero (infinite reward potential)
+    if (!isFinite(ratio)) {
+      return '1 : ∞';
+    }
+    // Handle cases where there's no profit potential
+    if (ratio <= 0) {
+      return '1 : 0.00';
+    }
+    // The standard, correct formatting
+    return `1 : ${ratio.toFixed(2)}`;
+  };
+
   return (
     <div className="risk-dashboard">
       <div className="risk-item"><span>Portfolio Delta:</span> <p style={{ color: deltaColor }}>{delta.toFixed(2)}</p></div>
@@ -193,7 +207,10 @@ function PortfolioRiskDashboard({ portfolioStats }) {
       <div className="risk-item"><span>Portfolio Vega:</span> <p style={{ color: vegaColor }}>{vega.toFixed(2)}</p></div>
       <div className="risk-item"><span>Max Profit:</span> <p style={{ color: '#4CAF50' }}>${max_profit.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2})}</p></div>
       <div className="risk-item"><span>Max Loss:</span> <p style={{ color: '#F44336' }}>${max_loss.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2})}</p></div>
-      <div className="risk-item"><span>Risk/Reward Ratio:</span> <p>{rr_ratio.toFixed(2)}</p></div>
+      
+      {/* --- Apply the new formatting here --- */}
+      <div className="risk-item"><span>Risk/Reward Ratio:</span> <p>{formatRRRatio(rr_ratio)}</p></div>
+      
       <div className="risk-item"><span>Prob. of Profit:</span> <p>{(prob_profit * 100).toFixed(2)}%</p></div>
     </div>
   );

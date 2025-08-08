@@ -2,7 +2,7 @@
 import pandas as pd
 import numpy as np
 import math
-from typing import Dict, List, Any
+from typing import Dict, List, Any, Tuple
 from .black_scholes_manager import BlackScholesManager, _numba_cdf
 from .market_rules_manager import MarketRulesManager
 
@@ -19,7 +19,7 @@ class PortfolioManager:
         self.bid_ask_spread_pct = cfg['bid_ask_spread_pct']
         self.max_positions = cfg['max_positions']
         self.strike_distance = cfg['strike_distance']
-        self.undefined_risk_cap = self.initial_cash * 10
+        self.undefined_risk_cap = self.initial_cash
         self.strategy_name_to_id = cfg.get('strategy_name_to_id', {})
         self.close_short_leg_on_profit_threshold = cfg.get('close_short_leg_on_profit_threshold', 0.0)
         self.is_eval_mode = cfg.get('is_eval_mode', False)
@@ -103,7 +103,9 @@ class PortfolioManager:
         if len(self.portfolio) >= self.max_positions: return
 
         # Route by most complex/specific keywords first to avoid misrouting
-        if 'FLY' in action_name and 'IRON' not in action_name:
+        if 'DELTA' in action_name and 'STRANGLE' in action_name:
+            self._open_delta_strangle(action_name, current_price, iv_bin_index, current_step, days_to_expiry)
+        elif 'FLY' in action_name and 'IRON' not in action_name:
             self._open_butterfly(action_name, current_price, iv_bin_index, current_step, days_to_expiry)
         elif 'IRON_CONDOR' in action_name:
             self._open_iron_condor(action_name, current_price, iv_bin_index, current_step, days_to_expiry)
@@ -603,57 +605,102 @@ class PortfolioManager:
         except (ValueError, IndexError) as e:
             print(f"Warning: Could not parse shift_to_atm action '{action_name}'. Error: {e}")
 
-    def get_portfolio_summary(self, current_price: float, iv_bin_index: int) -> Dict:
+    def get_portfolio_summary(self, current_price: float, iv_bin_index: int) -> dict:
         """
-        Calculates high-level summary statistics for the entire portfolio.
+        Calculates high-level summary statistics using a modular, breakeven-based
+        Probability of Profit (POP) calculation. This method orchestrates calls
+        to specialized helper methods for clarity and maintainability.
         """
         if self.portfolio.empty:
-            return {
-                'max_profit': 0.0, 'max_loss': 0.0, 'rr_ratio': 0.0, 'prob_profit': 0.5
-            }
+            prob_profit = 1.0 if self.realized_pnl > 0 else 0.0
+            return {'max_profit': 0.0, 'max_loss': 0.0, 'rr_ratio': 0.0, 'prob_profit': prob_profit}
 
+        # --- 1. Calculate Base Stats ---
         max_profit = self.portfolio.iloc[0]['strategy_max_profit']
         max_loss = self.portfolio.iloc[0]['strategy_max_loss']
-
-        abs_max_loss = abs(max_loss)
-        rr_ratio = abs(max_profit) / abs_max_loss if abs_max_loss > 1e-6 else 0.0
-
-        atm_price = self.market_rules_manager.get_atm_price(current_price)
+        rr_ratio = abs(max_profit / max_loss) if max_loss != 0 else float('inf')
         
-        all_greeks = []
-        for _, pos in self.portfolio.iterrows():
-            is_call = pos['type'] == 'call'
-            
-            # --- THE FIX IS HERE ---
-            # 1. We must calculate the volatility (sigma) for the leg first.
-            offset = round((pos['strike_price'] - atm_price) / self.strike_distance)
-            vol = self.market_rules_manager.get_implied_volatility(offset, pos['type'], iv_bin_index)
-            
-            # 2. Now we can call the function with all 5 required arguments.
-            greeks = self.bs_manager.get_all_greeks_and_price(
-                current_price,
-                pos['strike_price'],
-                pos['days_to_expiry'],
-                vol,      # <-- The missing `sigma` argument
-                is_call   # <-- The final `is_call` argument
-            )
-            all_greeks.append({'greeks': greeks, 'pos': pos})
-            
-        main_leg = max(all_greeks, key=lambda x: abs(x['greeks']['delta']))
-        main_greeks = main_leg['greeks']
-        main_pos = main_leg['pos']
+        # --- 2. Calculate Position Breakevens using a Helper Method ---
+        net_premium_of_position = sum(
+            pos['entry_premium'] * (1 if pos['direction'] == 'long' else -1)
+            for _, pos in self.portfolio.iterrows()
+        )
+        lower_be, upper_be = self._calculate_position_breakevens(self.portfolio, net_premium_of_position)
         
-        if main_pos['type'] == 'call':
-            prob_profit = _numba_cdf(main_greeks['d2']) if main_pos['direction'] == 'long' else 1 - _numba_cdf(main_greeks['d2'])
-        else: # Put
-            prob_profit = 1 - _numba_cdf(main_greeks['d2']) if main_pos['direction'] == 'long' else _numba_cdf(main_greeks['d2'])
+        # --- 3. Adjust Breakevens for the Episode's Realized PnL ---
+        pnl_buffer = self.realized_pnl / self.lot_size
+        adjusted_lower_be = lower_be - pnl_buffer
+        adjusted_upper_be = upper_be + pnl_buffer
+
+        # --- 4. Calculate Probability using another Helper Method ---
+        days_to_expiry = self.portfolio.iloc[0]['days_to_expiry']
+        prob_of_loss = self._calculate_probability_outside_range(
+            adjusted_lower_be, adjusted_upper_be,
+            current_price, iv_bin_index, days_to_expiry
+        )
+        prob_profit = 1.0 - prob_of_loss
 
         return {
             'max_profit': max_profit,
             'max_loss': max_loss,
             'rr_ratio': rr_ratio,
-            'prob_profit': prob_profit if math.isfinite(prob_profit) else 0.5
+            'prob_profit': np.clip(prob_profit, 0.0, 1.0)
         }
+
+    def _calculate_position_breakevens(self, portfolio_df: pd.DataFrame, net_premium: float) -> Tuple[float, float]:
+        """
+        A specialized helper to calculate the breakeven points for the current open position.
+        Returns: (lower_breakeven, upper_breakeven)
+        """
+        lower_breakeven = 0.0
+        upper_breakeven = float('inf')
+
+        # --- THE FIX ---
+        # The premium "cushion" for calculating breakevens should always be a positive value.
+        premium_cushion = abs(net_premium)
+
+        short_strikes = sorted([p['strike_price'] for _, p in portfolio_df.iterrows() if p['direction'] == 'short'])
+        
+        if short_strikes:
+            # For short premium strategies, the cushion expands the profitable range outward.
+            lower_breakeven = short_strikes[0] - premium_cushion
+            upper_breakeven = short_strikes[-1] + premium_cushion
+        elif len(portfolio_df) == 1:
+            # For single long leg positions, the cushion narrows the profitable range inward.
+            pos = portfolio_df.iloc[0]
+            if pos['type'] == 'call':
+                lower_breakeven = pos['strike_price'] + premium_cushion
+            else: # Put
+                upper_breakeven = pos['strike_price'] - premium_cushion
+        
+        return lower_breakeven, upper_breakeven
+
+    def _calculate_probability_outside_range(
+        self, lower_bound: float, upper_bound: float,
+        current_price: float, iv_bin_index: int, days_to_expiry: float
+    ) -> float:
+        """
+        A specialized helper to calculate the probability of the price finishing
+        outside a given lower and upper bound at expiration.
+        """
+        prob_of_loss = 0.0
+
+        # Calculate probability of finishing below the lower bound (if it's a risk)
+        if lower_bound > 0:
+            # Use ATM IV as a reasonable proxy for the market's expectation
+            vol_put = self.market_rules_manager.get_implied_volatility(0, 'put', iv_bin_index)
+            greeks_put = self.bs_manager.get_all_greeks_and_price(current_price, lower_bound, days_to_expiry, vol_put, is_call=False)
+            # The probability of a put expiring ITM is N(-d2)
+            prob_of_loss += _numba_cdf(-greeks_put['d2'])
+
+        # Calculate probability of finishing above the upper bound (if it's a risk)
+        if upper_bound < float('inf'):
+            vol_call = self.market_rules_manager.get_implied_volatility(0, 'call', iv_bin_index)
+            greeks_call = self.bs_manager.get_all_greeks_and_price(current_price, upper_bound, days_to_expiry, vol_call, is_call=True)
+            # The probability of a call expiring ITM is N(d2)
+            prob_of_loss += _numba_cdf(greeks_call['d2'])
+
+        return prob_of_loss
 
     def get_portfolio_greeks(self, current_price: float, iv_bin_index: int) -> Dict:
         """Calculates and returns a dictionary of normalized portfolio-level Greeks."""
@@ -898,20 +945,38 @@ class PortfolioManager:
         pnl['strategy_id'] = self.strategy_name_to_id.get(canonical_strategy_name, -1)
         self._execute_trades(legs, pnl)
 
+    def _find_strike_from_delta_list(
+        self, target_deltas: List[float], option_type: str,
+        current_price: float, iv_bin_index: int, days_to_expiry: float
+    ) -> float or None:
+        """
+        Tries to find a strike matching a delta from a prioritized list.
+        It attempts each delta in the list in order and returns the first one
+        that finds a valid strike within the tolerance.
+        Returns the strike price, or None if no delta in the list finds a match.
+        """
+        for delta in target_deltas:
+            strike = self._find_strike_for_delta(delta, option_type, current_price, iv_bin_index, days_to_expiry)
+            if strike is not None:
+                return strike
+        
+        return None
+
     def _find_strike_for_delta(
         self, target_delta: float, option_type: str,
-        current_price: float, iv_bin_index: int, days_to_expiry: float
-    ) -> float:
+        current_price: float, iv_bin_index: int, days_to_expiry: float,
+        tolerance: float = 0.05 # <<< NEW: Add a tolerance parameter
+    ) -> float or None: # <<< NEW: Can now return None
         """
         Iteratively finds the strike price for an option that is closest to a target delta.
+        Returns the strike price if a match within the tolerance is found, otherwise returns None.
         """
         is_call = option_type == 'call'
         atm_price = self.market_rules_manager.get_atm_price(current_price)
         
-        best_strike = atm_price
+        best_strike = None
         smallest_delta_diff = float('inf')
         
-        # Search a reasonable range of strikes around the at-the-money price
         for offset in range(-self.max_strike_offset, self.max_strike_offset + 1):
             strike_price = atm_price + (offset * self.strike_distance)
             if strike_price <= 0: continue
@@ -925,33 +990,64 @@ class PortfolioManager:
             if delta_diff < smallest_delta_diff:
                 smallest_delta_diff = delta_diff
                 best_strike = strike_price
-                
-        return best_strike
+        
+        # --- THE NEW GUARD RAIL ---
+        # Only return the strike if we found a match within our acceptable tolerance.
+        if smallest_delta_diff <= tolerance:
+            return best_strike
+        else:
+            return None # Signal that no acceptable strike was found
 
     def _open_iron_condor(self, action_name: str, current_price: float, iv_bin_index: int, current_step: int, days_to_expiry: float):
+        """
+        Opens a SHORT Iron Condor using a tiered search for delta strikes (e.g., 30/15, then 35/20).
+        If no dynamic strikes are valid, it falls back to a fixed-width condor.
+        """
         if len(self.portfolio) > self.max_positions - 4: return
         
         direction = 'long' if 'LONG' in action_name else 'short'
         legs = []
 
         if direction == 'short':
-            strike_short_put = self._find_strike_for_delta(-0.30, 'put', current_price, iv_bin_index, days_to_expiry)
-            strike_short_call = self._find_strike_for_delta(0.30, 'call', current_price, iv_bin_index, days_to_expiry)
-            strike_long_put = self._find_strike_for_delta(-0.15, 'put', current_price, iv_bin_index, days_to_expiry)
-            strike_long_call = self._find_strike_for_delta(0.15, 'call', current_price, iv_bin_index, days_to_expiry)
-            
-            are_strikes_valid = (strike_long_put < strike_short_put < strike_short_call < strike_long_call)
-            
-            if are_strikes_valid:
-                legs = [
-                    {'type': 'put', 'direction': 'short', 'strike_price': strike_short_put, 'days_to_expiry': days_to_expiry},
-                    {'type': 'call', 'direction': 'short', 'strike_price': strike_short_call, 'days_to_expiry': days_to_expiry},
-                    {'type': 'put', 'direction': 'long', 'strike_price': strike_long_put, 'days_to_expiry': days_to_expiry},
-                    {'type': 'call', 'direction': 'long', 'strike_price': strike_long_call, 'days_to_expiry': days_to_expiry}
-                ]
-            else:
-                print(f"Warning: Dynamic delta strikes for Iron Condor were illogical. Falling back to fixed-width.")
+            # --- THE NEW TIERED SEARCH LOGIC ---
+            # 1. Define the prioritized list of delta combinations to try.
+            delta_tiers = [
+                {'short': 20, 'long': 15}, # Tier 1: Most conservative
+                {'short': 25, 'long': 20}, # Tier 2
+                {'short': 30, 'long': 15}, # Tier 3
+                {'short': 30, 'long': 25}, # Tier 4
+                {'short': 35, 'long': 20}, # Tier 5: Most aggressive
+            ]
 
+            for tier in delta_tiers:
+                # print(f"DEBUG: Attempting Iron Condor tier {tier['short']}/{tier['long']}") # Optional for debugging
+                short_delta = tier['short'] / 100.0
+                long_delta = tier['long'] / 100.0
+                
+                # 2. Attempt to find all four strikes for the current tier.
+                strike_short_put = self._find_strike_for_delta(-short_delta, 'put', current_price, iv_bin_index, days_to_expiry)
+                strike_short_call = self._find_strike_for_delta(short_delta, 'call', current_price, iv_bin_index, days_to_expiry)
+                strike_long_put = self._find_strike_for_delta(-long_delta, 'put', current_price, iv_bin_index, days_to_expiry)
+                strike_long_call = self._find_strike_for_delta(long_delta, 'call', current_price, iv_bin_index, days_to_expiry)
+
+                # 3. Run the robust guard rail on the results of this tier.
+                all_strikes_found = all(s is not None for s in [strike_long_put, strike_short_put, strike_short_call, strike_long_call])
+                if all_strikes_found and (strike_long_put < strike_short_put < strike_short_call < strike_long_call):
+                    # 4. If this tier is successful, build the legs and BREAK the loop.
+                    legs = [
+                        {'type': 'put', 'direction': 'short', 'strike_price': strike_short_put, 'days_to_expiry': days_to_expiry},
+                        {'type': 'call', 'direction': 'short', 'strike_price': strike_short_call, 'days_to_expiry': days_to_expiry},
+                        {'type': 'put', 'direction': 'long', 'strike_price': strike_long_put, 'days_to_expiry': days_to_expiry},
+                        {'type': 'call', 'direction': 'long', 'strike_price': strike_long_call, 'days_to_expiry': days_to_expiry}
+                    ]
+                    # print(f"DEBUG: Successfully found strikes for tier {tier['short']}/{tier['long']}.")
+                    break # Exit the loop as we have found a valid strategy
+            
+            if not legs:
+                 print(f"Warning: All dynamic delta tiers for Iron Condor failed. Falling back to fixed-width.")
+
+        # --- Fallback Logic ---
+        # This block is now triggered for a LONG condor OR if all dynamic tiers failed for a SHORT condor.
         if not legs:
             atm_price = self.market_rules_manager.get_atm_price(current_price)
             body_direction = 'long' if direction == 'long' else 'short'
@@ -964,6 +1060,7 @@ class PortfolioManager:
                 {'type': 'call', 'direction': wing_direction, 'strike_price': atm_price + (2 * self.strike_distance), 'days_to_expiry': days_to_expiry}
             ]
 
+        # --- Finalize the Trade (Unchanged) ---
         for leg in legs:
             leg['entry_step'] = current_step
         
@@ -974,6 +1071,11 @@ class PortfolioManager:
         self._execute_trades(legs, pnl)
 
     def _open_iron_fly(self, action_name: str, current_price: float, iv_bin_index: int, current_step: int, days_to_expiry: float):
+        """
+        Opens an Iron Fly with a tiered, dynamic search for the optimal wing width.
+        - SHORT Iron Fly (credit): Tries to set wings based on premium, then walks inward to find a valid width.
+        - LONG Iron Fly (debit): Uses a fixed width.
+        """
         if len(self.portfolio) > self.max_positions - 4: return
         
         direction = 'long' if 'LONG' in action_name else 'short'
@@ -981,17 +1083,33 @@ class PortfolioManager:
         legs = []
 
         if direction == 'short':
+            # --- THE NEW TIERED SEARCH LOGIC ---
+            
+            # 1. First, define and price the body to get the net credit.
             body_legs = [
                 {'type': 'call', 'direction': 'short', 'strike_price': atm_price, 'days_to_expiry': days_to_expiry},
                 {'type': 'put', 'direction': 'short', 'strike_price': atm_price, 'days_to_expiry': days_to_expiry}
             ]
             body_legs = self._price_legs(body_legs, current_price, iv_bin_index)
             net_credit_received = body_legs[0]['entry_premium'] + body_legs[1]['entry_premium']
-            wing_width = round(net_credit_received / self.strike_distance) * self.strike_distance
             
-            MAX_SENSIBLE_WIDTH = 20 * self.strike_distance
+            # 2. Define the search boundaries for the wing width.
+            ideal_width = round(net_credit_received / self.strike_distance) * self.strike_distance
+            MAX_SENSIBLE_WIDTH = 22 * self.strike_distance
+            MIN_SENSIBLE_WIDTH = 5 * self.strike_distance
+
+            # 3. Create a prioritized list of widths to try, walking inward from the ideal/max.
+            start_width = min(ideal_width, MAX_SENSIBLE_WIDTH)
             
-            if self.strike_distance <= wing_width <= MAX_SENSIBLE_WIDTH:
+            # Convert to integer multipliers for a clean loop
+            start_multiplier = int(start_width / self.strike_distance)
+            end_multiplier = int(MIN_SENSIBLE_WIDTH / self.strike_distance)
+
+            # 4. Loop from the widest sensible width down to the narrowest.
+            for width_multiplier in range(start_multiplier, end_multiplier - 1, -1):
+                wing_width = width_multiplier * self.strike_distance
+                
+                # The loop itself is the guard rail. We know the width is valid.
                 strike_long_put = atm_price - wing_width
                 strike_long_call = atm_price + wing_width
                 
@@ -999,16 +1117,20 @@ class PortfolioManager:
                     {'type': 'put', 'direction': 'long', 'strike_price': strike_long_put, 'days_to_expiry': days_to_expiry},
                     {'type': 'call', 'direction': 'long', 'strike_price': strike_long_call, 'days_to_expiry': days_to_expiry}
                 ]
+                
+                # Assemble the full strategy and break the loop on the first success.
                 legs = body_legs + wing_legs
-                # Price the new wings
-                legs = self._price_legs(legs, current_price, iv_bin_index)
-            else:
-                print(f"Warning: Dynamic wing width ({self.strike_distance} <= {wing_width}) <= {MAX_SENSIBLE_WIDTH} for Iron Fly was out of bounds. Falling back to fixed-width.")
+                # print(f"DEBUG: Found valid Iron Fly width: {wing_width}") # Optional for debugging
+                break # We found the best possible fit, so we exit.
+            
+            if not legs:
+                print(f"Warning: All dynamic wing widths for Iron Fly were out of bounds. Falling back to fixed-width.")
 
+        # --- Fallback Logic for LONG fly or if the tiered search failed ---
         if not legs:
             body_direction = 'long' if direction == 'long' else 'short'
             wing_direction = 'short' if direction == 'long' else 'long'
-            wing_width = self.strike_distance
+            wing_width = self.strike_distance # Safe, fixed 1-strike width
             
             strike_long_put = atm_price - wing_width
             strike_long_call = atm_price + wing_width
@@ -1020,6 +1142,7 @@ class PortfolioManager:
                 {'type': 'put', 'direction': wing_direction, 'strike_price': strike_long_put, 'days_to_expiry': days_to_expiry}
             ]
         
+        # --- Finalize the Trade (Unchanged) ---
         for leg in legs:
             leg['entry_step'] = current_step
         
@@ -1106,3 +1229,55 @@ class PortfolioManager:
         # Look up the correct, derived key.
         pnl['strategy_id'] = self.strategy_name_to_id.get(canonical_strategy_name, -1)
         self._execute_trades(legs, pnl)
+
+    def _open_delta_strangle(self, action_name: str, current_price: float, iv_bin_index: int, current_step: int, days_to_expiry: float):
+        if len(self.portfolio) > self.max_positions - 2: return
+
+        try:
+            parts = action_name.split('_')
+            direction = parts[1].lower()
+            target_delta_int = int(parts[4])
+        except (ValueError, IndexError): return
+
+        legs = []
+        
+        # --- THE NEW TIERED LOGIC ---
+        # 1. Create a prioritized list of deltas to search, starting with the agent's choice.
+        all_deltas = [15, 20, 25, 30]
+        start_index = all_deltas.index(target_delta_int)
+        delta_search_list = [d / 100.0 for d in all_deltas[start_index:]] # e.g., [0.20, 0.25, 0.30]
+
+        # 2. Use our new helper to find the best available strikes.
+        strike_call = self._find_strike_from_delta_list(delta_search_list, 'call', current_price, iv_bin_index, days_to_expiry)
+        strike_put = self._find_strike_from_delta_list([-d for d in delta_search_list], 'put', current_price, iv_bin_index, days_to_expiry)
+        
+        # 3. The guard rail remains the same, checking if the search was successful.
+        if strike_call is not None and strike_put is not None and strike_put < strike_call:
+            legs = [
+                {'type': 'call', 'direction': direction, 'strike_price': strike_call, 'days_to_expiry': days_to_expiry},
+                {'type': 'put', 'direction': direction, 'strike_price': strike_put, 'days_to_expiry': days_to_expiry}
+            ]
+        else:
+            print(f"Warning: Could not find any valid delta strikes for {action_name}. Falling back to fixed-width.")
+
+        # --- Fallback Logic ---
+        # If the `legs` list is still empty, it means the dynamic search failed.
+        if not legs:
+            # Fall back to a safe, fixed-width strangle (width = 2)
+            atm_price = self.market_rules_manager.get_atm_price(current_price)
+            strike_offset = 2 * self.strike_distance
+            legs = [
+                {'type': 'call', 'direction': direction, 'strike_price': atm_price + strike_offset, 'days_to_expiry': days_to_expiry},
+                {'type': 'put', 'direction': direction, 'strike_price': atm_price - strike_offset, 'days_to_expiry': days_to_expiry}
+            ]
+
+        # --- Finalize the Trade ---
+        for leg in legs: leg['entry_step'] = current_step
+        legs = self._price_legs(legs, current_price, iv_bin_index)
+        
+        # Use the original action name for the ID to give the agent proper credit
+        canonical_strategy_name = action_name.replace('OPEN_', '')
+        pnl = self._calculate_strategy_pnl(legs, action_name)
+        pnl['strategy_id'] = self.strategy_name_to_id.get(canonical_strategy_name, -1)
+        self._execute_trades(legs, pnl)
+

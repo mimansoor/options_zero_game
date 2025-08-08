@@ -543,6 +543,11 @@ class OptionsZeroGameEnv(gym.Env):
             for d in ['LONG', 'SHORT']:
                 actions[f'OPEN_{d}_STRANGLE_ATM_{w}'] = i; i+=1
 
+        # Generate a range of delta-based strangle actions.
+        for delta in range(15, 31, 5): # This creates [15, 20, 25, 30]
+            actions[f'OPEN_LONG_STRANGLE_DELTA_{delta}'] = i; i+=1
+            actions[f'OPEN_SHORT_STRANGLE_DELTA_{delta}'] = i; i+=1
+
         for w in [1, 2]:
             for t in ['CALL', 'PUT']:
                 for d in ['LONG', 'SHORT']:
