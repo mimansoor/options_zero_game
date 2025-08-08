@@ -40,15 +40,14 @@ class LogReplayEnv(gym.Wrapper):
         return self.env.reset(**kwargs)
 
     def step(self, action):
-        # --- THE FIX IS HERE: The logic is now in the correct order ---
-        # 1. Get the portfolio state *before* the action is taken.
-        portfolio_before = self.env.portfolio_manager.portfolio.copy()
-
-        # 2. Execute the step in the main environment.
+        # 1. Execute the step in the main environment.
         timestep = self.env.step(action)
 
+        # 2. Get the portfolio state *after* the action is taken but before time is moved to St+1.
+        portfolio_before = self.env.portfolio_manager.get_post_action_portfolio()
+
         # 3. Get the portfolio state *after* the action.
-        portfolio_after = self.env.portfolio_manager.portfolio
+        portfolio_after = self.env.portfolio_manager.get_portfolio()
 
         # 4. Compare the portfolios to find and log any newly closed trades.
         self._update_closed_trades_log(portfolio_before, portfolio_after, self.env.current_day)
@@ -91,7 +90,7 @@ class LogReplayEnv(gym.Wrapper):
         current_price = info['price']
 
         info['pnl_verification'] = self.env.portfolio_manager.get_pnl_verification(current_price, self.env.iv_bin_index)
-        info['payoff_data'] = self.env.portfolio_manager.get_payoff_data(current_price)
+        info['payoff_data'] = self.env.portfolio_manager.get_payoff_data(current_price, self.env.iv_bin_index)
         info['closed_trades_log'] = copy.deepcopy(self._closed_trades_log)
 
         serialized_portfolio = self._serialize_portfolio(self.env.portfolio_manager.portfolio, current_price)
@@ -137,12 +136,18 @@ class LogReplayEnv(gym.Wrapper):
         return serializable_portfolio
 
     def save_log(self):
-        """Saves the complete episode history to a JSON file."""
+        """Saves the complete episode history, including the historical context."""
         print(f"Episode finished. Saving replay log with {len(self._episode_history)} steps...")
+
+        # Create a final log object that contains the episode steps AND the historical data.
+        final_log_object = {
+            'historical_context': self.env.price_manager.historical_context_path.tolist(),
+            'episode_data': self._episode_history
+        }
+
         try:
             with open(self.log_file_path, 'w') as f:
-                # Use the NumpyEncoder to prevent serialization errors
-                json.dump(self._episode_history, f, indent=2, cls=NumpyEncoder)
+                json.dump(final_log_object, f, indent=2, cls=NumpyEncoder)
             print(f"Successfully saved replay log to {self.log_file_path}")
         except Exception as e:
             print(f"Error saving replay log: {e}")

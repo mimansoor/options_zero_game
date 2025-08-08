@@ -51,13 +51,50 @@ class PortfolioManager:
 
     # --- Public Methods (called by the main environment) ---
 
+    def get_raw_portfolio_stats(self, current_price: float, iv_bin_index: int) -> dict:
+        """
+        Calculates and returns a dictionary of the key, un-normalized portfolio
+        statistics for logging and visualization.
+        """
+        # We can reuse our existing methods to get the data
+        greeks = self.get_portfolio_greeks(current_price, iv_bin_index)
+        summary = self.get_portfolio_summary(current_price, iv_bin_index)
+
+        # The greek values in the 'greeks' dict are already normalized.
+        # We need to recalculate the raw totals here.
+        total_delta, total_gamma, total_theta, total_vega = 0.0, 0.0, 0.0, 0.0
+        if not self.portfolio.empty:
+            atm_price = self.market_rules_manager.get_atm_price(current_price)
+            for _, pos in self.portfolio.iterrows():
+                direction_multiplier = 1 if pos['direction'] == 'long' else -1
+                is_call = pos['type'] == 'call'
+                offset = round((pos['strike_price'] - atm_price) / self.strike_distance)
+                vol = self.market_rules_manager.get_implied_volatility(offset, pos['type'], iv_bin_index)
+                leg_greeks = self.bs_manager.get_all_greeks_and_price(current_price, pos['strike_price'], pos['days_to_expiry'], vol, is_call)
+                
+                total_delta += leg_greeks['delta'] * self.lot_size * direction_multiplier
+                total_gamma += leg_greeks['gamma'] * (self.lot_size**2 * current_price**2 / 100) * direction_multiplier
+                total_theta += leg_greeks['theta'] * self.lot_size * direction_multiplier
+                total_vega += leg_greeks['vega'] * self.lot_size * direction_multiplier
+
+        return {
+            'delta': total_delta,
+            'gamma': total_gamma,
+            'theta': total_theta,
+            'vega': total_vega,
+            'max_profit': summary['max_profit'],
+            'max_loss': summary['max_loss'],
+            'rr_ratio': summary['rr_ratio'],
+            'prob_profit': summary['prob_profit'],
+        }
+
     def get_portfolio(self) -> pd.DataFrame:
         """Public API to get the portfolio state."""
         return self.portfolio
 
-    #def get_post_action_portfolio(self) -> pd.DataFrame:
-        #"""Public API to get the portfolio state immediately after an action."""
-        #return self.post_action_portfolio
+    def get_post_action_portfolio(self) -> pd.DataFrame:
+        """Public API to get the portfolio state immediately after an action."""
+        return self.post_action_portfolio
 
     def open_strategy(self, action_name: str, current_price: float, iv_bin_index: int, current_step: int, days_to_expiry: float):
         """Routes any 'OPEN_' action to the correct specialized private method."""
@@ -240,35 +277,70 @@ class PortfolioManager:
             'verified_total_pnl': self.realized_pnl + unrealized_pnl
         }
 
-    def get_payoff_data(self, current_price: float) -> dict:
+    def get_payoff_data(self, current_price: float, iv_bin_index: int) -> dict:
         """
-        Calculates the P&L of the current portfolio at expiry across a range of prices.
-        This is used to generate the P&L payoff diagram.
+        Calculates a rich data set for the P&L payoff diagram, including:
+        1. P&L at Expiry (the sharp, "V" shaped line).
+        2. Mark-to-Market P&L for the current day (the curved, "T+0" line).
+        3. Standard deviation price levels based on current volatility.
         """
         if self.portfolio.empty:
-            return {'expiry_pnl': [], 'breakevens': []}
+            return {'expiry_pnl': [], 'current_pnl': [], 'spot_price': current_price, 'sigma_levels': {}}
 
         price_range = np.linspace(current_price * 0.85, current_price * 1.15, 100)
-        expiry_pnl = []
+        expiry_pnl_data = []
+        current_pnl_data = []
         
+        # We need the current DTE for the T+0 calculation. All legs share the same strategy.
+        current_dte = self.portfolio.iloc[0]['days_to_expiry']
+
         for price in price_range:
-            pnl_at_price = 0
+            pnl_at_expiry = 0
+            pnl_at_today = 0
+            
             for _, pos in self.portfolio.iterrows():
                 pnl_multiplier = 1 if pos['direction'] == 'long' else -1
                 
+                # --- P&L at Expiry Calculation ---
                 if pos['type'] == 'call':
-                    leg_pnl = max(0, price - pos['strike_price']) - pos['entry_premium']
+                    expiry_leg_pnl = max(0, price - pos['strike_price']) - pos['entry_premium']
                 else: # Put
-                    leg_pnl = max(0, pos['strike_price'] - price) - pos['entry_premium']
+                    expiry_leg_pnl = max(0, pos['strike_price'] - price) - pos['entry_premium']
+                pnl_at_expiry += expiry_leg_pnl * pnl_multiplier * self.lot_size
                 
-                pnl_at_price += leg_pnl * pnl_multiplier * self.lot_size
+                # --- P&L at T+0 (Today) Calculation ---
+                is_call = pos['type'] == 'call'
+                atm_price = self.market_rules_manager.get_atm_price(price)
+                offset = round((pos['strike_price'] - atm_price) / self.strike_distance)
+                vol = self.market_rules_manager.get_implied_volatility(offset, pos['type'], iv_bin_index)
+                
+                # We use the current DTE for the T+0 line
+                greeks = self.bs_manager.get_all_greeks_and_price(price, pos['strike_price'], current_dte, vol, is_call)
+                today_leg_pnl = (greeks['price'] - pos['entry_premium']) * pnl_multiplier * self.lot_size
+                pnl_at_today += today_leg_pnl
             
-            expiry_pnl.append({'price': price, 'pnl': self.realized_pnl + pnl_at_price})
-            
-        # A simple breakeven calculation (can be improved for complex spreads)
-        breakevens = [p['price'] for p in expiry_pnl if len(expiry_pnl) > 1 and np.sign(p['pnl']) != np.sign(expiry_pnl[0]['pnl'])]
+            expiry_pnl_data.append({'price': price, 'pnl': self.realized_pnl + pnl_at_expiry})
+            current_pnl_data.append({'price': price, 'pnl': self.realized_pnl + pnl_at_today})
         
-        return {'expiry_pnl': expiry_pnl, 'breakevens': breakevens}
+        # --- Calculate Standard Deviation Price Levels ---
+        atm_iv = self.market_rules_manager.get_implied_volatility(0, 'call', iv_bin_index)
+        expected_move_points = 0
+        if current_dte > 0:
+            expected_move_points = current_price * atm_iv * math.sqrt(current_dte / 365.25)
+        
+        sigma_levels = {
+            'plus_one': current_price + expected_move_points,
+            'minus_one': current_price - expected_move_points,
+            'plus_two': current_price + (2 * expected_move_points),
+            'minus_two': current_price - (2 * expected_move_points),
+        }
+
+        return {
+            'expiry_pnl': expiry_pnl_data,
+            'current_pnl': current_pnl_data,
+            'spot_price': current_price,
+            'sigma_levels': sigma_levels
+        }
 
     # --- Private Methods ---
     def _close_worthless_short_legs(self, current_price: float, iv_bin_index: int):
@@ -654,7 +726,7 @@ class PortfolioManager:
         return
 
     def take_post_action_portfolio_snapshot(self):
-        self.post_action_portfolio = self.portfolio.copy()
+        if self.is_eval_mode: self.post_action_portfolio = self.portfolio.copy()
         return
 
     def _execute_trades(self, trades_to_execute: List[Dict], strategy_pnl: Dict):

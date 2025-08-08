@@ -272,7 +272,7 @@ class OptionsZeroGameEnv(gym.Env):
         #print("-------------------------------------------------\n")
 
         self.portfolio_manager.sort_portfolio()
-        #self.portfolio_manager.take_post_action_portfolio_snapshot()
+        self.portfolio_manager.take_post_action_portfolio_snapshot()
 
         # --- 3. Advance Time and Market (CORRECT ORDER) ---
         # First, calculate decay based on the CURRENT step.
@@ -338,7 +338,9 @@ class OptionsZeroGameEnv(gym.Env):
             'price': self.price_manager.current_price, 'eval_episode_return': self.final_eval_reward,
             'illegal_actions_in_episode': self.illegal_action_count, 'was_illegal_action': bool(was_illegal_action),
             'executed_action_name': final_executed_name, 'directional_bias': meter.directional_bias,
-            'volatility_bias': meter.volatility_bias
+            'volatility_bias': meter.volatility_bias,
+            'portfolio_stats': self.portfolio_manager.get_raw_portfolio_stats(self.price_manager.current_price, self.iv_bin_index),
+            'market_regime': self.price_manager.current_regime_name
         }
 
         if terminated:

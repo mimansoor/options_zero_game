@@ -124,3 +124,78 @@
   background-color: #555;
   cursor: not-allowed;
 }
+
+/* --- NEW LAYOUT STYLES --- */
+
+/* Main container for the charts, arranges them side-by-side */
+.charts-container {
+  display: flex;
+  flex-direction: row;
+  justify-content: space-between;
+  width: 100%;
+  gap: 20px; /* Adds space between the charts */
+  margin-top: 20px;
+}
+
+/* A specific style for the chart cards to give them height */
+.chart-card {
+  flex: 1; /* Each chart takes up equal space */
+  display: flex;
+  flex-direction: column;
+  height: 45vh; /* <<< THE KEY: Makes the charts tall (45% of the viewport height) */
+}
+
+/* This ensures the chart itself fills the available space inside its card */
+.chart-container {
+  position: relative;
+  flex-grow: 1;
+}
+
+/* Main container for the info panels below the charts */
+.info-panels-container {
+  display: flex;
+  flex-direction: row;
+  justify-content: space-between;
+  width: 100%;
+  gap: 20px;
+  margin-top: 20px;
+}
+
+/* --- General Card Style (You may already have this) --- */
+.card {
+  background-color: #2f2f37;
+  border-radius: 8px;
+  padding: 20px;
+  flex: 1; /* Each info panel takes up equal space */
+}
+
+.card h3 {
+  margin-top: 0;
+  border-bottom: 1px solid #444;
+  padding-bottom: 10px;
+  margin-bottom: 15px;
+}
+
+.risk-dashboard {
+  display: grid;
+  grid-template-columns: 1fr 1fr; /* Creates a clean two-column layout */
+  gap: 12px 20px; /* Vertical and horizontal spacing */
+  font-size: 0.9em;
+}
+
+.risk-item {
+  display: flex;
+  justify-content: space-between; /* Aligns label to the left and value to the right */
+  align-items: center;
+  border-bottom: 1px solid #444;
+  padding-bottom: 8px;
+}
+
+.risk-item span {
+  color: #aaa;
+}
+
+.risk-item p {
+  margin: 0;
+  font-weight: bold;
+}

@@ -47,6 +47,7 @@ class PriceActionManager:
 
         # State variables
         self.price_path: np.ndarray = np.array([])
+        self.historical_context_path: np.ndarray = np.array([])
         self.sma_path: np.ndarray = np.array([])
         self.current_price: float = 0.0
         self.momentum_signal: float = 0.0
@@ -73,6 +74,7 @@ class PriceActionManager:
         self.total_steps = total_steps
         self.start_price = self.start_price_config
         source_to_use = random.choice(['garch', 'historical']) if self.price_source == 'mixed' else self.price_source
+        self.historical_context_path = np.array([])
 
         try:
             # ... (the try/except block for calling _generate_*_price_path) ...
@@ -175,12 +177,20 @@ class PriceActionManager:
             raise ValueError(f"Historical data for {selected_ticker} is too short.")
 
         start_index = random.randint(0, len(data) - self.total_steps - 1)
+
+        # 1. Capture the 30 days of price data *before* the episode starts.
+        context_start_index = start_index - 30
+        context_segment = data['Close'].iloc[context_start_index:start_index]
+        
+        # 2. Slice the main episode data.
         price_segment = data['Close'].iloc[start_index:start_index + self.total_steps + 1]
         
         raw_start_price = price_segment.iloc[0]
         if raw_start_price > 1e-4:
             normalization_factor = self.start_price_config / raw_start_price
             self.price_path = (price_segment * normalization_factor).to_numpy(dtype=np.float32)
+            # 3. Normalize the historical context with the SAME factor for a continuous chart.
+            self.historical_context_path = (context_segment * normalization_factor).to_numpy(dtype=np.float32)
         else:
             raise ValueError(f"Corrupt data for {selected_ticker} (start price <= 0).")
 
