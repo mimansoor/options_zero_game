@@ -75,28 +75,33 @@ class LogReplayEnv(gym.Wrapper):
         return timestep
 
     def _log_step_outcome(self, timestep, step_at_action, day_at_action):
-        """Creates a single, complete log entry for the action that was just taken."""
+        """Creates a single, complete log entry, now with correct percentage change calculations."""
         info = timestep.info
         current_price = info['price']
+        
+        # --- THE FIX for "vs last step" ---
+        # 1. Get the price from the previous step's log entry.
+        last_price = self._episode_history[-1]['info']['price'] if self._episode_history else self.env.price_manager.start_price
+        
+        # 2. Calculate the percentage change and add it to the info dict.
+        last_price_change_pct = ((current_price / last_price) - 1) * 100 if last_price > 0 else 0.0
+        info['last_price_change_pct'] = last_price_change_pct
+        # --- END OF FIX ---
 
+        # The rest of the logic for PnL verification, payoff data, etc., is unchanged
         info['pnl_verification'] = self.env.portfolio_manager.get_pnl_verification(current_price, self.env.iv_bin_index)
         info['payoff_data'] = self.env.portfolio_manager.get_payoff_data(current_price, self.env.iv_bin_index)
         info['closed_trades_log'] = copy.deepcopy(self._closed_trades_log)
-        
-        # 1. Get the definitive, correctly-timed portfolio snapshot from the manager.
-        portfolio_to_log = self.env.portfolio_manager.get_post_action_portfolio()
-        
-        # 2. Serialize this correct portfolio.
-        serialized_portfolio = self._serialize_portfolio(portfolio_to_log, current_price)
 
+        serialized_portfolio = self._serialize_portfolio(self.env.portfolio_manager.get_post_action_portfolio(), current_price)
+        
         log_entry = {
             'step': int(step_at_action),
             'day': int(day_at_action),
             'portfolio': serialized_portfolio,
-            'action': int(timestep.obs['action_mask'].sum()) if isinstance(timestep.obs, dict) else None,
+            'info': info,
             'reward': float(timestep.reward) if timestep.reward is not None else None,
             'done': bool(timestep.done),
-            'info': info,
         }
         self._episode_history.append(log_entry)
 

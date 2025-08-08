@@ -374,6 +374,7 @@ class OptionsZeroGameEnv(gym.Env):
         info = {
             'price': self.price_manager.current_price, 'eval_episode_return': self.final_eval_reward,
             'illegal_actions_in_episode': self.illegal_action_count, 'was_illegal_action': bool(was_illegal_action),
+            'initial_cash': self.portfolio_manager.initial_cash,
             'executed_action_name': final_executed_name, 'directional_bias': meter.directional_bias,
             'volatility_bias': meter.volatility_bias,
             'portfolio_stats': self.portfolio_manager.get_raw_portfolio_stats(self.price_manager.current_price, self.iv_bin_index),

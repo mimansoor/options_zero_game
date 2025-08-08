@@ -23,16 +23,34 @@ function MetricsDashboard({ stepData }) {
   if (!info) return null;
 
   const pnlColor = info.eval_episode_return > 0 ? '#4CAF50' : info.eval_episode_return < 0 ? '#F44336' : 'white';
-  const cumulativeChange = info.price && info.start_price ? ((info.price / info.start_price) - 1) * 100 : 0;
-  const cumulativeChangeColor = cumulativeChange > 0 ? '#4CAF50' : cumulativeChange < 0 ? '#F44336' : 'white';
   const lastChangeColor = info.last_price_change_pct > 0 ? '#4CAF50' : info.last_price_change_pct < 0 ? '#F44336' : 'white';
+
+  // --- THE FIX for "vs Day 0" ---
+  // 1. Calculate PNL percentage change, not price percentage change.
+  const pnlChangePct = info.initial_cash ? (info.eval_episode_return / info.initial_cash) * 100 : 0;
+  const pnlChangeColor = pnlChangePct > 0 ? '#4CAF50' : pnlChangePct < 0 ? '#F44336' : 'white';
+  // --- END OF FIX ---
 
   return (
     <div className="metrics-dashboard">
       <div className="metric-item"> <h2>Market Regime</h2> <p style={{ color: '#2196F3' }}>{(info.market_regime || 'N/A').replace("Historical: ", "")}</p> </div>
       <div className="metric-item"> <h2>Day</h2> <p>{stepData.day}</p> </div>
-      <div className="metric-item"> <h2>EOD Price</h2> <p>${info.price ? info.price.toFixed(2) : '0.00'}</p> <p style={{ fontSize: '0.8em', color: lastChangeColor }}> {info.last_price_change_pct ? info.last_price_change_pct.toFixed(2) : '0.00'}% vs last step </p> </div>
-      <div className="metric-item"> <h2>EOD Total PnL</h2> <p style={{ color: pnlColor }}>${info.eval_episode_return ? info.eval_episode_return.toFixed(2) : '0.00'}</p> <p style={{ fontSize: '0.8em', color: cumulativeChangeColor }}> {cumulativeChange.toFixed(2)}% vs Day 0 </p> </div>
+      <div className="metric-item">
+        <h2>EOD Price</h2>
+        <p>${info.price ? info.price.toFixed(2) : '0.00'}</p>
+        <p style={{ fontSize: '0.8em', color: lastChangeColor }}>
+          {/* This now correctly displays the value calculated in the backend */}
+          {info.last_price_change_pct ? info.last_price_change_pct.toFixed(2) : '0.00'}% vs last step
+        </p>
+      </div>
+      <div className="metric-item">
+        <h2>EOD Total PnL</h2>
+        <p style={{ color: pnlColor }}>${info.eval_episode_return ? info.eval_episode_return.toFixed(2) : '0.00'}</p>
+        <p style={{ fontSize: '0.8em', color: pnlChangeColor }}>
+          {/* This now correctly displays the PnL percentage change */}
+          {pnlChangePct.toFixed(2)}% vs Day 0
+        </p>
+      </div>
       <div className="metric-item"> <h2>Action Taken</h2> <p style={{ textTransform: 'capitalize' }}> {(info.executed_action_name || 'N/A').replace(/_/g, ' ')} </p> </div>
       <div className="metric-item"> <h2>Directional Bias</h2> <p style={{color: '#FFC107'}}>{info.directional_bias || 'N/A'}</p> </div>
       <div className="metric-item"> <h2>Volatility Bias</h2> <p style={{color: '#03A9F4'}}>{info.volatility_bias || 'N/A'}</p> </div>
