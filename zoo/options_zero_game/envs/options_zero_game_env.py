@@ -42,7 +42,7 @@ class OptionsZeroGameEnv(gym.Env):
         ],
         
         # Time and Episode Config
-        time_to_expiry_days=20,
+        time_to_expiry_days=40,
         min_time_to_expiry_days=5,
         forced_episode_length=0,
         steps_per_day=1,
@@ -91,7 +91,7 @@ class OptionsZeroGameEnv(gym.Env):
         },
 
         # Reward and Penalty Config
-        pnl_scaling_factor=10000,
+        pnl_scaling_factor=1000,
         drawdown_penalty_weight=0.1,
         illegal_action_penalty=-1.0,
         
@@ -100,7 +100,6 @@ class OptionsZeroGameEnv(gym.Env):
 
         close_short_leg_on_profit_threshold=2.0,
         jackpot_reward=1.0,
-        strategy_profit_target_pct=50.0,
 
         # --- NEW DYNAMIC TAKE-PROFIT RULES ---
         # For credit strategies, target is a % of the max possible profit (the credit received).
@@ -109,7 +108,7 @@ class OptionsZeroGameEnv(gym.Env):
         # For debit strategies, target is a multiple of the initial debit paid.
         debit_strategy_take_profit_multiple=2.0, # Target 2x the debit paid (200% return). Set to 0 to disable.
 
-        stop_loss_multiple_of_cost=1.5, # NEW: Added stop loss multiple
+        stop_loss_multiple_of_cost=2.0, # NEW: Added stop loss multiple
         use_stop_loss=True,
         forced_opening_strategy_name=None,
         disable_opening_curriculum=False,

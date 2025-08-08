@@ -114,7 +114,7 @@ options_zero_game_muzero_config = dict(
 
             # The evaluator ALWAYS uses a fixed, consistent episode length.
             # This ensures evaluations are always run on the full, max-length episode.
-            forced_episode_length=20, 
+            forced_episode_length=40, 
         ),
 
         manager=dict(shared_memory=False, ),
