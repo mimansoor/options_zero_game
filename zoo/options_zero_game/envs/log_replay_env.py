@@ -78,26 +78,25 @@ class LogReplayEnv(gym.Wrapper):
         """Creates a single, complete log entry for the action that was just taken."""
         info = timestep.info
         current_price = info['price']
+
+        info['pnl_verification'] = self.env.portfolio_manager.get_pnl_verification(current_price, self.env.iv_bin_index)
+        info['payoff_data'] = self.env.portfolio_manager.get_payoff_data(current_price, self.env.iv_bin_index)
+        info['closed_trades_log'] = copy.deepcopy(self._closed_trades_log)
         
         # 1. Get the definitive, correctly-timed portfolio snapshot from the manager.
         portfolio_to_log = self.env.portfolio_manager.get_post_action_portfolio()
         
         # 2. Serialize this correct portfolio.
         serialized_portfolio = self._serialize_portfolio(portfolio_to_log, current_price)
-        
-        # 3. Add all enriched data to the info dict for logging.
-        info['pnl_verification'] = self.env.portfolio_manager.get_pnl_verification(current_price, self.env.iv_bin_index)
-        info['payoff_data'] = self.env.portfolio_manager.get_payoff_data(current_price, self.env.iv_bin_index)
-        info['closed_trades_log'] = copy.deepcopy(self._closed_trades_log)
 
         log_entry = {
             'step': int(step_at_action),
             'day': int(day_at_action),
             'portfolio': serialized_portfolio,
-            'info': info,
             'action': int(timestep.obs['action_mask'].sum()) if isinstance(timestep.obs, dict) else None,
             'reward': float(timestep.reward) if timestep.reward is not None else None,
             'done': bool(timestep.done),
+            'info': info,
         }
         self._episode_history.append(log_entry)
 
@@ -182,9 +181,16 @@ class LogReplayEnv(gym.Wrapper):
     def save_log(self):
         """Saves the complete episode history to a JSON file."""
         print(f"Episode finished. Saving replay log with {len(self._episode_history)} steps...")
+
+        # Create a final log object that contains the episode steps AND the historical data.
+        final_log_object = {
+            'historical_context': self.env.price_manager.historical_context_path.tolist(),
+            'episode_data': self._episode_history
+        }
+
         try:
             with open(self.log_file_path, 'w') as f:
-                json.dump(self._episode_history, f, indent=2, cls=NumpyEncoder)
+                json.dump(final_log_object, f, indent=2, cls=NumpyEncoder)
             print(f"Successfully saved replay log to {self.log_file_path}")
         except Exception as e:
             print(f"Error saving replay log: {e}")
