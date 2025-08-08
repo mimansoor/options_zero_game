@@ -765,7 +765,15 @@ class PortfolioManager:
         return
 
     def take_post_action_portfolio_snapshot(self):
-        if self.is_eval_mode: self.post_action_portfolio = self.portfolio.copy()
+        """
+        Takes a definitive snapshot of the current portfolio state, but only if
+        the environment is in a mode that requires it (e.g., evaluation/logging).
+        This is a performance optimization.
+        """
+        if self.is_eval_mode:
+            self.post_action_portfolio = self.portfolio.copy()
+
+        # In training mode, this function does nothing to save computation.
         return
 
     def _execute_trades(self, trades_to_execute: List[Dict], strategy_pnl: Dict):

@@ -96,10 +96,19 @@ class OptionsZeroGameEnv(gym.Env):
         illegal_action_penalty=-1.0,
         
         # Advanced Trading Rules
-        profit_target_pct=4.0,
+        profit_target_pct=6.0,
+
         close_short_leg_on_profit_threshold=2.0,
         jackpot_reward=1.0,
         strategy_profit_target_pct=50.0,
+
+        # --- NEW DYNAMIC TAKE-PROFIT RULES ---
+        # For credit strategies, target is a % of the max possible profit (the credit received).
+        credit_strategy_take_profit_pct=25.0, # Target 25% of max profit. Set to 0 to disable.
+        
+        # For debit strategies, target is a multiple of the initial debit paid.
+        debit_strategy_take_profit_multiple=2.0, # Target 2x the debit paid (200% return). Set to 0 to disable.
+
         stop_loss_multiple_of_cost=1.5, # NEW: Added stop loss multiple
         use_stop_loss=True,
         forced_opening_strategy_name=None,
@@ -284,14 +293,14 @@ class OptionsZeroGameEnv(gym.Env):
         self._update_realized_vol()
         # Finally, apply the correctly calculated decay to the portfolio.
         self.portfolio_manager.update_positions_after_time_step(time_decay_days, self.price_manager.current_price, self.iv_bin_index)
-        
-        # --- 4. Check for Episode Termination ---
+
+        # --- FINAL, THREE-TIERED TERMINATION LOGIC ---
         terminated_by_rule = False
         final_shaped_reward_override = None
 
         current_pnl = self.portfolio_manager.get_total_pnl(self.price_manager.current_price, self.iv_bin_index)
 
-        # Stop-Loss Rule
+        # 1. Stop-Loss Rule (Highest Priority)
         if self._cfg.use_stop_loss and not self.portfolio_manager.portfolio.empty:
             initial_cost = abs(self.portfolio_manager.initial_net_premium * self.portfolio_manager.lot_size)
             stop_loss_level = initial_cost * self._cfg.stop_loss_multiple_of_cost
@@ -299,21 +308,42 @@ class OptionsZeroGameEnv(gym.Env):
                 terminated_by_rule = True
                 final_shaped_reward_override = -1.0
 
-        # Take-Profit Rules
+        # 2. Take-Profit Rules (Only check if not already stopped out)
         if not terminated_by_rule and not self.portfolio_manager.portfolio.empty:
-            if self._cfg.profit_target_pct > 0:
+
+            # Rule 2a: Fixed Portfolio-Level "Home Run" Target
+            fixed_target_pct = self._cfg.profit_target_pct
+            if fixed_target_pct > 0:
                 pnl_pct = (current_pnl / self.portfolio_manager.initial_cash) * 100
-                if pnl_pct >= self._cfg.profit_target_pct:
-                    terminated_by_rule = True
-                    final_shaped_reward_override = self._cfg.jackpot_reward
-            if not terminated_by_rule and self._cfg.strategy_profit_target_pct > 0:
-                max_profit = self.portfolio_manager.portfolio.iloc[0]['strategy_max_profit']
-                if max_profit > 0 and current_pnl >= max_profit * (self._cfg.strategy_profit_target_pct / 100):
+                if pnl_pct >= fixed_target_pct:
                     terminated_by_rule = True
                     final_shaped_reward_override = self._cfg.jackpot_reward
 
-        terminated_by_time = self.current_step >= (self.total_steps-1)
+            # Rule 2b: Dynamic Strategy-Level Targets (only check if home run not hit)
+            if not terminated_by_rule:
+                net_premium = self.portfolio_manager.initial_net_premium
+                if net_premium < 0: # Credit strategy
+                    credit_target_pct = self._cfg.credit_strategy_take_profit_pct
+                    if credit_target_pct > 0:
+                        max_profit = self.portfolio_manager.portfolio.iloc[0]['strategy_max_profit']
+                        profit_target_pnl = max_profit * (credit_target_pct / 100)
+                        if max_profit > 0 and current_pnl >= profit_target_pnl:
+                            terminated_by_rule = True
+                            final_shaped_reward_override = self._cfg.jackpot_reward
+                elif net_premium > 0: # Debit strategy
+                    debit_target_multiple = self._cfg.debit_strategy_take_profit_multiple
+                    if debit_target_multiple > 0:
+                        debit_paid = net_premium * self.portfolio_manager.lot_size
+                        profit_target_pnl = debit_paid * debit_target_multiple
+                        if current_pnl >= profit_target_pnl:
+                            terminated_by_rule = True
+                            final_shaped_reward_override = self._cfg.jackpot_reward
+
+        # Final termination condition
+        terminated_by_time = self.current_step >= self.total_steps
         terminated = terminated_by_rule or terminated_by_time
+
+        if terminated_by_rule: self.portfolio_manager.close_all_positions(self.price_manager.current_price, self.iv_bin_index)
 
         # The environment's job is to calculate the final PnL.
         # It does NOT prematurely clean up the portfolio. The logger will handle that.

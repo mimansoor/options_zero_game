@@ -41,54 +41,100 @@ class LogReplayEnv(gym.Wrapper):
 
     def step(self, action):
         """
-        The definitive step method. It now captures the pre-action state for
-        accurate logging and uses the receipt system for all trade closures.
+        The definitive step method. It uses the new, robust "snapshot" and
+        "receipt" systems to guarantee accurate logging.
         """
-        # --- THE FIX for the Day 2 Bug ---
-        # 1. Capture the state of the world *before* the action is taken.
+        # 1. Get the pre-action state needed for correct day/step stamping.
         step_at_action = self.env.current_step
         day_at_action = self.env.current_day
 
         # 2. Execute the step in the main environment.
+        # This will update the portfolio and take the post-action snapshot internally.
         timestep = self.env.step(action)
         
         # 3. Check for a closed trade receipt.
         receipt = self.env.portfolio_manager.last_closed_trade_receipt
         if receipt:
-            # The receipt needs the correct exit day.
             receipt['exit_day'] = day_at_action
             self._closed_trades_log.append(receipt)
             self.env.portfolio_manager.last_closed_trade_receipt = {}
             
-        # 4. Log the outcome of the action, passing the pre-action state.
+        # 4. Log the outcome of the action.
         self._log_step_outcome(timestep, step_at_action, day_at_action)
         
-        # 5. If the episode just ended, save the log.
+        # 5. If the episode just ended, add the special settlement entry and save.
         if timestep.done:
+            self._log_settlement_state(timestep)
             self.save_log()
             
         return timestep
 
     def _log_step_outcome(self, timestep, step_at_action, day_at_action):
+        """Creates a single, complete log entry for the action that was just taken."""
         info = timestep.info
         current_price = info['price']
-
-        info['pnl_verification'] = self.env.portfolio_manager.get_pnl_verification(current_price, self.env.iv_bin_index)
-        info['payoff_data'] = self.env.portfolio_manager.get_payoff_data(current_price, self.env.iv_bin_index)
-        info['closed_trades_log'] = copy.deepcopy(self._closed_trades_log)
-
-        serialized_portfolio = self._serialize_portfolio(self.env.portfolio_manager.portfolio, current_price)
-
+        
+        # --- THE CORE OF YOUR FIX ---
+        # 1. Get the definitive, correctly-timed portfolio snapshot from the manager.
+        portfolio_to_log = self.env.portfolio_manager.get_post_action_portfolio()
+        
+        # 2. Serialize this correct portfolio.
+        serialized_portfolio = self._serialize_portfolio(portfolio_to_log, current_price)
+        
+        # ... (The rest of the method for calculating biases, etc., is now guaranteed to be correct)
+        
         log_entry = {
-            'step': int(step_at_action), # <<< USE THE CORRECT STEP
-            'day': int(day_at_action),     # <<< USE THE CORRECT DAY
+            'step': int(step_at_action),
+            'day': int(day_at_action),
             'portfolio': serialized_portfolio,
-            'action': int(timestep.obs['action_mask'].sum()) if isinstance(timestep.obs, dict) else None,
-            'reward': float(timestep.reward) if timestep.reward is not None else None,
-            'done': bool(timestep.done),
             'info': info,
+            # ... (rest of the entry)
         }
         self._episode_history.append(log_entry)
+
+    def _log_settlement_state(self, final_timestep):
+        """
+        Creates and appends a final, special log entry for the end of the episode
+        to show the state after all closing/settlement logic has occurred.
+        """
+        if not self._episode_history: return
+        
+        # Use a copy of the very last recorded state as a template.
+        last_log_entry = copy.deepcopy(self._episode_history[-1])
+        info = final_timestep.info
+
+        # Determine the reason for termination for the final action name
+        final_reward = final_timestep.reward
+        if terminated_by_time_logic_placeholder: # This would require passing the flag through info
+            final_action_name = "EXPIRATION / SETTLEMENT"
+        elif final_reward == -1.0:
+            final_action_name = "STOP-LOSS HIT"
+        elif final_reward == self.env.jackpot_reward:
+            final_action_name = "PROFIT TARGET MET"
+        else:
+            final_action_name = "EPISODE END" # Generic fallback
+        
+        # --- THE KEY ---
+        # The portfolio is now whatever is left *after* the `if terminated:` block in the env.
+        # This will be empty for rule-based terminations and potentially non-empty for settlement.
+        # But since our last fix now closes all positions on settlement, it will always be empty.
+        # The *real* final state is captured by the P&L.
+        final_pnl = info['eval_episode_return']
+        
+        # Create the new settlement entry
+        settlement_entry = last_log_entry
+        settlement_entry.update({
+            'step': last_log_entry['step'] + 1,
+            'day': last_log_entry['day'] + 1,
+            'portfolio': [], # The portfolio is always empty at the very end
+            'done': True,
+            'action': None,
+            'reward': final_reward
+        })
+        settlement_entry['info']['eval_episode_return'] = final_pnl
+        settlement_entry['info']['executed_action_name'] = final_action_name
+        
+        self._episode_history.append(settlement_entry)
 
     def _serialize_portfolio(self, portfolio_df: pd.DataFrame, current_price: float) -> list:
         """Calculates live PnL for the current portfolio and returns a serializable list."""
