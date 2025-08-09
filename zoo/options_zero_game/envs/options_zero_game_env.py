@@ -115,8 +115,6 @@ class OptionsZeroGameEnv(gym.Env):
         
         # Agent/Framework Config
         ignore_legal_actions=True,
-        otm_delta_threshold=0.15,
-        itm_delta_threshold=0.85,
 
         # These rules apply ONLY when opening a new LONG single-leg position.
         otm_long_delta_threshold=0.20, # Disallow buying options with delta < 20
