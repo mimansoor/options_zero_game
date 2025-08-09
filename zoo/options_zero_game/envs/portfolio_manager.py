@@ -917,7 +917,7 @@ class PortfolioManager:
         # --- 2. For all other strategies, simulate the payoff curve ---
         sim_price_high = self.start_price * 2
         sim_price_low = 0.01
-        price_range = np.linspace(sim_price_low, sim_price_high, 200)
+        price_range = np.linspace(sim_price_low, sim_price_high, 300)
         pnl_at_expiry = []
 
         for price in price_range:
@@ -943,7 +943,8 @@ class PortfolioManager:
         if sum_of_losses > 1e-6: # Avoid division by zero
             profit_factor = sum_of_wins / sum_of_losses
         else: # If there are no losses, the profit factor is effectively infinite
-            profit_factor = float('inf')
+            # <<< FIX APPLIED HERE: Return a JSON-compatible number instead of Infinity.
+            profit_factor = 0.0
         # --- END OF FIX ---
 
         # --- 3. Final Capping and Return ---
