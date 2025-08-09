@@ -446,8 +446,16 @@ class OptionsZeroGameEnv(gym.Env):
         is_illegal = true_action_mask[action] == 0
         if is_illegal:
             self.illegal_action_count += 1
-            final_action = self.actions_to_indices['HOLD']
-            return final_action, True
+            # Special override rule for the liquidation period.
+            is_liquidation_period = self.current_day_index >= (self.episode_time_to_expiry - 2)
+            if is_liquidation_period and not self.portfolio_manager.portfolio.empty:
+                # If the agent makes a mistake during liquidation, the only rational
+                # override is to force it to do what it's supposed to do: get flat.
+                final_action = self.actions_to_indices['CLOSE_ALL']
+                print("DEBUG: Illegal action in liquidation period. Forcing CLOSE_ALL.") # Optional debug print
+            else:
+                # The standard fallback for all other illegal moves.
+                final_action = self.actions_to_indices['HOLD']
         else:
             return action, False
 
