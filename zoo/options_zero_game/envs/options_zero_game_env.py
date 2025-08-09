@@ -456,6 +456,8 @@ class OptionsZeroGameEnv(gym.Env):
             else:
                 # The standard fallback for all other illegal moves.
                 final_action = self.actions_to_indices['HOLD']
+
+            return final_action, True # Return the override and flag the illegal attempt
         else:
             return action, False
 
