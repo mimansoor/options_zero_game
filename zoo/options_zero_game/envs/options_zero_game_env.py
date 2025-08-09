@@ -712,7 +712,29 @@ class OptionsZeroGameEnv(gym.Env):
             if is_legal:
                 base_opening_mask[index] = 1
 
-        # 2. If it's Step 0 and we are in TRAINING mode, apply the curriculum filter.
+        # 2. Now, filter this universe based on the number of available slots.
+        final_opening_mask = np.zeros(self.action_space_size, dtype=np.int8)
+        available_slots = self.portfolio_manager.max_positions - len(self.portfolio_manager.portfolio)
+
+        for index, is_legal in enumerate(base_opening_mask):
+            if not is_legal: continue # Skip if it's already illegal by delta rules
+            
+            action_name = self.indices_to_actions[index]
+            
+            # Check for 4-leg strategies
+            if 'CONDOR' in action_name or 'FLY' in action_name:
+                if available_slots >= 4:
+                    final_opening_mask[index] = 1
+            # Check for 2-leg strategies
+            elif 'STRADDLE' in action_name or 'STRANGLE' in action_name or 'VERTICAL' in action_name:
+                if available_slots >= 2:
+                    final_opening_mask[index] = 1
+            # Check for 1-leg strategies
+            elif 'ATM' in action_name:
+                if available_slots >= 1:
+                    final_opening_mask[index] = 1
+
+        # 3. If it's Step 0 and we are in TRAINING mode, apply the curriculum filter.
         if self.current_step == 0 and not self._cfg.disable_opening_curriculum:
             strategy_families = {
                 "SINGLE_LEG": lambda name: 'ATM' in name and 'STRADDLE' not in name and 'STRANGLE' not in name,
@@ -724,22 +746,22 @@ class OptionsZeroGameEnv(gym.Env):
             is_in_family = strategy_families[chosen_family_name]
 
             # Filter the already-legal moves by the chosen family
-            final_mask = np.zeros(self.action_space_size, dtype=np.int8)
-            for index, is_legal in enumerate(base_opening_mask):
+            curriculum_mask = np.zeros(self.action_space_size, dtype=np.int8)
+            for index, is_legal in enumerate(final_opening_mask):
                 if is_legal and is_in_family(self.indices_to_actions[index]):
-                    final_mask[index] = 1
+                    curriculum_mask[index] = 1
             
-            # Failsafe: if the filter results in no legal moves, use the original base mask
-            if not np.any(final_mask):
-                return base_opening_mask
+            # Failsafe: if the filter results in no legal moves, use the original filtered mask
+            if not np.any(curriculum_mask):
+                return final_opening_mask
             else:
-                return final_mask
+                return curriculum_mask
         else:
-            # For EVALUATION on Step 0, or any MID-EPISODE re-opening, return the full set of legal moves.
+            # For EVALUATION on Step 0, or any MID-EPISODE re-opening, return the full set of slot-legal moves.
             # We also allow HOLD if it's not step 0.
             if self.current_step > 0:
-                base_opening_mask[self.actions_to_indices['HOLD']] = 1
-            return base_opening_mask
+                final_opening_mask[self.actions_to_indices['HOLD']] = 1
+            return final_opening_mask
 
     def render(self, mode: str = 'human') -> None:
         total_pnl = self.portfolio_manager.get_total_pnl(self.price_manager.current_price, self.iv_bin_index)
