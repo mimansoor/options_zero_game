@@ -119,6 +119,7 @@ class OptionsZeroGameEnv(gym.Env):
         # These rules apply ONLY when opening a new LONG single-leg position.
         otm_long_delta_threshold=0.20, # Disallow buying options with delta < 20
         itm_long_delta_threshold=0.65, # Disallow buying options with delta > 65
+        itm_short_delta_threshold=0.55, # Disallow shorting options with delta > 55
 
         strategy_name_to_id={}, # Can be left empty, as it's populated from the main config
     )
@@ -744,7 +745,7 @@ class OptionsZeroGameEnv(gym.Env):
                     if direction == 'LONG':
                         if abs_delta < self._cfg.otm_long_delta_threshold or abs_delta > self._cfg.itm_long_delta_threshold: is_legal = False
                     elif direction == 'SHORT':
-                        if abs_delta > self._cfg.itm_long_delta_threshold: is_legal = False
+                        if abs_delta > self._cfg.itm_short_delta_threshold: is_legal = False
                 if is_legal:
                     action_mask[index] = 1
 
