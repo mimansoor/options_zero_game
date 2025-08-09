@@ -607,46 +607,45 @@ class PortfolioManager:
 
     def get_portfolio_summary(self, current_price: float, iv_bin_index: int) -> dict:
         """
-        The definitive, correct POP calculator. It is now fully aware of the
-        difference between debit and credit spreads.
+        The definitive, correct summary calculator. It now uses the CURRENT TOTAL PNL
+        to accurately calculate the portfolio's true Probability of Profit.
         """
+        # --- 1. First, calculate the current total PnL. This is our baseline. ---
+        current_total_pnl = self.get_total_pnl(current_price, iv_bin_index)
+
         if self.portfolio.empty:
-            prob_profit = 1.0 if self.realized_pnl > 0 else 0.0
+            # If the portfolio is flat, POP is based only on the realized PnL.
+            prob_profit = 1.0 if current_total_pnl > 0 else 0.0
             return {'max_profit': 0.0, 'max_loss': 0.0, 'rr_ratio': 0.0, 'prob_profit': prob_profit}
 
-        # --- 1. Calculate Base Stats (Unchanged) ---
+        # --- 2. Calculate Base Stats ---
         max_profit = self.portfolio.iloc[0]['strategy_max_profit']
         max_loss = self.portfolio.iloc[0]['strategy_max_loss']
         rr_ratio = abs(max_profit / max_loss) if max_loss != 0 else float('inf')
         
-        # --- 2. Calculate Position Breakevens (Unchanged) ---
+        # --- 3. Calculate Position Breakevens ---
         net_premium_of_position = sum(
             pos['entry_premium'] * (1 if pos['direction'] == 'long' else -1)
             for _, pos in self.portfolio.iterrows()
         )
         lower_be, upper_be = self._calculate_position_breakevens(self.portfolio, net_premium_of_position)
         
-        # --- 3. Adjust Breakevens for Realized PnL (Unchanged) ---
-        pnl_buffer = self.realized_pnl / self.lot_size
+        # --- 4. YOUR DEFINITIVE FIX: Adjust breakevens using CURRENT TOTAL PNL ---
+        # The buffer is the total PnL we have "in the bank" right now.
+        pnl_buffer = current_total_pnl / self.lot_size
         adjusted_lower_be = lower_be - pnl_buffer
         adjusted_upper_be = upper_be + pnl_buffer
 
-        # --- 4. Calculate Probability of Finishing Outside the Adjusted Breakevens ---
+        # --- 5. Calculate Probability of Finishing Outside the Adjusted Breakevens ---
         days_to_expiry = self.portfolio.iloc[0]['days_to_expiry']
         prob_outside_breakevens = self._calculate_probability_outside_range(
             adjusted_lower_be, adjusted_upper_be,
             current_price, iv_bin_index, days_to_expiry
         )
 
-        # --- 5. THE DEFINITIVE FIX: Determine Final POP based on Debit/Credit ---
+        # --- 6. Determine Final POP based on Debit/Credit (Unchanged) ---
         is_debit_trade = net_premium_of_position > 0
-        
-        if is_debit_trade:
-            # For a DEBIT trade (Long Strangle), profit is made OUTSIDE the breakevens.
-            prob_profit = prob_outside_breakevens
-        else:
-            # For a CREDIT trade (Short Strangle), profit is made INSIDE the breakevens.
-            prob_profit = 1.0 - prob_outside_breakevens
+        prob_profit = prob_outside_breakevens if is_debit_trade else (1.0 - prob_outside_breakevens)
 
         return {
             'max_profit': max_profit,
@@ -657,38 +656,55 @@ class PortfolioManager:
 
     def _calculate_position_breakevens(self, portfolio_df: pd.DataFrame, net_premium: float) -> Tuple[float, float]:
         """
-        The definitive, correct breakeven calculator. It now correctly handles
-        all strategy types, including multi-leg debit spreads (long straddles/strangles).
+        The definitive, correct breakeven calculator. It is now fully strategy-aware and
+        can correctly handle all standard structures, including Butterflies.
         """
         lower_breakeven = 0.0
         upper_breakeven = float('inf')
-        
         premium_cushion = abs(net_premium)
         
-        short_strikes = sorted([p['strike_price'] for _, p in portfolio_df.iterrows() if p['direction'] == 'short'])
-        
-        if short_strikes:
-            # This correctly handles all CREDIT strategies (Iron Condors, Short Verticals, etc.)
-            lower_breakeven = short_strikes[0] - premium_cushion
-            upper_breakeven = short_strikes[-1] + premium_cushion
-            
-        elif len(portfolio_df) == 1:
-            # This correctly handles all single LONG leg strategies.
+        is_single_leg = len(portfolio_df) == 1
+        is_debit_trade = net_premium > 0
+
+        if is_single_leg:
+            # --- Case 1: Single Legs ---
             pos = portfolio_df.iloc[0]
-            if pos['type'] == 'call': lower_breakeven = pos['strike_price'] + premium_cushion
-            else: upper_breakeven = pos['strike_price'] - premium_cushion
+            if pos['direction'] == 'long':
+                if pos['type'] == 'call': lower_breakeven = pos['strike_price'] + premium_cushion
+                else: upper_breakeven = pos['strike_price'] - premium_cushion
+            else: # Single Short Leg
+                if pos['type'] == 'call': upper_breakeven = pos['strike_price'] + premium_cushion
+                else: lower_breakeven = pos['strike_price'] - premium_cushion
+        
+        else: # --- Multi-leg strategies ---
+            short_strikes = sorted([p['strike_price'] for _, p in portfolio_df.iterrows() if p['direction'] == 'short'])
+            long_strikes = sorted([p['strike_price'] for _, p in portfolio_df.iterrows() if p['direction'] == 'long'])
 
-        # This new block handles multi-leg DEBIT strategies (Long Straddle/Strangle).
-        elif not short_strikes and len(portfolio_df) > 1:
-            put_legs = [p for _, p in portfolio_df.iterrows() if p['type'] == 'put']
-            call_legs = [p for _, p in portfolio_df.iterrows() if p['type'] == 'call']
+            # --- THE DEFINITIVE FIX IS HERE ---
+            # Check if all short strikes are the same, which is a key feature of a Butterfly/Fly.
+            is_butterfly_structure = len(set(short_strikes)) == 1 if short_strikes else False
 
-            if put_legs and call_legs:
-                put_strike = put_legs[0]['strike_price']
-                call_strike = call_legs[0]['strike_price']
-                
-                lower_breakeven = put_strike - premium_cushion
-                upper_breakeven = call_strike + premium_cushion
+            if is_butterfly_structure:
+                # Case 2: Butterfly/Fly Structures (e.g., Short Butterfly, Iron Fly)
+                # Breakevens are based on the protective LONG wings.
+                lower_breakeven = long_strikes[0] + premium_cushion
+                upper_breakeven = long_strikes[-1] - premium_cushion
+            elif is_debit_trade:
+                # Case 3: Other Multi-Leg DEBIT (e.g., Long Strangle, Long Vertical)
+                put_legs = portfolio_df[portfolio_df['type'] == 'put']
+                call_legs = portfolio_df[portfolio_df['type'] == 'call']
+                if not put_legs.empty and not call_legs.empty: # Long Strangle/Straddle
+                    lower_breakeven = put_legs.iloc[0]['strike_price'] - premium_cushion
+                    upper_breakeven = call_legs.iloc[0]['strike_price'] + premium_cushion
+                elif not call_legs.empty: # Long Call Vertical
+                    lower_breakeven = min(call_legs['strike_price']) + premium_cushion
+                elif not put_legs.empty: # Long Put Vertical
+                    upper_breakeven = max(put_legs['strike_price']) - premium_cushion
+            else: 
+                # Case 4: Other Multi-Leg CREDIT (e.g., Short Strangle, Iron Condor)
+                if short_strikes:
+                    lower_breakeven = short_strikes[0] - premium_cushion
+                    upper_breakeven = short_strikes[-1] + premium_cushion
         
         return lower_breakeven, upper_breakeven
 
