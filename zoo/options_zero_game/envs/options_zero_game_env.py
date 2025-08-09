@@ -158,7 +158,7 @@ class OptionsZeroGameEnv(gym.Env):
             # --- NEW EXPERT FEATURES ---
             'EXPERT_EMA_RATIO': 14, 'EXPERT_RSI_OVERSOLD': 15, 'EXPERT_RSI_NEUTRAL': 16, 'EXPERT_RSI_OVERBOUGHT': 17, 'EXPERT_VOL_NORM': 18,
             # --- NEW MARKET EXPECTATION FEATURE ---
-            'EXPECTED_MOVE_NORM': 19,
+            'EXPECTED_MOVE_NORM': 19, 'PORTFOLIO_PROFIT_FACTOR_NORM': 20,
         }
         self.POS_IDX = {
             'IS_OCCUPIED': 0, 'TYPE_NORM': 1, 'DIRECTION_NORM': 2, 'STRIKE_DIST_NORM': 3, 'DAYS_HELD_NORM': 4,
@@ -514,6 +514,13 @@ class OptionsZeroGameEnv(gym.Env):
         vec[self.OBS_IDX['EXPERT_RSI_OVERBOUGHT']] = rsi_probs[2]
         
         vec[self.OBS_IDX['EXPERT_VOL_NORM']] = math.tanh(self.price_manager.expert_vol_pred)
+
+        # 2. Get the complete portfolio risk profile in one go.
+        stats = self.portfolio_manager.get_raw_portfolio_stats(self.price_manager.current_price, self.iv_bin_index)
+
+        # Normalize the profit factor. We divide by 10 as a heuristic to keep the
+        # value in a good range for tanh before it saturates.
+        vec[self.OBS_IDX['PORTFOLIO_PROFIT_FACTOR_NORM']] = math.tanh(stats['profit_factor'] / 10.0)
 
         # Per-Position State
         self.portfolio_manager.get_positions_state(vec, self.PORTFOLIO_START_IDX, self.PORTFOLIO_STATE_SIZE_PER_POS, self.POS_IDX, self.price_manager.current_price, self.iv_bin_index, self.current_step, self.total_steps)

@@ -145,7 +145,7 @@ class LogReplayEnv(gym.Wrapper):
         final_info.update({
             'directional_bias': "Neutral", 'volatility_bias': "Neutral / Low Volatility Expected",
             'executed_action_name': final_action_name, 'eval_episode_return': final_pnl,
-            'portfolio_stats': {'delta': 0.0, 'gamma': 0.0, 'theta': 0.0, 'vega': 0.0, 'max_profit': 0.0, 'max_loss': 0.0, 'rr_ratio': 0.0, 'prob_profit': 1.0 if final_pnl > 0 else 0.0},
+            'portfolio_stats': {'delta': 0.0, 'gamma': 0.0, 'theta': 0.0, 'vega': 0.0, 'max_profit': 0.0, 'max_loss': 0.0, 'rr_ratio': 0.0, 'prob_profit': 1.0 if final_pnl > 0 else 0.0, 'profit_factor': 0.0},
             'pnl_verification': {'realized_pnl': final_pnl, 'unrealized_pnl': 0.0, 'verified_total_pnl': final_pnl},
             'payoff_data': {'expiry_pnl': [], 'current_pnl': [], 'spot_price': info['price'], 'sigma_levels': {}}
         })

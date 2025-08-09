@@ -40,8 +40,8 @@ class PortfolioManager:
         self.high_water_mark: float = 0.0
         self.next_creation_id: int = 0
         self.initial_net_premium: float = 0.0
-        self.portfolio_columns = ['type', 'direction', 'entry_step', 'strike_price', 'entry_premium', 'days_to_expiry', 'creation_id', 'strategy_id', 'strategy_max_profit', 'strategy_max_loss', 'is_hedged', 'strategy_profit_factor']
-        self.portfolio_dtypes = {'type': 'object', 'direction': 'object', 'entry_step': 'int64', 'strike_price': 'float64', 'entry_premium': 'float64', 'days_to_expiry': 'float64', 'creation_id': 'int64', 'strategy_id': 'int64', 'strategy_max_profit': 'float64', 'strategy_max_loss': 'float64', 'is_hedged': 'bool', 'strategy_profit_factor': 'float64'}
+        self.portfolio_columns = ['type', 'direction', 'entry_step', 'strike_price', 'entry_premium', 'days_to_expiry', 'creation_id', 'strategy_id', 'strategy_max_profit', 'strategy_max_loss', 'is_hedged']
+        self.portfolio_dtypes = {'type': 'object', 'direction': 'object', 'entry_step': 'int64', 'strike_price': 'float64', 'entry_premium': 'float64', 'days_to_expiry': 'float64', 'creation_id': 'int64', 'strategy_id': 'int64', 'strategy_max_profit': 'float64', 'strategy_max_loss': 'float64', 'is_hedged': 'bool'}
     
     def reset(self):
         """Resets the portfolio to an empty state for a new episode."""
@@ -61,7 +61,6 @@ class PortfolioManager:
         statistics for logging and visualization.
         """
         # We can reuse our existing methods to get the data
-        greeks = self.get_portfolio_greeks(current_price, iv_bin_index)
         summary = self.get_portfolio_summary(current_price, iv_bin_index)
 
         # The greek values in the 'greeks' dict are already normalized.
@@ -81,6 +80,9 @@ class PortfolioManager:
                 total_theta += leg_greeks['theta'] * self.lot_size * direction_multiplier
                 total_vega += leg_greeks['vega'] * self.lot_size * direction_multiplier
 
+        legs_from_portfolio = self.portfolio.to_dict(orient='records')
+        pnl_profile = self._calculate_strategy_pnl(legs_from_portfolio, "SUMMARY")
+
         return {
             'delta': total_delta,
             'gamma': total_gamma,
@@ -90,6 +92,7 @@ class PortfolioManager:
             'max_loss': summary['max_loss'],
             'rr_ratio': summary['rr_ratio'],
             'prob_profit': summary['prob_profit'],
+            'profit_factor': pnl_profile['profit_factor']
         }
 
     def get_portfolio(self) -> pd.DataFrame:
