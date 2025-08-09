@@ -840,9 +840,9 @@ class PortfolioManager:
 
     def _calculate_strategy_pnl(self, legs: List[Dict], strategy_name: str) -> Dict:
         """
-        A robust, truly strategy-agnostic risk engine. It calculates max profit/loss
-        by analyzing the fundamental structure of the legs for all four sources of
-        undefined risk (naked short calls/puts and naked long calls/puts).
+        The definitive, robust, and capped risk engine. It calculates max profit/loss
+        and then clips the result to the environment's undefined_risk_cap to
+        ensure all risk profiles are bounded and stable.
         """
         if not legs: return {'max_profit': 0.0, 'max_loss': 0.0}
 
@@ -850,17 +850,34 @@ class PortfolioManager:
         if len(legs) == 1:
             leg = legs[0]
             entry_premium_total = leg['entry_premium'] * self.lot_size
+            
             if leg['direction'] == 'long':
                 max_loss = -entry_premium_total
-                max_profit = self.undefined_risk_cap if leg['type'] == 'call' else (leg['strike_price'] * self.lot_size) - entry_premium_total
+                if leg['type'] == 'call':
+                    # Call profit is theoretically unlimited, so we use the cap.
+                    max_profit = self.undefined_risk_cap
+                else: # Put
+                    # Put profit is defined, but we must cap it.
+                    calculated_profit = (leg['strike_price'] * self.lot_size) - entry_premium_total
+                    max_profit = min(self.undefined_risk_cap, calculated_profit)
             else: # short
                 max_profit = entry_premium_total
-                max_loss = -self.undefined_risk_cap if leg['type'] == 'call' else -((leg['strike_price'] * self.lot_size) - entry_premium_total)
+                if leg['type'] == 'call':
+                    # Call loss is theoretically unlimited.
+                    max_loss = -self.undefined_risk_cap
+                else: # Put
+                    # Put loss is defined, but we must cap it.
+                    calculated_loss = -((leg['strike_price'] * self.lot_size) - entry_premium_total)
+                    max_loss = max(-self.undefined_risk_cap, calculated_loss)
+
             return {'max_profit': max_profit, 'max_loss': max_loss}
 
-        # --- 2. THE NEW, SIMPLER, AND CORRECT RISK DEFINITION ---
-        # For any multi-leg strategy, risk is defined if and only if the
-        # number of long calls equals short calls, and long puts equals short puts.
+        # --- 2. Handle Multi-Leg Strategies ---
+        # The logic for multi-leg strategies already correctly calculates a
+        # defined max profit/loss based on the width of the strikes.
+        # However, for safety, we will clip these results as well.
+        
+        net_premium = sum(leg['entry_premium'] * (1 if leg['direction'] == 'long' else -1) for leg in legs)
         
         long_calls = [l for l in legs if l['type'] == 'call' and l['direction'] == 'long']
         short_calls = [l for l in legs if l['type'] == 'call' and l['direction'] == 'short']
@@ -868,9 +885,6 @@ class PortfolioManager:
         short_puts = [l for l in legs if l['type'] == 'put' and l['direction'] == 'short']
 
         is_defined_risk = (len(long_calls) == len(short_calls)) and (len(long_puts) == len(short_puts))
-        
-        # --- 3. Calculate PnL Based on the True Risk Profile ---
-        net_premium = sum(leg['entry_premium'] * (1 if leg['direction'] == 'long' else -1) for leg in legs)
         
         if not is_defined_risk:
             # Undefined Risk Profile (Naked, Straddle, Strangle)
@@ -880,7 +894,6 @@ class PortfolioManager:
             else: # Credit
                 max_profit = -net_premium * self.lot_size
                 max_loss = -self.undefined_risk_cap
-            return {'max_profit': max_profit, 'max_loss': max_loss}
         else:
             # Defined Risk Profile (Hedged: Verticals, Condors, Butterflies)
             is_debit_spread = net_premium > 0
@@ -897,7 +910,12 @@ class PortfolioManager:
             else: # Credit spread
                 max_profit = -net_premium * self.lot_size
                 max_loss = -max_width + max_profit
-            return {'max_profit': max_profit, 'max_loss': max_loss}
+
+        # --- FINAL UNIVERSAL CAPPING ---
+        final_max_profit = min(self.undefined_risk_cap, max_profit)
+        final_max_loss = max(-self.undefined_risk_cap, max_loss)
+            
+        return {'max_profit': final_max_profit, 'max_loss': final_max_loss}
 
     def _open_single_leg(self, action_name: str, current_price: float, iv_bin_index: int, current_step: int, days_to_expiry: float):
         # --- Defensive Assertion ---
