@@ -196,7 +196,7 @@ function AgentBehaviorChart({ episodeHistory, historicalContext }) {
 function PortfolioRiskDashboard({ portfolioStats }) {
   if (!portfolioStats) return <p className="empty-message">Awaiting data...</p>;
 
-  const { delta, gamma, theta, vega, max_profit, max_loss, rr_ratio, prob_profit } = portfolioStats;
+  const { delta, gamma, theta, vega, max_profit, max_loss, rr_ratio, prob_profit, profit_factor } = portfolioStats;
 
   const deltaColor = delta > 0 ? '#4CAF50' : delta < 0 ? '#F44336' : 'white';
   const gammaColor = gamma > 0 ? '#4CAF50' : gamma < 0 ? '#F44336' : 'white';
@@ -230,6 +230,7 @@ function PortfolioRiskDashboard({ portfolioStats }) {
       <div className="risk-item"><span>Risk/Reward Ratio:</span> <p>{formatRRRatio(rr_ratio)}</p></div>
       
       <div className="risk-item"><span>Prob. of Profit:</span> <p>{(prob_profit * 100).toFixed(2)}%</p></div>
+      <div className="risk-item"><span>Profit Factor:</span> <p style={{ color: '#03A9F4' }}>{isFinite(profit_factor) ? profit_factor.toFixed(2) : '∞'}</p></div>
     </div>
   );
 }

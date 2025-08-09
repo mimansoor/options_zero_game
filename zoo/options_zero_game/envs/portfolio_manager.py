@@ -18,6 +18,7 @@ class PortfolioManager:
         self.lot_size = cfg['lot_size']
         self.bid_ask_spread_pct = cfg['bid_ask_spread_pct']
         self.max_positions = cfg['max_positions']
+        self.start_price = cfg['start_price']
         self.strike_distance = cfg['strike_distance']
         self.undefined_risk_cap = self.initial_cash
         self.strategy_name_to_id = cfg.get('strategy_name_to_id', {})
@@ -39,8 +40,8 @@ class PortfolioManager:
         self.high_water_mark: float = 0.0
         self.next_creation_id: int = 0
         self.initial_net_premium: float = 0.0
-        self.portfolio_columns = ['type', 'direction', 'entry_step', 'strike_price', 'entry_premium', 'days_to_expiry', 'creation_id', 'strategy_id', 'strategy_max_profit', 'strategy_max_loss', 'is_hedged']
-        self.portfolio_dtypes = {'type': 'object', 'direction': 'object', 'entry_step': 'int64', 'strike_price': 'float64', 'entry_premium': 'float64', 'days_to_expiry': 'float64', 'creation_id': 'int64', 'strategy_id': 'int64', 'strategy_max_profit': 'float64', 'strategy_max_loss': 'float64', 'is_hedged': 'bool'}
+        self.portfolio_columns = ['type', 'direction', 'entry_step', 'strike_price', 'entry_premium', 'days_to_expiry', 'creation_id', 'strategy_id', 'strategy_max_profit', 'strategy_max_loss', 'is_hedged', 'strategy_profit_factor']
+        self.portfolio_dtypes = {'type': 'object', 'direction': 'object', 'entry_step': 'int64', 'strike_price': 'float64', 'entry_premium': 'float64', 'days_to_expiry': 'float64', 'creation_id': 'int64', 'strategy_id': 'int64', 'strategy_max_profit': 'float64', 'strategy_max_loss': 'float64', 'is_hedged': 'bool', 'strategy_profit_factor': 'float64'}
     
     def reset(self):
         """Resets the portfolio to an empty state for a new episode."""
@@ -897,82 +898,56 @@ class PortfolioManager:
 
     def _calculate_strategy_pnl(self, legs: List[Dict], strategy_name: str) -> Dict:
         """
-        The definitive, robust, and capped risk engine. It calculates max profit/loss
-        and then clips the result to the environment's undefined_risk_cap to
-        ensure all risk profiles are bounded and stable.
+        The definitive, simulation-based risk engine. It now also calculates the
+        Profit Factor by analyzing the entire distribution of payoff outcomes.
         """
-        if not legs: return {'max_profit': 0.0, 'max_loss': 0.0}
+        if not legs: return {'max_profit': 0.0, 'max_loss': 0.0, 'profit_factor': 0.0}
 
-        # --- 1. Handle Single Leg Strategies ---
-        if len(legs) == 1:
-            leg = legs[0]
-            entry_premium_total = leg['entry_premium'] * self.lot_size
-            
-            if leg['direction'] == 'long':
-                max_loss = -entry_premium_total
-                if leg['type'] == 'call':
-                    # Call profit is theoretically unlimited, so we use the cap.
-                    max_profit = self.undefined_risk_cap
-                else: # Put
-                    # Put profit is defined, but we must cap it.
-                    calculated_profit = (leg['strike_price'] * self.lot_size) - entry_premium_total
-                    max_profit = min(self.undefined_risk_cap, calculated_profit)
-            else: # short
-                max_profit = entry_premium_total
-                if leg['type'] == 'call':
-                    # Call loss is theoretically unlimited.
-                    max_loss = -self.undefined_risk_cap
-                else: # Put
-                    # Put loss is defined, but we must cap it.
-                    calculated_loss = -((leg['strike_price'] * self.lot_size) - entry_premium_total)
-                    max_loss = max(-self.undefined_risk_cap, calculated_loss)
+        # --- 1. Handle Naked Shorts (Special Case) ---
+        if len(legs) == 1 and legs[0]['direction'] == 'short':
+            entry_premium_total = legs[0]['entry_premium'] * self.lot_size
+            max_profit = entry_premium_total
+            max_loss = -self.undefined_risk_cap
+            # Profit factor for a naked short is theoretically very low.
+            return {'max_profit': max_profit, 'max_loss': max_loss, 'profit_factor': 0.01}
 
-            return {'max_profit': max_profit, 'max_loss': max_loss}
+        # --- 2. For all other strategies, simulate the payoff curve ---
+        sim_price_high = self.start_price * 2
+        sim_price_low = 0.01
+        price_range = np.linspace(sim_price_low, sim_price_high, 200)
+        pnl_at_expiry = []
 
-        # --- 2. Handle Multi-Leg Strategies ---
-        # The logic for multi-leg strategies already correctly calculates a
-        # defined max profit/loss based on the width of the strikes.
-        # However, for safety, we will clip these results as well.
+        for price in price_range:
+            pnl_at_price = 0
+            for leg in legs:
+                pnl_multiplier = 1 if leg['direction'] == 'long' else -1
+                if leg['type'] == 'call': leg_pnl = max(0, price - leg['strike_price']) - leg['entry_premium']
+                else: leg_pnl = max(0, leg['strike_price'] - price) - leg['entry_premium']
+                pnl_at_price += leg_pnl * pnl_multiplier * self.lot_size
+            pnl_at_expiry.append(pnl_at_price)
+
+        max_profit = max(pnl_at_expiry)
+        max_loss = min(pnl_at_expiry)
         
-        net_premium = sum(leg['entry_premium'] * (1 if leg['direction'] == 'long' else -1) for leg in legs)
+        # --- YOUR BRILLIANT FIX: CALCULATE PROFIT FACTOR ---
+        positive_pnls = [p for p in pnl_at_expiry if p > 0]
+        negative_pnls = [p for p in pnl_at_expiry if p <= 0]
         
-        long_calls = [l for l in legs if l['type'] == 'call' and l['direction'] == 'long']
-        short_calls = [l for l in legs if l['type'] == 'call' and l['direction'] == 'short']
-        long_puts = [l for l in legs if l['type'] == 'put' and l['direction'] == 'long']
-        short_puts = [l for l in legs if l['type'] == 'put' and l['direction'] == 'short']
-
-        is_defined_risk = (len(long_calls) == len(short_calls)) and (len(long_puts) == len(short_puts))
+        sum_of_wins = sum(positive_pnls)
+        sum_of_losses = abs(sum(negative_pnls))
         
-        if not is_defined_risk:
-            # Undefined Risk Profile (Naked, Straddle, Strangle)
-            if net_premium > 0: # Debit
-                max_loss = -net_premium * self.lot_size
-                max_profit = self.undefined_risk_cap
-            else: # Credit
-                max_profit = -net_premium * self.lot_size
-                max_loss = -self.undefined_risk_cap
-        else:
-            # Defined Risk Profile (Hedged: Verticals, Condors, Butterflies)
-            is_debit_spread = net_premium > 0
-            call_strikes = sorted([leg['strike_price'] for leg in legs if leg['type'] == 'call'])
-            put_strikes = sorted([leg['strike_price'] for leg in legs if leg['type'] == 'put'])
-            
-            call_width = (call_strikes[-1] - call_strikes[0]) if len(call_strikes) > 1 else 0
-            put_width = (put_strikes[-1] - put_strikes[0]) if len(put_strikes) > 1 else 0
-            max_width = max(call_width, put_width) * self.lot_size
+        profit_factor = 0.0
+        if sum_of_losses > 1e-6: # Avoid division by zero
+            profit_factor = sum_of_wins / sum_of_losses
+        else: # If there are no losses, the profit factor is effectively infinite
+            profit_factor = float('inf')
+        # --- END OF FIX ---
 
-            if is_debit_spread:
-                max_loss = -net_premium * self.lot_size
-                max_profit = max_width + max_loss 
-            else: # Credit spread
-                max_profit = -net_premium * self.lot_size
-                max_loss = -max_width + max_profit
-
-        # --- FINAL UNIVERSAL CAPPING ---
+        # --- 3. Final Capping and Return ---
         final_max_profit = min(self.undefined_risk_cap, max_profit)
         final_max_loss = max(-self.undefined_risk_cap, max_loss)
             
-        return {'max_profit': final_max_profit, 'max_loss': final_max_loss}
+        return {'max_profit': final_max_profit, 'max_loss': final_max_loss, 'profit_factor': profit_factor}
 
     def _open_single_leg(self, action_name: str, current_price: float, iv_bin_index: int, current_step: int, days_to_expiry: float):
         # --- Defensive Assertion ---
