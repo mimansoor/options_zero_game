@@ -679,94 +679,67 @@ class OptionsZeroGameEnv(gym.Env):
                         action_mask[self.actions_to_indices[f'CLOSE_POSITION_{i}']] = 1
             return action_mask
 
-        # --- Rule 3: Standard Mid-Episode Logic ---
-        action_mask[self.actions_to_indices['HOLD']] = 1
-       
-        if not self.portfolio_manager.portfolio.empty:
-            # Case A: A position is already open.
-            # The agent can hold, close, or roll/shift the position.
-            action_mask[self.actions_to_indices['HOLD']] = 1
-            action_mask[self.actions_to_indices['CLOSE_ALL']] = 1
-
-            portfolio_df = self.portfolio_manager.portfolio
-            atm_price = self.market_rules_manager.get_atm_price(self.price_manager.current_price)
-
-            for i in range(len(portfolio_df)):
-                if f'CLOSE_POSITION_{i}' in self.actions_to_indices:
-                    action_mask[self.actions_to_indices[f'CLOSE_POSITION_{i}']] = 1
-
-                # --- THE FIX: ADD GUARD RAILS FOR SHIFT ACTIONS ---
-                original_pos = portfolio_df.iloc[i]
-
-                # Check legality of SHIFT UP
-                new_strike_up = original_pos['strike_price'] + self._cfg.strike_distance
-                is_conflict_up = False
-                # Check against all *other* positions in the portfolio
-                for j, other_pos in portfolio_df.drop(i).iterrows():
-                    if other_pos['strike_price'] == new_strike_up and other_pos['type'] == original_pos['type']:
-                        is_conflict_up = True
-                        break
-                if not is_conflict_up and f'SHIFT_UP_POS_{i}' in self.actions_to_indices:
-                     action_mask[self.actions_to_indices[f'SHIFT_UP_POS_{i}']] = 1
-
-                # Check legality of SHIFT DOWN
-                new_strike_down = original_pos['strike_price'] - self._cfg.strike_distance
-                is_conflict_down = False
-                for j, other_pos in portfolio_df.drop(i).iterrows():
-                    if other_pos['strike_price'] == new_strike_down and other_pos['type'] == original_pos['type']:
-                        is_conflict_down = True
-                        break
-                if not is_conflict_down and f'SHIFT_DOWN_POS_{i}' in self.actions_to_indices:
-                     action_mask[self.actions_to_indices[f'SHIFT_DOWN_POS_{i}']] = 1
-
-                # --- THE FIX: ADD GUARD RAILS FOR SHIFT_TO_ATM ---
-                if f'SHIFT_TO_ATM_{i}' in self.actions_to_indices:
-                    # Condition 1: The position must not already be at the money.
-                    is_not_atm = original_pos['strike_price'] != atm_price
-                    
-                    if is_not_atm:
-                        # Condition 2: The new ATM strike must not conflict with other positions.
-                        is_conflict_atm = False
-                        for j, other_pos in portfolio_df.drop(i).iterrows():
-                            if other_pos['strike_price'] == atm_price and other_pos['type'] == original_pos['type']:
-                                is_conflict_atm = True
-                                break
-                        
-                        # Only if both conditions are met is the action legal.
-                        if not is_conflict_atm:
-                            action_mask[self.actions_to_indices[f'SHIFT_TO_ATM_{i}']] = 1
-
-                # --- Rule for HEDGE Action ---
-                # It's only legal if the position is currently naked AND there is space in the portfolio.
-                is_naked = not original_pos['is_hedged']
-                has_space = len(portfolio_df) < self.portfolio_manager.max_positions
-
-                if is_naked and has_space and f'HEDGE_POS_{i}' in self.actions_to_indices:
-                    action_mask[self.actions_to_indices[f'HEDGE_POS_{i}']] = 1
-        else:
-            # Case B Logic
-            atm_price = self.market_rules_manager.get_atm_price(self.price_manager.current_price)
-            days_to_expiry = (self._cfg.time_to_expiry_days - self.current_day_index) * (self.TOTAL_DAYS_IN_WEEK / self.TRADING_DAYS_IN_WEEK)
-            for action_name, index in self.actions_to_indices.items():
-                if not action_name.startswith('OPEN_'): continue
-                is_legal = True
+        # --- Rule 3: Definitive Logic for an Empty Portfolio (Covers Step 0 and Mid-Episode) ---
+        # This is the only path left if the portfolio is empty on a non-liquidation day.
+        
+        # 1. Create the BASE MASK of all opening actions that are legal according to the delta rules.
+        base_opening_mask = np.zeros(self.action_space_size, dtype=np.int8)
+        atm_price = self.market_rules_manager.get_atm_price(self.price_manager.current_price)
+        days_to_expiry = (self.episode_time_to_expiry - self.current_day_index) * (self.TOTAL_DAYS_IN_WEEK / self.TRADING_DAYS_IN_WEEK)
+        
+        for action_name, index in self.actions_to_indices.items():
+            if not action_name.startswith('OPEN_'): continue
+            
+            is_legal = True
+            is_single_leg = 'ATM' in action_name and 'STRADDLE' not in action_name and 'STRANGLE' not in action_name
+            
+            if is_single_leg:
                 parts = action_name.split('_')
-                is_single_leg = 'ATM' in action_name and 'STRADDLE' not in action_name and 'STRANGLE' not in action_name
-                if is_single_leg:
-                    direction, option_type, offset_str = parts[1], parts[2].lower(), parts[3].replace('ATM','')
-                    offset = int(offset_str)
-                    strike_price = atm_price + (offset * self._cfg.strike_distance)
-                    vol = self.market_rules_manager.get_implied_volatility(offset, option_type, self.iv_bin_index)
-                    greeks = self.bs_manager.get_all_greeks_and_price(self.price_manager.current_price, strike_price, days_to_expiry, vol, option_type == 'call')
-                    abs_delta = abs(greeks['delta'])
-                    if direction == 'LONG':
-                        if abs_delta < self._cfg.otm_long_delta_threshold or abs_delta > self._cfg.itm_long_delta_threshold: is_legal = False
-                    elif direction == 'SHORT':
-                        if abs_delta > self._cfg.itm_short_delta_threshold: is_legal = False
-                if is_legal:
-                    action_mask[index] = 1
+                direction, option_type, offset_str = parts[1], parts[2].lower(), parts[3].replace('ATM','')
+                offset = int(offset_str)
+                strike_price = atm_price + (offset * self._cfg.strike_distance)
+                vol = self.market_rules_manager.get_implied_volatility(offset, option_type, self.iv_bin_index)
+                greeks = self.bs_manager.get_all_greeks_and_price(self.price_manager.current_price, strike_price, days_to_expiry, vol, option_type == 'call')
+                abs_delta = abs(greeks['delta'])
 
-        return action_mask
+                if direction == 'LONG':
+                    if abs_delta < self._cfg.otm_long_delta_threshold or abs_delta > self._cfg.itm_long_delta_threshold:
+                        is_legal = False
+                elif direction == 'SHORT':
+                    if abs_delta > self._cfg.itm_short_delta_threshold:
+                        is_legal = False
+            
+            if is_legal:
+                base_opening_mask[index] = 1
+
+        # 2. If it's Step 0 and we are in TRAINING mode, apply the curriculum filter.
+        if self.current_step == 0 and not self._cfg.disable_opening_curriculum:
+            strategy_families = {
+                "SINGLE_LEG": lambda name: 'ATM' in name and 'STRADDLE' not in name and 'STRANGLE' not in name,
+                "STRADDLE": lambda name: 'STRADDLE' in name, "STRANGLE": lambda name: 'STRANGLE' in name,
+                "VERTICAL": lambda name: 'VERTICAL' in name, "IRON_FLY_CONDOR": lambda name: 'IRON' in name,
+                "BUTTERFLY": lambda name: 'FLY' in name and 'IRON' not in name,
+            }
+            chosen_family_name = random.choice(list(strategy_families.keys()))
+            is_in_family = strategy_families[chosen_family_name]
+
+            # Filter the already-legal moves by the chosen family
+            final_mask = np.zeros(self.action_space_size, dtype=np.int8)
+            for index, is_legal in enumerate(base_opening_mask):
+                if is_legal and is_in_family(self.indices_to_actions[index]):
+                    final_mask[index] = 1
+            
+            # Failsafe: if the filter results in no legal moves, use the original base mask
+            if not np.any(final_mask):
+                return base_opening_mask
+            else:
+                return final_mask
+        else:
+            # For EVALUATION on Step 0, or any MID-EPISODE re-opening, return the full set of legal moves.
+            # We also allow HOLD if it's not step 0.
+            if self.current_step > 0:
+                base_opening_mask[self.actions_to_indices['HOLD']] = 1
+            return base_opening_mask
 
     def render(self, mode: str = 'human') -> None:
         total_pnl = self.portfolio_manager.get_total_pnl(self.price_manager.current_price, self.iv_bin_index)
