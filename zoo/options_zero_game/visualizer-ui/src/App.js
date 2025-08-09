@@ -267,7 +267,8 @@ function App() {
         {replayData.length > 0 && stepData ? (
           <div className="main-content">
             <div className="top-bar">
-              <h2>Step: {stepData.step} / {replayData.length - 1} (Day: {stepData.day})</h2>
+              {/* Display the total steps from the info dict, not replayData.length */}
+              <h2>Step: {stepData.step} / {stepData.info.total_steps_in_episode} (Day: {stepData.day})</h2>
               <div className="navigation-buttons">
                   <button onClick={() => goToStep(currentStep - 1)} disabled={currentStep === 0}>Prev S</button>
                   <button onClick={() => goToStep(currentStep + 1)} disabled={currentStep === replayData.length - 1}>Next S</button>

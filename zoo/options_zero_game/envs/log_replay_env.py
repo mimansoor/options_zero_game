@@ -1,5 +1,5 @@
 # zoo/options_zero_game/envs/log_replay_env.py
-# <<< DEFINITIVE VERSION with Complete Two-Snapshot Logging >>>
+# <<< DEFINITIVE VERSION with Correct Settlement Logging >>>
 
 import json
 import copy
@@ -39,110 +39,124 @@ class LogReplayEnv(gym.Wrapper):
         return self.env.reset(**kwargs)
 
     def step(self, action):
-        """
-        The definitive step method that logs the day in two halves: 
-        1. The state immediately after the agent's action.
-        2. The state at the end of the day, after the market has moved.
-        """
-        # --- 1. Capture Pre-Action State ---
         step_at_action = self.env.current_step
         day_at_action = self.env.current_day
         pre_action_price = self.env.price_manager.current_price
         equity_before = self.env.portfolio_manager.get_current_equity(pre_action_price, self.env.iv_bin_index)
         
-        # --- 2. Execute Part 1: Take Action ---
         self.env._take_action_on_state(action)
         
-        # Check for a closed trade receipt immediately after the action
         receipt = self.env.portfolio_manager.last_closed_trade_receipt
         if receipt:
             receipt['exit_day'] = day_at_action
             self._closed_trades_log.append(receipt)
             self.env.portfolio_manager.last_closed_trade_receipt = {}
-
-        # --- 3. Log the "Post-Action" Snapshot ---
+            
         self._log_state_snapshot(
             step_num=step_at_action, day_num=day_at_action, is_post_action=True,
             price_for_log=pre_action_price, action_info=self.env.last_action_info
         )
 
-        # --- 4. Execute Part 2: Advance Market ---
         timestep = self.env._advance_market_and_get_outcome(equity_before)
         
-        # --- 5. Log the "End-of-Day" Snapshot ---
         self._log_state_snapshot(
             step_num=step_at_action, day_num=day_at_action, is_post_action=False,
             price_for_log=self.env.price_manager.current_price, 
             action_info=self.env.last_action_info, final_timestep=timestep
         )
 
-        # --- 6. Handle Episode End ---
+        # --- THE DEFINITIVE FIX IS HERE ---
         if timestep.done:
+            # Add the special final entry to the log.
+            self._log_settlement_state(timestep)
+            # Then save the completed log.
             self.save_log()
             
         return timestep
 
     def _log_state_snapshot(self, step_num, day_num, is_post_action, price_for_log, action_info, final_timestep=None):
-        """
-        The complete, definitive method to log a state snapshot.
-        It can log either a post-action or an end-of-day state.
-        """
-        log_step = step_num
-        log_day = day_num
-        portfolio_to_log = self.env.portfolio_manager.get_post_action_portfolio()
-
-        # --- 1. Determine the context of this log entry ---
+        info = copy.deepcopy(final_timestep.info) if final_timestep else {}
+        
         if is_post_action:
-            executed_action_name = action_info['final_action_name']
+            log_step, log_day = step_num, day_num
+            portfolio_to_log = self.env.portfolio_manager.get_post_action_portfolio()
+            info['executed_action_name'] = action_info['final_action_name']
             reward, done = None, False
-            obs_for_bias = self.env._get_observation() # Get obs before market move
+            obs_for_bias = self.env._get_observation()
         else: # End-of-Day
-            executed_action_name = "MARKET MOVE / EOD"
+            log_step, log_day = step_num, day_num
+            portfolio_to_log = self.env.portfolio_manager.get_post_action_portfolio()
+            info['executed_action_name'] = "MARKET MOVE / EOD"
             reward, done = final_timestep.reward, final_timestep.done
             obs_for_bias = final_timestep.obs['observation']
 
-        # --- 2. Gather all rich data for the log ---
         serialized_portfolio = self._serialize_portfolio(portfolio_to_log, price_for_log)
         pnl_verification = self.env.portfolio_manager.get_pnl_verification(price_for_log, self.env.iv_bin_index)
         payoff_data = self.env.portfolio_manager.get_payoff_data(price_for_log, self.env.iv_bin_index)
         
         meter = BiasMeter(obs_for_bias[:self.env.market_and_portfolio_state_size], self.env.OBS_IDX)
-
-        # Determine the price from the previous log entry to calculate change
+        
         last_price = self._episode_history[-1]['info']['price'] if self._episode_history else self.env.price_manager.start_price
         last_price_change_pct = ((price_for_log / last_price) - 1) * 100 if last_price > 0 else 0.0
-
-        # --- 3. Build the final, consistent info dictionary ---
-        info = {
+        
+        info.update({
             'price': float(price_for_log),
             'eval_episode_return': pnl_verification['verified_total_pnl'],
-            'initial_cash': self.env.portfolio_manager.initial_cash,
             'last_price_change_pct': last_price_change_pct,
-            'start_price': float(self.env.price_manager.start_price),
-            'market_regime': str(self.env.price_manager.current_regime_name),
-            'executed_action_name': executed_action_name,
             'directional_bias': meter.directional_bias,
             'volatility_bias': meter.volatility_bias,
             'portfolio_stats': self.env.portfolio_manager.get_raw_portfolio_stats(price_for_log, self.env.iv_bin_index),
             'pnl_verification': pnl_verification,
             'payoff_data': payoff_data,
-            'closed_trades_log': copy.deepcopy(self._closed_trades_log),
-        }
-        
-        # Add framework-specific info if it exists (only for EOD state)
-        if final_timestep:
-            info.update(final_timestep.info)
+            'closed_trades_log': copy.deepcopy(self._closed_trades_log)
+        })
 
         log_entry = {
-            'step': log_step,
-            'day': log_day,
-            'sub_step_name': "Post-Action" if is_post_action else "End-of-Day", # For the UI
-            'portfolio': serialized_portfolio,
-            'info': info,
+            'step': log_step, 'day': log_day,
+            'sub_step_name': "Post-Action" if is_post_action else "End-of-Day",
+            'portfolio': serialized_portfolio, 'info': info,
             'reward': float(reward) if reward is not None else None,
             'done': bool(done),
         }
         self._episode_history.append(log_entry)
+
+    def _log_settlement_state(self, final_timestep):
+        """
+        Creates and appends a final, special log entry that correctly reflects
+        the zeroed-out state of a settled/closed portfolio.
+        """
+        if not self._episode_history: return
+        
+        last_log_entry = copy.deepcopy(self._episode_history[-1])
+        info = final_timestep.info
+        final_pnl = info['eval_episode_return']
+        
+        termination_reason = info.get('termination_reason', 'UNKNOWN')
+        
+        if termination_reason == "TIME_LIMIT": final_action_name = "EXPIRATION / SETTLEMENT"
+        elif termination_reason == "STOP_LOSS": final_action_name = "STOP-LOSS HIT"
+        elif termination_reason == "TAKE_PROFIT": final_action_name = "PROFIT TARGET MET"
+        else: final_action_name = "EPISODE END"
+        
+        final_info = copy.deepcopy(info)
+        final_info.update({
+            'directional_bias': "Neutral", 'volatility_bias': "Neutral / Low Volatility Expected",
+            'executed_action_name': final_action_name, 'eval_episode_return': final_pnl,
+            'portfolio_stats': {'delta': 0.0, 'gamma': 0.0, 'theta': 0.0, 'vega': 0.0, 'max_profit': 0.0, 'max_loss': 0.0, 'rr_ratio': 0.0, 'prob_profit': 1.0 if final_pnl > 0 else 0.0},
+            'pnl_verification': {'realized_pnl': final_pnl, 'unrealized_pnl': 0.0, 'verified_total_pnl': final_pnl},
+            'payoff_data': {'expiry_pnl': [], 'current_pnl': [], 'spot_price': info['price'], 'sigma_levels': {}}
+        })
+
+        settlement_entry = {
+            'step': last_log_entry['step'], 'day': last_log_entry['day'],
+            'sub_step_name': "Settlement",
+            'portfolio': [],
+            'done': True,
+            'action': None,
+            'reward': final_timestep.reward,
+            'info': final_info
+        }
+        self._episode_history.append(settlement_entry)
 
     def _serialize_portfolio(self, portfolio_df: pd.DataFrame, current_price: float) -> list:
         """Calculates live PnL for the current portfolio and returns a serializable list."""

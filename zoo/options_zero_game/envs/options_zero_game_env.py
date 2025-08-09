@@ -204,32 +204,30 @@ class OptionsZeroGameEnv(gym.Env):
 
     def reset(self, seed: int = None, **kwargs) -> Dict:
         """
-        Resets the environment.
-        PRIORITY 1: Uses a forced episode length if provided (for evaluation).
-        PRIORITY 2: Uses a random episode length (for training).
+        The definitive, correct reset method. It correctly prioritizes the episode
+        length calculation to ensure all components are synchronized.
         """
         if seed is not None: self.seed(seed)
         else:
-            # If the framework or user does not provide a seed, we create a
-            # random one. This is useful for standalone testing.
-            # During normal training, the framework will ALWAYS provide a seed.
-            new_seed = int(time.time())
-            self.seed(new_seed)
+            self.seed(int(time.time()))
 
+        # --- THE DEFINITIVE FIX ---
+        # 1. First, determine the definitive number of trading days for this episode.
         forced_length = self._cfg.get('forced_episode_length', 0)
-
         if forced_length > 0:
-            # PRIORITY 1: Evaluation mode with a fixed, forced length.
+            # Priority 1: Use a forced length if provided (for evaluation).
             self.episode_time_to_expiry = forced_length
         else:
-            # PRIORITY 2: Training mode with a random length.
+            # Priority 2: Use a random length for training.
             self.episode_time_to_expiry = random.randint(
                 self._cfg.min_time_to_expiry_days,
                 self._cfg.time_to_expiry_days
             )
 
+        # 2. THEN, calculate the total steps based on this definitive length.
         self.total_steps = self.episode_time_to_expiry * self._cfg.steps_per_day
         
+        # 3. NOW, reset all managers and state variables using the correct total_steps.
         self.price_manager.reset(self.total_steps)
         self.portfolio_manager.reset()
         
@@ -239,6 +237,7 @@ class OptionsZeroGameEnv(gym.Env):
         self.realized_vol_series = np.zeros(self.total_steps + 1, dtype=np.float32)
         self.iv_bin_index = random.randint(0, len(self.market_rules_manager.iv_bins['call']['0']) - 1)
 
+        # 4. Get the initial observation.
         obs = self._get_observation()
         action_mask = self._get_true_action_mask() if not self._cfg.ignore_legal_actions else np.ones(self.action_space_size, dtype=np.int8)
 
@@ -271,6 +270,7 @@ class OptionsZeroGameEnv(gym.Env):
         self.last_action_info = {
             'final_action': final_action,
             'final_action_name': final_action_name,
+            'total_steps_in_episode': self.total_steps,
             'was_illegal_action': was_illegal_action
         }
 
@@ -409,6 +409,7 @@ class OptionsZeroGameEnv(gym.Env):
             'volatility_bias': meter.volatility_bias,
             'portfolio_stats': self.portfolio_manager.get_raw_portfolio_stats(self.price_manager.current_price, self.iv_bin_index),
             'market_regime': self.price_manager.current_regime_name,
+            'total_steps_in_episode': self.total_steps,
             'termination_reason': termination_reason
         }
 
