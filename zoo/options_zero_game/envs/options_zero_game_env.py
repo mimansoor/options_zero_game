@@ -120,6 +120,7 @@ class OptionsZeroGameEnv(gym.Env):
         otm_long_delta_threshold=0.45, # Disallow buying options with delta < 45
         itm_long_delta_threshold=0.55, # Disallow buying options with delta > 55
         itm_short_delta_threshold=0.55, # Disallow shorting options with delta > 55
+        short_leg_max_offset=3,
 
         strategy_name_to_id={}, # Can be left empty, as it's populated from the main config
     )
@@ -193,6 +194,7 @@ class OptionsZeroGameEnv(gym.Env):
         self.decay_per_step_trading = (self.TRADING_DAY_IN_MINS / self._cfg.steps_per_day) / self.MINS_IN_DAY
         self.decay_overnight = (self.MINS_IN_DAY - self.TRADING_DAY_IN_MINS) / self.MINS_IN_DAY
         self.decay_weekend = 2.0
+        self.last_action_info: Dict = {}
 
     def seed(self, seed: int, dynamic_seed: int = None) -> List[int]:
         self.np_random, seed = seeding.np_random(seed)
@@ -244,53 +246,66 @@ class OptionsZeroGameEnv(gym.Env):
 
     def step(self, action: int) -> BaseEnvTimestep:
         """
-        The complete, definitive step function incorporating all bug fixes and features.
+        The main step function, now acting as a clean orchestrator.
         """
-        # --- 1. Get State BEFORE Action ---
+        # 1. Get the state before any changes.
         equity_before = self.portfolio_manager.get_current_equity(self.price_manager.current_price, self.iv_bin_index)
+        
+        # 2. Execute the agent's action on the current state.
+        self._take_action_on_state(action)
+        
+        # 3. Advance the market and get the final outcome.
+        return self._advance_market_and_get_outcome(equity_before)
 
+    def _take_action_on_state(self, action: int):
+        """
+        PART 1 of the step process. It takes the agent's action, enforces all rules,
+        updates the portfolio, and takes the post-action snapshot.
+        It does NOT advance time or the market price.
+        """
+        # 1. Determine the final action and if the agent's attempt was illegal.
         final_action, was_illegal_action = self._handle_action(action)
-        
-        # --- 2. Determine and Execute the Final Action ---
         final_action_name = self.indices_to_actions.get(final_action, 'INVALID')
-        
+
+        # 2. Store this information for the second half of the step.
+        self.last_action_info = {
+            'final_action': final_action,
+            'final_action_name': final_action_name,
+            'was_illegal_action': was_illegal_action
+        }
+
+        # 3. Execute the final action, which modifies the portfolio.
         if final_action_name.startswith('OPEN_'):
-            # Use the DYNAMIC episode length for this calculation, not the static max length.
-            days_to_expiry_float = (self.episode_time_to_expiry - self.current_day_index) * (self.TOTAL_DAYS_IN_WEEK / self.TRADING_DAYS_IN_WEEK)
+            current_day = self.current_step // self._cfg.steps_per_day
+            days_to_expiry_float = (self.episode_time_to_expiry - current_day) * (self.TOTAL_DAYS_IN_WEEK / self.TRADING_DAYS_IN_WEEK)
             days_to_expiry = int(round(days_to_expiry_float))
             self.portfolio_manager.open_strategy(final_action_name, self.price_manager.current_price, self.iv_bin_index, self.current_step, days_to_expiry)
         elif final_action_name.startswith('CLOSE_POSITION_'):
             self.portfolio_manager.close_position(int(final_action_name.split('_')[-1]), self.price_manager.current_price, self.iv_bin_index)
         elif final_action_name == 'CLOSE_ALL':
             self.portfolio_manager.close_all_positions(self.price_manager.current_price, self.iv_bin_index)
-        
-        # This new, nested structure prevents mis-routing of SHIFT actions.
         elif final_action_name.startswith('SHIFT_'):
-            if 'ATM' in final_action_name:
-                self.portfolio_manager.shift_to_atm(final_action_name, self.price_manager.current_price, self.iv_bin_index, self.current_step)
-            else: # Must be UP or DOWN
-                self.portfolio_manager.shift_position(final_action_name, self.price_manager.current_price, self.iv_bin_index, self.current_step)
+            if 'ATM' in final_action_name: self.portfolio_manager.shift_to_atm(final_action_name, self.price_manager.current_price, self.iv_bin_index, self.current_step)
+            else: self.portfolio_manager.shift_position(final_action_name, self.price_manager.current_price, self.iv_bin_index, self.current_step)
 
-        elif final_action_name.startswith('HEDGE_POS_'):
-            self.portfolio_manager.add_hedge(final_action_name, self.price_manager.current_price, self.iv_bin_index, self.current_step)
-
-        #print(f"\n--- Portfolio State After Hedge Status Update --- A:{final_action_name}")
-        #print(self.portfolio_manager.portfolio.to_string())
-        #print("-------------------------------------------------\n")
-
+        # 4. Sort the portfolio and take the crucial snapshot.
         self.portfolio_manager.sort_portfolio()
         self.portfolio_manager.take_post_action_portfolio_snapshot()
 
-        # --- 3. Advance Time and Market (CORRECT ORDER) ---
-        # First, calculate decay based on the CURRENT step.
+    def _advance_market_and_get_outcome(self, equity_before: float) -> BaseEnvTimestep:
+        """
+        PART 2 of the step process. It advances time and the market, calculates
+        termination conditions and rewards, and returns the final timestep.
+        """
+        # --- Advance Time and Market ---
         time_decay_days = self._calculate_time_decay()
-        # THEN, increment the step counter.
         self.current_step += 1
-        # Now, update the market to the new step.
         self.price_manager.step(self.current_step)
         self._update_realized_vol()
-        # Finally, apply the correctly calculated decay to the portfolio.
         self.portfolio_manager.update_positions_after_time_step(time_decay_days, self.price_manager.current_price, self.iv_bin_index)
+
+        # Take the final end-of-day snapshot for the logger
+        self.portfolio_manager.take_post_action_portfolio_snapshot()
 
         # --- FINAL, THREE-TIERED TERMINATION LOGIC ---
         terminated_by_rule = False
@@ -334,13 +349,30 @@ class OptionsZeroGameEnv(gym.Env):
                             termination_reason = "TAKE_PROFIT"
                 elif net_premium > 0: # Debit strategy
                     debit_target_multiple = self._cfg.debit_strategy_take_profit_multiple
-                    if debit_target_multiple > 0:
+                    # We use the same credit_strategy_take_profit_pct for the max profit ratio
+                    max_profit_target_pct = self._cfg.credit_strategy_take_profit_pct 
+                    
+                    if debit_target_multiple > 0 or max_profit_target_pct > 0:
+                        # Target A: Based on a multiple of the debit paid
                         debit_paid = net_premium * self.portfolio_manager.lot_size
-                        profit_target_pnl = debit_paid * debit_target_multiple
-                        if current_pnl >= profit_target_pnl:
-                            terminated_by_rule = True
-                            final_shaped_reward_override = self._cfg.jackpot_reward
-                            termination_reason = "TAKE_PROFIT"
+                        target_from_multiple = debit_paid * debit_target_multiple
+                        
+                        # Target B: Based on a percentage of the max possible profit
+                        max_profit = self.portfolio_manager.portfolio.iloc[0]['strategy_max_profit']
+                        target_from_ratio = max_profit * (max_profit_target_pct / 100)
+                        
+                        # The final, achievable target is the MINIMUM of the two.
+                        # We only consider targets that are enabled (value > 0)
+                        possible_targets = []
+                        if debit_target_multiple > 0: possible_targets.append(target_from_multiple)
+                        if max_profit_target_pct > 0: possible_targets.append(target_from_ratio)
+                        
+                        if possible_targets:
+                            profit_target_pnl = min(possible_targets)
+                            if max_profit > 0 and current_pnl >= profit_target_pnl:
+                                terminated_by_rule = True
+                                final_shaped_reward_override = self._cfg.jackpot_reward
+                                termination_reason = "TAKE_PROFIT"
 
         # Final termination condition
         terminated_by_time = self.current_step >= self.total_steps
@@ -351,12 +383,13 @@ class OptionsZeroGameEnv(gym.Env):
 
         if terminated_by_rule: self.portfolio_manager.close_all_positions(self.price_manager.current_price, self.iv_bin_index)
 
-        # The environment's job is to calculate the final PnL.
-        # It does NOT prematurely clean up the portfolio. The logger will handle that.
+        # --- Calculate Reward ---
         equity_after = self.portfolio_manager.get_current_equity(self.price_manager.current_price, self.iv_bin_index)
         shaped_reward, raw_reward = self._calculate_shaped_reward(equity_before, equity_after)
         self.final_eval_reward += raw_reward
-        
+
+        # Use the stored action info to determine the final reward
+        was_illegal_action = self.last_action_info['was_illegal_action']
         if final_shaped_reward_override is not None: final_reward = final_shaped_reward_override
         elif was_illegal_action: final_reward = self._cfg.illegal_action_penalty
         else: final_reward = shaped_reward
@@ -365,101 +398,60 @@ class OptionsZeroGameEnv(gym.Env):
         obs = self._get_observation()
         action_mask = self._get_true_action_mask() if not self._cfg.ignore_legal_actions else np.ones(self.action_space_size, dtype=np.int8)
         meter = BiasMeter(obs[:self.market_and_portfolio_state_size], self.OBS_IDX)
-        
-        # The environment correctly reports the final executed name.
-        if terminated_by_time: final_executed_name = "EXPIRATION"
-        else: final_executed_name = self.indices_to_actions.get(final_action, 'INVALID')
-        
+
         info = {
-            'price': self.price_manager.current_price, 'eval_episode_return': self.final_eval_reward,
-            'illegal_actions_in_episode': self.illegal_action_count, 'was_illegal_action': bool(was_illegal_action),
-            'initial_cash': self.portfolio_manager.initial_cash,
-            'executed_action_name': final_executed_name, 'directional_bias': meter.directional_bias,
+            'price': self.price_manager.current_price,
+            'eval_episode_return': self.final_eval_reward,
+            'illegal_actions_in_episode': self.illegal_action_count,
+            'was_illegal_action': bool(was_illegal_action),
+            'executed_action_name': self.last_action_info['final_action_name'],
+            'directional_bias': meter.directional_bias,
             'volatility_bias': meter.volatility_bias,
             'portfolio_stats': self.portfolio_manager.get_raw_portfolio_stats(self.price_manager.current_price, self.iv_bin_index),
             'market_regime': self.price_manager.current_regime_name,
             'termination_reason': termination_reason
         }
 
-        if terminated:
-            info['episode_duration'] = self.current_step
-        
-        # The portfolio is intentionally left intact for the logger to record.
+        if terminated: info['episode_duration'] = self.current_step
         return BaseEnvTimestep({'observation': obs, 'action_mask': action_mask, 'to_play': -1}, final_reward, terminated, info)
 
     def _handle_action(self, action: int) -> Tuple[int, bool]:
         """
-        The definitive, mode-aware action handler.
-        It now correctly uses the _get_true_action_mask as the source of truth for all logic.
+        The definitive, correct action handler. It correctly prioritizes all rules
+        and ensures the action mask is always respected, with intelligent overrides
+        for all game states.
         """
-        # --- First, get the official list of all legal moves ---
         true_action_mask = self._get_true_action_mask()
+        is_illegal = true_action_mask[action] == 0
 
-        # PRIORITY 1: Handle forced strategy for analysis
+        # --- PRIORITY 1: Handle a legal action first ---
+        if not is_illegal:
+            return action, False
+
+        # --- If we reach here, the agent's action was ILLEGAL. We must decide the override. ---
+        self.illegal_action_count += 1
+        
+        # Override Rule 1: Forced Strategy for Analysis (should not be illegal, but a good failsafe)
         forced_strategy = self._cfg.get('forced_opening_strategy_name')
         if self.current_step == 0 and forced_strategy:
-            action_index = self.actions_to_indices.get(forced_strategy)
-            assert action_index is not None and true_action_mask[action_index] == 1, \
-                f"Forced strategy '{forced_strategy}' is illegal under current market conditions."
-            return action_index, False
+            return self.actions_to_indices.get(forced_strategy), True
 
-        # PRIORITY 2: Handle the critical Step 0 logic
+        # Override Rule 2: Liquidation Period
+        is_liquidation_period = self.current_day_index >= (self.episode_time_to_expiry - 2)
+        if is_liquidation_period and not self.portfolio_manager.portfolio.empty:
+            return self.actions_to_indices['CLOSE_ALL'], True
+
+        # Override Rule 3: Step 0 (Training or Evaluation)
+        # If the agent attempts an illegal move on step 0, it MUST open a position.
         if self.current_step == 0:
-            # Get the list of all legal opening moves from the official rulebook
-            legal_open_indices = [
-                idx for name, idx in self.actions_to_indices.items()
-                if name.startswith('OPEN_') and true_action_mask[idx] == 1
-            ]
-            
-            # Case A: Evaluation Mode (Agent's Choice)
-            if self._cfg.disable_opening_curriculum:
-                # The agent's action is valid if it's in the legal list.
-                if action in legal_open_indices:
-                    return action, False
-                else:
-                    # If the agent chose an illegal move (e.g., HOLD), override with a random valid one.
-                    return random.choice(legal_open_indices), True # It was an illegal *attempt*
-            
-            # Case B: Training Mode (The Curriculum)
-            else:
-                # The curriculum now works with the pre-filtered, legal list of actions.
-                strategy_families = {
-                    "SINGLE_LEG": lambda name: 'ATM' in name and 'STRADDLE' not in name and 'STRANGLE' not in name,
-                    "STRADDLE": lambda name: 'STRADDLE' in name, "STRANGLE": lambda name: 'STRANGLE' in name,
-                    "VERTICAL": lambda name: 'VERTICAL' in name, "IRON_FLY_CONDOR": lambda name: 'IRON' in name,
-                    "BUTTERFLY": lambda name: 'FLY' in name and 'IRON' not in name,
-                }
-                chosen_family_name = random.choice(list(strategy_families.keys()))
-                is_in_family = strategy_families[chosen_family_name]
+            legal_open_indices = [idx for idx, is_legal in enumerate(true_action_mask) if is_legal]
+            if not legal_open_indices: # Failsafe
+                raise RuntimeError("No legal opening moves available on Step 0. Check action mask logic.")
+            # We override the illegal action with a random valid opening.
+            return random.choice(legal_open_indices), True
 
-                # Filter the already-legal moves by the chosen family
-                family_actions = [idx for idx in legal_open_indices if is_in_family(self.indices_to_actions[idx])]
-                
-                # Failsafe: if the family has no legal moves, pick from any legal opening
-                if not family_actions:
-                    family_actions = legal_open_indices
-                
-                final_action = random.choice(family_actions)
-                return final_action, False
-
-        # PRIORITY 3: Standard logic for all other steps (current_step > 0)
-        is_illegal = true_action_mask[action] == 0
-        if is_illegal:
-            self.illegal_action_count += 1
-            # Special override rule for the liquidation period.
-            is_liquidation_period = self.current_day_index >= (self.episode_time_to_expiry - 2)
-            if is_liquidation_period and not self.portfolio_manager.portfolio.empty:
-                # If the agent makes a mistake during liquidation, the only rational
-                # override is to force it to do what it's supposed to do: get flat.
-                final_action = self.actions_to_indices['CLOSE_ALL']
-                print("DEBUG: Illegal action in liquidation period. Forcing CLOSE_ALL.") # Optional debug print
-            else:
-                # The standard fallback for all other illegal moves.
-                final_action = self.actions_to_indices['HOLD']
-
-            return final_action, True # Return the override and flag the illegal attempt
-        else:
-            return action, False
+        # Override Rule 4: Default fallback for all other mid-episode illegal moves
+        return self.actions_to_indices['HOLD'], True
 
     def _get_observation(self) -> np.ndarray:
         # Market State
@@ -640,8 +632,9 @@ class OptionsZeroGameEnv(gym.Env):
         
     def _get_true_action_mask(self) -> np.ndarray:
         """
-        The definitive, correct implementation of the action mask, with a flag to disable
-        the opening curriculum for true evaluation.
+        The definitive, correct implementation of the action mask. It correctly
+        prioritizes all trading rules, including delta/offset thresholds,
+        slot availability, and the liquidation period, for all game states.
         """
         action_mask = np.zeros(self.action_space_size, dtype=np.int8)
 
@@ -653,36 +646,55 @@ class OptionsZeroGameEnv(gym.Env):
             action_mask[action_index] = 1
             return action_mask
 
-        # --- Rule 1: Step 0 - Training Curriculum OR Agent's Choice ---
-        if self.current_step == 0:
-            # For BOTH training and evaluation, the agent MUST open a position.
-            # HOLD is never a legal first move.
-            for name, index in self.actions_to_indices.items():
-                if name.startswith('OPEN_'):
-                    action_mask[index] = 1
-            return action_mask
-
-        # A day index of N-1 is the final day. N-2 is the second to last day.
-        # We will make the last two days (N-2 and N-1) liquidation-only.
+        # --- Rule 1: Liquidation Period (Overrides all other trading) ---
         is_liquidation_period = self.current_day_index >= (self.episode_time_to_expiry - 2)
-        
         if is_liquidation_period:
-            # If we are in the final two days, the agent's job is to get flat.
             if self.portfolio_manager.portfolio.empty:
                 # If already flat, the only choice is to wait for the episode to end.
                 action_mask[self.actions_to_indices['HOLD']] = 1
             else:
-                # If there are positions, the agent MUST close them. Holding is not an option.
+                # If there are positions, the agent MUST close them.
                 action_mask[self.actions_to_indices['CLOSE_ALL']] = 1
                 for i in range(len(self.portfolio_manager.portfolio)):
                     if f'CLOSE_POSITION_{i}' in self.actions_to_indices:
                         action_mask[self.actions_to_indices[f'CLOSE_POSITION_{i}']] = 1
             return action_mask
+            
+        # --- Rule 2: Logic for a Non-Empty Portfolio (Mid-Episode) ---
+        if not self.portfolio_manager.portfolio.empty:
+            action_mask[self.actions_to_indices['HOLD']] = 1
+            action_mask[self.actions_to_indices['CLOSE_ALL']] = 1
+            
+            portfolio_df = self.portfolio_manager.portfolio
+            atm_price = self.market_rules_manager.get_atm_price(self.price_manager.current_price)
+            
+            for i in range(len(portfolio_df)):
+                original_pos = portfolio_df.iloc[i]
+                
+                # Closing is always legal for an existing position
+                if f'CLOSE_POSITION_{i}' in self.actions_to_indices:
+                    action_mask[self.actions_to_indices[f'CLOSE_POSITION_{i}']] = 1
+                
+                # Guard Rails for SHIFT_UP/DOWN
+                new_strike_up = original_pos['strike_price'] + self._cfg.strike_distance
+                is_conflict_up = any((other_pos['strike_price'] == new_strike_up and other_pos['type'] == original_pos['type']) for _, other_pos in portfolio_df.drop(i).iterrows())
+                if not is_conflict_up and f'SHIFT_UP_POS_{i}' in self.actions_to_indices:
+                     action_mask[self.actions_to_indices[f'SHIFT_UP_POS_{i}']] = 1
+
+                new_strike_down = original_pos['strike_price'] - self._cfg.strike_distance
+                is_conflict_down = any((other_pos['strike_price'] == new_strike_down and other_pos['type'] == original_pos['type']) for _, other_pos in portfolio_df.drop(i).iterrows())
+                if not is_conflict_down and f'SHIFT_DOWN_POS_{i}' in self.actions_to_indices:
+                     action_mask[self.actions_to_indices[f'SHIFT_DOWN_POS_{i}']] = 1
+
+                # Guard Rails for SHIFT_TO_ATM
+                if f'SHIFT_TO_ATM_{i}' in self.actions_to_indices:
+                    if original_pos['strike_price'] != atm_price:
+                        is_conflict_atm = any((other_pos['strike_price'] == atm_price and other_pos['type'] == original_pos['type']) for _, other_pos in portfolio_df.drop(i).iterrows())
+                        if not is_conflict_atm:
+                            action_mask[self.actions_to_indices[f'SHIFT_TO_ATM_{i}']] = 1
+            return action_mask
 
         # --- Rule 3: Definitive Logic for an Empty Portfolio (Covers Step 0 and Mid-Episode) ---
-        # This is the only path left if the portfolio is empty on a non-liquidation day.
-        
-        # 1. Create the BASE MASK of all opening actions that are legal according to the delta rules.
         base_opening_mask = np.zeros(self.action_space_size, dtype=np.int8)
         atm_price = self.market_rules_manager.get_atm_price(self.price_manager.current_price)
         days_to_expiry = (self.episode_time_to_expiry - self.current_day_index) * (self.TOTAL_DAYS_IN_WEEK / self.TRADING_DAYS_IN_WEEK)
@@ -694,71 +706,53 @@ class OptionsZeroGameEnv(gym.Env):
             is_single_leg = 'ATM' in action_name and 'STRADDLE' not in action_name and 'STRANGLE' not in action_name
             
             if is_single_leg:
-                parts = action_name.split('_')
-                direction, option_type, offset_str = parts[1], parts[2].lower(), parts[3].replace('ATM','')
-                offset = int(offset_str)
-                strike_price = atm_price + (offset * self._cfg.strike_distance)
-                vol = self.market_rules_manager.get_implied_volatility(offset, option_type, self.iv_bin_index)
-                greeks = self.bs_manager.get_all_greeks_and_price(self.price_manager.current_price, strike_price, days_to_expiry, vol, option_type == 'call')
-                abs_delta = abs(greeks['delta'])
-
-                if direction == 'LONG':
-                    if abs_delta < self._cfg.otm_long_delta_threshold or abs_delta > self._cfg.itm_long_delta_threshold:
-                        is_legal = False
-                elif direction == 'SHORT':
-                    if abs_delta > self._cfg.itm_short_delta_threshold:
-                        is_legal = False
+                parts = action_name.split('_'); direction, option_type, offset_str = parts[1], parts[2].lower(), parts[3].replace('ATM',''); offset = int(offset_str)
+                
+                if direction == 'SHORT' and abs(offset) > self._cfg.short_leg_max_offset:
+                    is_legal = False
+                else:
+                    strike_price = atm_price + (offset * self._cfg.strike_distance); vol = self.market_rules_manager.get_implied_volatility(offset, option_type, self.iv_bin_index)
+                    greeks = self.bs_manager.get_all_greeks_and_price(self.price_manager.current_price, strike_price, days_to_expiry, vol, option_type == 'call'); abs_delta = abs(greeks['delta'])
+                    if direction == 'LONG' and (abs_delta < self._cfg.otm_long_delta_threshold or abs_delta > self._cfg.itm_long_delta_threshold): is_legal = False
+                    elif direction == 'SHORT' and abs_delta > self._cfg.itm_short_delta_threshold: is_legal = False
             
-            if is_legal:
-                base_opening_mask[index] = 1
+            if is_legal: base_opening_mask[index] = 1
 
-        # 2. Now, filter this universe based on the number of available slots.
         final_opening_mask = np.zeros(self.action_space_size, dtype=np.int8)
-        available_slots = self.portfolio_manager.max_positions - len(self.portfolio_manager.portfolio)
-
+        available_slots = self.portfolio_manager.max_positions
         for index, is_legal in enumerate(base_opening_mask):
-            if not is_legal: continue # Skip if it's already illegal by delta rules
-            
+            if not is_legal: continue
             action_name = self.indices_to_actions[index]
-            
-            # Check for 4-leg strategies
             if 'CONDOR' in action_name or 'FLY' in action_name:
-                if available_slots >= 4:
-                    final_opening_mask[index] = 1
-            # Check for 2-leg strategies
+                if available_slots >= 4: final_opening_mask[index] = 1
             elif 'STRADDLE' in action_name or 'STRANGLE' in action_name or 'VERTICAL' in action_name:
-                if available_slots >= 2:
-                    final_opening_mask[index] = 1
-            # Check for 1-leg strategies
+                if available_slots >= 2: final_opening_mask[index] = 1
             elif 'ATM' in action_name:
-                if available_slots >= 1:
-                    final_opening_mask[index] = 1
-
-        # 3. If it's Step 0 and we are in TRAINING mode, apply the curriculum filter.
+                if available_slots >= 1: final_opening_mask[index] = 1
+        
         if self.current_step == 0 and not self._cfg.disable_opening_curriculum:
             strategy_families = {
                 "SINGLE_LEG": lambda name: 'ATM' in name and 'STRADDLE' not in name and 'STRANGLE' not in name,
-                "STRADDLE": lambda name: 'STRADDLE' in name, "STRANGLE": lambda name: 'STRANGLE' in name,
-                "VERTICAL": lambda name: 'VERTICAL' in name, "IRON_FLY_CONDOR": lambda name: 'IRON' in name,
+                "STRADDLE": lambda name: 'STRADDLE' in name,
+                "STRANGLE": lambda name: 'STRANGLE' in name,
+                "VERTICAL": lambda name: 'VERTICAL' in name,
+                "IRON_FLY_CONDOR": lambda name: 'IRON' in name,
                 "BUTTERFLY": lambda name: 'FLY' in name and 'IRON' not in name,
             }
             chosen_family_name = random.choice(list(strategy_families.keys()))
             is_in_family = strategy_families[chosen_family_name]
-
-            # Filter the already-legal moves by the chosen family
             curriculum_mask = np.zeros(self.action_space_size, dtype=np.int8)
             for index, is_legal in enumerate(final_opening_mask):
                 if is_legal and is_in_family(self.indices_to_actions[index]):
                     curriculum_mask[index] = 1
             
-            # Failsafe: if the filter results in no legal moves, use the original filtered mask
+            # Failsafe: if the filter results in no legal moves, use the original full mask
             if not np.any(curriculum_mask):
                 return final_opening_mask
             else:
                 return curriculum_mask
         else:
-            # For EVALUATION on Step 0, or any MID-EPISODE re-opening, return the full set of slot-legal moves.
-            # We also allow HOLD if it's not step 0.
+            # For evaluation on Step 0, or any mid-episode re-opening
             if self.current_step > 0:
                 final_opening_mask[self.actions_to_indices['HOLD']] = 1
             return final_opening_mask

@@ -795,30 +795,19 @@ class PortfolioManager:
         opening_brokerage = len(trades_to_execute) * self.brokerage_per_leg
         self.realized_pnl -= opening_brokerage
         
+        # 1. Get a single ID for this entire transaction.
+        transaction_id = self.next_creation_id
+        self.next_creation_id += 1
+        
         strategy_id = strategy_pnl.get('strategy_id', -1)
+        assert strategy_id != -1, (f"CRITICAL ERROR: Strategy ID not found for PnL object: {strategy_pnl}")
         
-        # --- Defensive Assertion ---
-        # Fails fast if a strategy name was not found in the ID dictionary.
-        # This prevents the agent from training on corrupted/meaningless data and
-        # immediately flags inconsistencies between action names and the config.
-        assert strategy_id != -1, (
-            f"\n\nCRITICAL ERROR: Strategy ID not found.\n"
-            f"  - This means a strategy's canonical name did not have a key in the strategy_name_to_id dictionary.\n"
-            f"  - The PnL object that caused the failure was: {strategy_pnl}\n"
-            f"  - Please check the logic in the `_open_*` method that was called and ensure the derived strategy name is correct.\n"
-        )
+        self.initial_net_premium = sum(leg['entry_premium'] * (1 if leg['direction'] == 'long' else -1) for leg in trades_to_execute)
         
-        # 1. First, calculate and store the net premium of the incoming trade.
-        self.initial_net_premium = sum(
-            leg['entry_premium'] * (1 if leg['direction'] == 'long' else -1)
-            for leg in trades_to_execute
-        )
-        
-        # 2. Then, prepare all legs for DataFrame creation.
         for trade in trades_to_execute:
-            trade['is_hedged'] = False # Default placeholder
-            trade['creation_id'] = self.next_creation_id
-            self.next_creation_id += 1
+            # 2. Assign the SAME transaction_id to all legs.
+            trade['creation_id'] = transaction_id
+            trade['is_hedged'] = False
             trade['strategy_id'] = strategy_id
             trade['strategy_max_profit'] = strategy_pnl.get('max_profit', 0.0)
             trade['strategy_max_loss'] = strategy_pnl.get('max_loss', 0.0)
@@ -826,8 +815,8 @@ class PortfolioManager:
         new_positions_df = pd.DataFrame(trades_to_execute).astype(self.portfolio_dtypes)
         self.portfolio = pd.concat([self.portfolio, new_positions_df], ignore_index=True)
 
-        # 1. Always update the hedge status after a change.
         self._update_hedge_status()
+        self.post_action_portfolio = self.portfolio.copy()
 
     def _price_legs(self, legs: List[Dict], current_price: float, iv_bin_index: int) -> List[Dict]:
         atm_price = self.market_rules_manager.get_atm_price(current_price)
