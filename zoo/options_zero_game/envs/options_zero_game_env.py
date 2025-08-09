@@ -390,41 +390,60 @@ class OptionsZeroGameEnv(gym.Env):
     def _handle_action(self, action: int) -> Tuple[int, bool]:
         """
         The definitive, mode-aware action handler.
-        PRIORITY 1: Forces a specific strategy for analysis.
-        PRIORITY 2: On step 0, correctly chooses between the training curriculum and the agent's choice.
-        PRIORITY 3: Enforces standard rules for all other steps.
+        It now correctly uses the _get_true_action_mask as the source of truth for all logic.
         """
-        # PRIORITY 1: Handle forced strategy for analysis (e.g., for strategy_analyzer.py)
+        # --- First, get the official list of all legal moves ---
+        true_action_mask = self._get_true_action_mask()
+
+        # PRIORITY 1: Handle forced strategy for analysis
         forced_strategy = self._cfg.get('forced_opening_strategy_name')
         if self.current_step == 0 and forced_strategy:
             action_index = self.actions_to_indices.get(forced_strategy)
-            assert action_index is not None, f"Forced strategy '{forced_strategy}' is invalid."
+            assert action_index is not None and true_action_mask[action_index] == 1, \
+                f"Forced strategy '{forced_strategy}' is illegal under current market conditions."
             return action_index, False
 
         # PRIORITY 2: Handle the critical Step 0 logic
         if self.current_step == 0:
-            # Case A: Evaluation Mode (e.g., eval.py with --agents_choice)
+            # Get the list of all legal opening moves from the official rulebook
+            legal_open_indices = [
+                idx for name, idx in self.actions_to_indices.items()
+                if name.startswith('OPEN_') and true_action_mask[idx] == 1
+            ]
+            
+            # Case A: Evaluation Mode (Agent's Choice)
             if self._cfg.disable_opening_curriculum:
-                # In this mode, we TRUST the agent's action.
-                # The action mask has already ensured it's a valid opening move.
-                return action, False
+                # The agent's action is valid if it's in the legal list.
+                if action in legal_open_indices:
+                    return action, False
+                else:
+                    # If the agent chose an illegal move (e.g., HOLD), override with a random valid one.
+                    return random.choice(legal_open_indices), True # It was an illegal *attempt*
             
             # Case B: Training Mode (The Curriculum)
             else:
+                # The curriculum now works with the pre-filtered, legal list of actions.
                 strategy_families = {
                     "SINGLE_LEG": lambda name: 'ATM' in name and 'STRADDLE' not in name and 'STRANGLE' not in name,
                     "STRADDLE": lambda name: 'STRADDLE' in name, "STRANGLE": lambda name: 'STRANGLE' in name,
                     "VERTICAL": lambda name: 'VERTICAL' in name, "IRON_FLY_CONDOR": lambda name: 'IRON' in name,
                     "BUTTERFLY": lambda name: 'FLY' in name and 'IRON' not in name,
                 }
-                chosen_family = strategy_families[random.choice(list(strategy_families.keys()))]
-                valid_actions = [idx for name, idx in self.actions_to_indices.items() if name.startswith('OPEN_') and chosen_family(name)]
-                if not valid_actions: valid_actions = [idx for name, idx in self.actions_to_indices.items() if name.startswith('OPEN_')]
-                final_action = random.choice(valid_actions)
+                chosen_family_name = random.choice(list(strategy_families.keys()))
+                is_in_family = strategy_families[chosen_family_name]
+
+                # Filter the already-legal moves by the chosen family
+                family_actions = [idx for idx in legal_open_indices if is_in_family(self.indices_to_actions[idx])]
+                
+                # Failsafe: if the family has no legal moves, pick from any legal opening
+                if not family_actions:
+                    family_actions = legal_open_indices
+                
+                final_action = random.choice(family_actions)
                 return final_action, False
 
         # PRIORITY 3: Standard logic for all other steps (current_step > 0)
-        is_illegal = self._get_true_action_mask()[action] == 0
+        is_illegal = true_action_mask[action] == 0
         if is_illegal:
             self.illegal_action_count += 1
             final_action = self.actions_to_indices['HOLD']
@@ -626,43 +645,31 @@ class OptionsZeroGameEnv(gym.Env):
 
         # --- Rule 1: Step 0 - Training Curriculum OR Agent's Choice ---
         if self.current_step == 0:
-            if self._cfg.disable_opening_curriculum:
-                # EVALUATION MODE: The agent is free to choose any valid opening.
-                # HOLD is illegal. The agent MUST make a move.
-                for name, index in self.actions_to_indices.items():
-                    if name.startswith('OPEN_'):
-                        action_mask[index] = 1
-            else:
-                # TRAINING MODE: Force a diverse opening from a random family.
-                strategy_families = {
-                    "SINGLE_LEG": lambda name: 'ATM' in name and 'STRADDLE' not in name and 'STRANGLE' not in name,
-                    "STRADDLE": lambda name: 'STRADDLE' in name, "STRANGLE": lambda name: 'STRANGLE' in name,
-                    "VERTICAL": lambda name: 'VERTICAL' in name, "IRON_FLY_CONDOR": lambda name: 'IRON' in name,
-                    "BUTTERFLY": lambda name: 'FLY' in name and 'IRON' not in name,
-                }
-                chosen_family_name = random.choice(list(strategy_families.keys()))
-                is_in_family = strategy_families[chosen_family_name]
-                for action_name, index in self.actions_to_indices.items():
-                    if action_name.startswith('OPEN_') and is_in_family(action_name):
-                        action_mask[index] = 1
-            
-            if not np.any(action_mask): # Failsafe
-                for name, index in self.actions_to_indices.items():
-                    if name.startswith('OPEN_'): action_mask[index] = 1
+            # For BOTH training and evaluation, the agent MUST open a position.
+            # HOLD is never a legal first move.
+            for name, index in self.actions_to_indices.items():
+                if name.startswith('OPEN_'):
+                    action_mask[index] = 1
             return action_mask
 
-        # --- Rule 3: Expiry Day Logic ---
-        is_expiry_day = self.current_day_index >= (self._cfg.time_to_expiry_days - 1)
-        if is_expiry_day:
-            action_mask[self.actions_to_indices['HOLD']] = 1
-            if not self.portfolio_manager.portfolio.empty:
+        # A day index of N-1 is the final day. N-2 is the second to last day.
+        # We will make the last two days (N-2 and N-1) liquidation-only.
+        is_liquidation_period = self.current_day_index >= (self.episode_time_to_expiry - 2)
+        
+        if is_liquidation_period:
+            # If we are in the final two days, the agent's job is to get flat.
+            if self.portfolio_manager.portfolio.empty:
+                # If already flat, the only choice is to wait for the episode to end.
+                action_mask[self.actions_to_indices['HOLD']] = 1
+            else:
+                # If there are positions, the agent MUST close them. Holding is not an option.
                 action_mask[self.actions_to_indices['CLOSE_ALL']] = 1
                 for i in range(len(self.portfolio_manager.portfolio)):
                     if f'CLOSE_POSITION_{i}' in self.actions_to_indices:
                         action_mask[self.actions_to_indices[f'CLOSE_POSITION_{i}']] = 1
             return action_mask
 
-        # --- Rule 4: Standard Mid-Episode Logic ---
+        # --- Rule 3: Standard Mid-Episode Logic ---
         action_mask[self.actions_to_indices['HOLD']] = 1
        
         if not self.portfolio_manager.portfolio.empty:
