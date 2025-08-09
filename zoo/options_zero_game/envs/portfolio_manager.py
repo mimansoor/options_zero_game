@@ -649,29 +649,38 @@ class PortfolioManager:
 
     def _calculate_position_breakevens(self, portfolio_df: pd.DataFrame, net_premium: float) -> Tuple[float, float]:
         """
-        A specialized helper to calculate the breakeven points for the current open position.
-        Returns: (lower_breakeven, upper_breakeven)
+        The definitive, correct breakeven calculator. It now correctly handles
+        all strategy types, including multi-leg debit spreads (long straddles/strangles).
         """
         lower_breakeven = 0.0
         upper_breakeven = float('inf')
-
-        # --- THE FIX ---
-        # The premium "cushion" for calculating breakevens should always be a positive value.
+        
         premium_cushion = abs(net_premium)
-
+        
         short_strikes = sorted([p['strike_price'] for _, p in portfolio_df.iterrows() if p['direction'] == 'short'])
         
         if short_strikes:
-            # For short premium strategies, the cushion expands the profitable range outward.
+            # This correctly handles all CREDIT strategies (Iron Condors, Short Verticals, etc.)
             lower_breakeven = short_strikes[0] - premium_cushion
             upper_breakeven = short_strikes[-1] + premium_cushion
+            
         elif len(portfolio_df) == 1:
-            # For single long leg positions, the cushion narrows the profitable range inward.
+            # This correctly handles all single LONG leg strategies.
             pos = portfolio_df.iloc[0]
-            if pos['type'] == 'call':
-                lower_breakeven = pos['strike_price'] + premium_cushion
-            else: # Put
-                upper_breakeven = pos['strike_price'] - premium_cushion
+            if pos['type'] == 'call': lower_breakeven = pos['strike_price'] + premium_cushion
+            else: upper_breakeven = pos['strike_price'] - premium_cushion
+
+        # This new block handles multi-leg DEBIT strategies (Long Straddle/Strangle).
+        elif not short_strikes and len(portfolio_df) > 1:
+            put_legs = [p for _, p in portfolio_df.iterrows() if p['type'] == 'put']
+            call_legs = [p for _, p in portfolio_df.iterrows() if p['type'] == 'call']
+
+            if put_legs and call_legs:
+                put_strike = put_legs[0]['strike_price']
+                call_strike = call_legs[0]['strike_price']
+                
+                lower_breakeven = put_strike - premium_cushion
+                upper_breakeven = call_strike + premium_cushion
         
         return lower_breakeven, upper_breakeven
 
