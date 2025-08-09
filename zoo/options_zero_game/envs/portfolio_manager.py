@@ -607,38 +607,46 @@ class PortfolioManager:
 
     def get_portfolio_summary(self, current_price: float, iv_bin_index: int) -> dict:
         """
-        Calculates high-level summary statistics using a modular, breakeven-based
-        Probability of Profit (POP) calculation. This method orchestrates calls
-        to specialized helper methods for clarity and maintainability.
+        The definitive, correct POP calculator. It is now fully aware of the
+        difference between debit and credit spreads.
         """
         if self.portfolio.empty:
             prob_profit = 1.0 if self.realized_pnl > 0 else 0.0
             return {'max_profit': 0.0, 'max_loss': 0.0, 'rr_ratio': 0.0, 'prob_profit': prob_profit}
 
-        # --- 1. Calculate Base Stats ---
+        # --- 1. Calculate Base Stats (Unchanged) ---
         max_profit = self.portfolio.iloc[0]['strategy_max_profit']
         max_loss = self.portfolio.iloc[0]['strategy_max_loss']
         rr_ratio = abs(max_profit / max_loss) if max_loss != 0 else float('inf')
         
-        # --- 2. Calculate Position Breakevens using a Helper Method ---
+        # --- 2. Calculate Position Breakevens (Unchanged) ---
         net_premium_of_position = sum(
             pos['entry_premium'] * (1 if pos['direction'] == 'long' else -1)
             for _, pos in self.portfolio.iterrows()
         )
         lower_be, upper_be = self._calculate_position_breakevens(self.portfolio, net_premium_of_position)
         
-        # --- 3. Adjust Breakevens for the Episode's Realized PnL ---
+        # --- 3. Adjust Breakevens for Realized PnL (Unchanged) ---
         pnl_buffer = self.realized_pnl / self.lot_size
         adjusted_lower_be = lower_be - pnl_buffer
         adjusted_upper_be = upper_be + pnl_buffer
 
-        # --- 4. Calculate Probability using another Helper Method ---
+        # --- 4. Calculate Probability of Finishing Outside the Adjusted Breakevens ---
         days_to_expiry = self.portfolio.iloc[0]['days_to_expiry']
-        prob_of_loss = self._calculate_probability_outside_range(
+        prob_outside_breakevens = self._calculate_probability_outside_range(
             adjusted_lower_be, adjusted_upper_be,
             current_price, iv_bin_index, days_to_expiry
         )
-        prob_profit = 1.0 - prob_of_loss
+
+        # --- 5. THE DEFINITIVE FIX: Determine Final POP based on Debit/Credit ---
+        is_debit_trade = net_premium_of_position > 0
+        
+        if is_debit_trade:
+            # For a DEBIT trade (Long Strangle), profit is made OUTSIDE the breakevens.
+            prob_profit = prob_outside_breakevens
+        else:
+            # For a CREDIT trade (Short Strangle), profit is made INSIDE the breakevens.
+            prob_profit = 1.0 - prob_outside_breakevens
 
         return {
             'max_profit': max_profit,
