@@ -25,7 +25,8 @@ class PortfolioManager:
         self.is_eval_mode = cfg.get('is_eval_mode', False)
         self.brokerage_per_leg = cfg.get('brokerage_per_leg', 0.0)
         self.max_strike_offset = cfg['max_strike_offset']
-        self.last_closed_trade_receipt: Dict = {}
+        self.receipts_for_current_step: List[dict] = []
+        self.steps_per_day = cfg.get('steps_per_day', 1)
         
         # Managers
         self.bs_manager = bs_manager
@@ -49,7 +50,7 @@ class PortfolioManager:
         self.high_water_mark = self.initial_cash
         self.next_creation_id = 0
         self.initial_net_premium = 0.0
-        self.last_closed_trade_receipt = {}
+        self.receipts_for_current_step = []
 
     # --- Public Methods (called by the main environment) ---
 
@@ -234,15 +235,15 @@ class PortfolioManager:
         # Deduct the brokerage fee for closing this leg.
         self.realized_pnl -= self.brokerage_per_leg
 
-        self.last_closed_trade_receipt = {
+        receipt = {
             'position': f"{pos_to_close['direction'].upper()} {pos_to_close['type'].upper()}",
             'strike': pos_to_close['strike_price'],
-            'entry_day': pos_to_close['entry_step'] // 24 + 1, # A good enough approximation
-            'exit_day': (pos_to_close['entry_step'] // 24) + int(pos_to_close['days_to_expiry']), # Approximation
+            'entry_day': (pos_to_close['entry_step'] // self.steps_per_day) + 1,
             'entry_prem': pos_to_close['entry_premium'],
             'exit_prem': exit_premium,
             'realized_pnl': pnl_for_leg
         }
+        self.receipts_for_current_step.append(receipt)
 
         # 2. Re-assemble the remaining legs of the strategy.
         remaining_legs = [

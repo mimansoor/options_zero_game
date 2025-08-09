@@ -247,6 +247,8 @@ class OptionsZeroGameEnv(gym.Env):
         """
         The main step function, now acting as a clean orchestrator.
         """
+        self.portfolio_manager.receipts_for_current_step = []
+
         # 1. Get the state before any changes.
         equity_before = self.portfolio_manager.get_current_equity(self.price_manager.current_price, self.iv_bin_index)
         

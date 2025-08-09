@@ -45,12 +45,15 @@ class LogReplayEnv(gym.Wrapper):
         equity_before = self.env.portfolio_manager.get_current_equity(pre_action_price, self.env.iv_bin_index)
         
         self.env._take_action_on_state(action)
-        
-        receipt = self.env.portfolio_manager.last_closed_trade_receipt
-        if receipt:
-            receipt['exit_day'] = day_at_action
-            self._closed_trades_log.append(receipt)
-            self.env.portfolio_manager.last_closed_trade_receipt = {}
+
+        # 3. Check for any closed trade receipts generated during this step.
+        receipts = self.env.portfolio_manager.receipts_for_current_step
+        if receipts:
+            # The exit_day is the same for all trades closed in one step.
+            for r in receipts:
+                r['exit_day'] = day_at_action
+            # Extend the log with all new receipts.
+            self._closed_trades_log.extend(receipts)
             
         self._log_state_snapshot(
             step_num=step_at_action, day_num=day_at_action, is_post_action=True,
