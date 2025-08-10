@@ -42,7 +42,7 @@ class OptionsZeroGameEnv(gym.Env):
         ],
         
         # Time and Episode Config
-        time_to_expiry_days=40,
+        time_to_expiry_days=60,
         min_time_to_expiry_days=5,
         forced_episode_length=0,
         steps_per_day=1,
