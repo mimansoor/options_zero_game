@@ -196,6 +196,14 @@ class OptionsZeroGameEnv(gym.Env):
         self.decay_weekend = 2.0
         self.last_action_info: Dict = {}
 
+        # --- NEW: Curriculum Learning Setup ---
+        curriculum_holder = cfg.get('training_curriculum', None)
+        self.training_curriculum = curriculum_holder.schedule if curriculum_holder else None
+        self.is_training_mode = not cfg.get('is_eval_mode', False)
+        # We need a way to track the approximate training step.
+        # We'll use the episode count as a proxy.
+        self._episode_count = 0 
+
     def seed(self, seed: int, dynamic_seed: int = None) -> List[int]:
         self.np_random, seed = seeding.np_random(seed)
         random.seed(seed)
@@ -210,6 +218,30 @@ class OptionsZeroGameEnv(gym.Env):
         if seed is not None: self.seed(seed)
         else:
             self.seed(int(time.time()))
+
+        # --- NEW: Curriculum Learning Logic ---
+        if self.is_training_mode and self.training_curriculum:
+            self._episode_count += 1
+            # Approximate the current training step
+            approx_current_step = self._episode_count * self.total_steps
+
+            # Find the current phase in the curriculum schedule
+            active_strategy = 'ALL' # Default to free choice
+            sorted_phases = sorted(self.training_curriculum.keys())
+            for start_step in sorted_phases:
+                if approx_current_step >= start_step:
+                    active_strategy = self.training_curriculum[start_step]
+                else:
+                    break # We've gone past the current phase
+            
+            # Set the forced strategy for this episode
+            if active_strategy != 'ALL':
+                self.forced_opening_strategy_name = active_strategy
+            else:
+                self.forced_opening_strategy_name = None # Allow agent choice
+        else:
+            #Evaluation mode
+            self.forced_opening_strategy_name = self._cfg.get('forced_opening_strategy_name') 
 
         # --- THE DEFINITIVE FIX ---
         # 1. First, determine the definitive number of trading days for this episode.
@@ -433,9 +465,13 @@ class OptionsZeroGameEnv(gym.Env):
 
         # --- If we reach here, the agent's action was ILLEGAL. We must decide the override. ---
         self.illegal_action_count += 1
-        
+
+        # The curriculum takes highest priority during training.
+        if self.is_training_mode and self.forced_opening_strategy_name:
+            return self.actions_to_indices[self.forced_opening_strategy_name], True
+
         # Override Rule 1: Forced Strategy for Analysis (should not be illegal, but a good failsafe)
-        forced_strategy = self._cfg.get('forced_opening_strategy_name')
+        forced_strategy = self.forced_opening_strategy_name
         if self.current_step == 0 and forced_strategy:
             return self.actions_to_indices.get(forced_strategy), True
 
@@ -649,7 +685,7 @@ class OptionsZeroGameEnv(gym.Env):
         action_mask = np.zeros(self.action_space_size, dtype=np.int8)
 
         # --- Rule 0: Forced Strategy for Analysis (Highest Priority) ---
-        forced_strategy = self._cfg.get('forced_opening_strategy_name')
+        forced_strategy = self.forced_opening_strategy_name
         if self.current_step == 0 and forced_strategy:
             action_index = self.actions_to_indices.get(forced_strategy)
             assert action_index is not None, f"Forced strategy '{forced_strategy}' is invalid."

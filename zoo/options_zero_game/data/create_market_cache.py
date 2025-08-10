@@ -6,25 +6,26 @@ import os
 # A diverse list of symbols representing different market types and regimes
 SYMBOLS_TO_CACHE = [
     # US Indices
-    'SPY',  # S&P 500 ETF
-    '^RUT', # Russell 2000 Index
-    '^IXIC',# NASDAQ Composite
-    '^DJI', # Dow Jones Industrial Average
+    #'SPY',  # S&P 500 ETF
+    #'^RUT', # Russell 2000 Index
+    #'^IXIC',# NASDAQ Composite
+    #'^DJI', # Dow Jones Industrial Average
     # Volatility & Bonds
-    '^VIX', # CBOE Volatility Index
-    'TLT',  # 20+ Year Treasury Bond ETF
-    'BND',  # Total Bond Market ETF
+    #'^VIX', # CBOE Volatility Index
+    #'TLT',  # 20+ Year Treasury Bond ETF
+    #'BND',  # Total Bond Market ETF
     # International
-    '^NSEI',# NIFTY 50 (India)
+    #'^NSEI',# NIFTY 50 (India)
     # Commodities
-    'GC=F', # Gold Futures
+    #'GC=F', # Gold Futures
     # Tech Stocks
-    'TSLA',
-    'INTC',
+    #'TSLA',
+    #'INTC',
     # Crypto
-    'BTC-USD',
-    'ETH-USD',
-    'SOL-USD',
+    #'BTC-USD',
+    #'ETH-USD',
+    #'SOL-USD',
+    '^NSEBANK',
 ]
 
 # Use a path relative to the script's location

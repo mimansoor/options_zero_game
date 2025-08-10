@@ -7,11 +7,11 @@ from zoo.options_zero_game.envs.options_zero_game_env import OptionsZeroGameEnv
 # ==============================================================
 #                 Static Parameters
 # ==============================================================
-collector_env_num = 64
-n_episode = 64
-evaluator_env_num = 32
-batch_size = 512
-num_simulations = 50
+collector_env_num = 8
+n_episode = 8
+evaluator_env_num = 4
+batch_size = 256
+num_simulations = 25
 update_per_collect = 1000
 replay_ratio = 0.25
 max_env_step = int(5e7)
@@ -87,6 +87,68 @@ for delta in range(15, 31, 5):
     next_id += 1
 
 # ==============================================================
+#                 Curriculum Schedule
+# ==============================================================
+# A structured training plan that teaches the agent concepts in phases.
+# Each phase focuses on a core strategy for 2 million steps before moving to the next.
+
+TRAINING_CURRICULUM = {
+    # === Phase 1: Foundational Premium Selling (Directional) ===
+    # Goal: Learn to sell premium with a bullish assumption (theta decay).
+    0: 'OPEN_SHORT_PUT_ATM-5',
+
+    # === Phase 2: Counterpart Directional Premium Selling ===
+    # Goal: Learn to sell premium with a bearish assumption.
+    int(2e6): 'OPEN_SHORT_CALL_ATM+5',
+
+    # === Phase 3: Introduction to Risk Management (Credit Spreads) ===
+    # Goal: Learn to hedge a short put by converting it into a Bull Put Spread.
+    int(4e6): 'OPEN_SHORT_VERTICAL_PUT_1',
+
+    # === Phase 4: Counterpart Risk Management ===
+    # Goal: Learn to hedge a short call by converting it into a Bear Call Spread.
+    int(6e6): 'OPEN_SHORT_VERTICAL_CALL_1',
+
+    # === Phase 5: Selling Volatility (Undefined Risk) ===
+    # Goal: Learn a non-directional strategy by selling ATM volatility (Straddles).
+    int(8e6): 'OPEN_SHORT_STRADDLE_ATM',
+
+    # === Phase 6: Selling Volatility (Risk Defined) ===
+    # Goal: Learn to create a range-bound, positive theta position with defined risk.
+    int(10e6): 'OPEN_SHORT_IRON_CONDOR',
+
+    # === Phase 7: Advanced Range-Bound Strategy ===
+    # Goal: Learn a different range-bound profile with a sharper profit peak (Butterflies).
+    int(12e6): 'OPEN_SHORT_CALL_FLY_1',
+
+    # === Phase 8: Advanced Volatility Selling (Delta-based) ===
+    # Goal: Learn the professional method of entering strangles based on delta, not fixed widths.
+    int(14e6): 'OPEN_SHORT_STRANGLE_DELTA_20',
+    
+    # === Phase 9: Learning to BUY Options (Debit Strategies) ===
+    # Goal: Change mindset. Learn to pay theta for a large directional move (Long Calls).
+    int(16e6): 'OPEN_LONG_CALL_ATM+0',
+
+    # === Phase 10: Learning to BUY Spreads ===
+    # Goal: Learn to make a risk-defined directional bet by buying a Bear Put Spread.
+    int(18e6): 'OPEN_LONG_VERTICAL_PUT_1',
+
+    # === Final Phase: Integration and Agent Autonomy ===
+    # Goal: Allow the agent to use any of its learned strategies to maximize reward.
+    int(20e6): 'ALL'
+}
+
+# This class will "hide" the integer-keyed dictionary from EasyDict.
+class CurriculumHolder:
+    def __init__(self, schedule):
+        self.schedule = schedule
+
+    # This tells Python how to "print" this object as valid, parsable code.
+    def __repr__(self):
+        # Return the string representation of the dictionary itself.
+        return repr(self.schedule)
+
+# ==============================================================
 #           Main Config (The Parameters)
 # ==============================================================
 # This makes the script runnable from anywhere.
@@ -106,6 +168,10 @@ options_zero_game_muzero_config = dict(
         evaluator_env_num=evaluator_env_num,
         n_evaluator_episode=evaluator_env_num,
         is_eval_mode=False,
+
+        # EasyDict will see this as a regular object, not a dict to convert.
+        training_curriculum=CurriculumHolder(TRAINING_CURRICULUM),
+
         # The evaluator lets the agent choose its own move.
         # The framework will automatically use these settings for the evaluator envs.
         evaluator_env_cfg=dict(
@@ -159,6 +225,15 @@ options_zero_game_muzero_config = dict(
         replay_buffer_size=int(1e6),
         collector_env_num=collector_env_num,
         evaluator_env_num=evaluator_env_num,
+
+        learn=dict(
+            learner=dict(
+                hook=dict(
+                    # Provide the full path to the checkpoint you want to resume from
+                    load_ckpt_before_run='./best_ckpt/ckpt_best.pth.tar'
+                )
+            )
+        ),
     ),
 )
 main_config = EasyDict(options_zero_game_muzero_config)
@@ -179,7 +254,6 @@ del temp_env  # Clean up
 # --- Update the main_config with the correct, dynamically-determined values ---
 main_config.policy.model.observation_shape = observation_shape
 main_config.policy.model.action_space_size = action_space_size
-
 
 # ==============================================================
 #                  Create-Config (The Blueprint)
