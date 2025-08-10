@@ -903,49 +903,62 @@ class PortfolioManager:
         """
         The definitive, simulation-based risk engine. It now also calculates the
         Profit Factor by analyzing the entire distribution of payoff outcomes.
+        This version uses a hybrid simulation approach for safety and relevance.
         """
         if not legs: return {'max_profit': 0.0, 'max_loss': 0.0, 'profit_factor': 0.0}
 
-        # --- 1. Handle Naked Shorts (Special Case) ---
+        # --- Handle Naked Shorts (Special Case) ---
         if len(legs) == 1 and legs[0]['direction'] == 'short':
             entry_premium_total = legs[0]['entry_premium'] * self.lot_size
-            max_profit = entry_premium_total
-            max_loss = -self.undefined_risk_cap
-            # Profit factor for a naked short is theoretically very low.
-            return {'max_profit': max_profit, 'max_loss': max_loss, 'profit_factor': 0.01}
+            return {
+                'max_profit': entry_premium_total,
+                'max_loss': -self.undefined_risk_cap,
+                'profit_factor': 0.01
+            }
 
-        # --- 2. For all other strategies, simulate the payoff curve ---
-        sim_price_high = self.start_price * 2
-        sim_price_low = 0.01
-        price_range = np.linspace(sim_price_low, sim_price_high, 300)
-        pnl_at_expiry = []
-
-        for price in price_range:
+        # --- 1. WIDE SIMULATION for Max Profit/Loss (Safety First) ---
+        wide_sim_high = self.start_price * 2.5 # Even wider for safety
+        wide_sim_low = 0.01
+        wide_price_range = np.linspace(wide_sim_low, wide_sim_high, 300)
+        wide_pnl_at_expiry = []
+        for price in wide_price_range:
             pnl_at_price = 0
             for leg in legs:
                 pnl_multiplier = 1 if leg['direction'] == 'long' else -1
-                if leg['type'] == 'call': leg_pnl = max(0, price - leg['strike_price']) - leg['entry_premium']
-                else: leg_pnl = max(0, leg['strike_price'] - price) - leg['entry_premium']
+                leg_pnl = (max(0, price - leg['strike_price']) if leg['type'] == 'call' 
+                           else max(0, leg['strike_price'] - price)) - leg['entry_premium']
                 pnl_at_price += leg_pnl * pnl_multiplier * self.lot_size
-            pnl_at_expiry.append(pnl_at_price)
+            wide_pnl_at_expiry.append(pnl_at_price)
+            
+        max_profit = max(wide_pnl_at_expiry)
+        max_loss = min(wide_pnl_at_expiry)
 
-        max_profit = max(pnl_at_expiry)
-        max_loss = min(pnl_at_expiry)
-        
-        # --- YOUR BRILLIANT FIX: CALCULATE PROFIT FACTOR ---
-        positive_pnls = [p for p in pnl_at_expiry if p > 0]
-        negative_pnls = [p for p in pnl_at_expiry if p <= 0]
+        # --- 2. FOCUSED SIMULATION for Profit Factor (Relevance) ---
+        price_offset = self.strike_distance * self.max_strike_offset
+        focused_sim_low = max(0.01, self.start_price - price_offset)
+        focused_sim_high = self.start_price + price_offset
+        focused_price_range = np.linspace(focused_sim_low, focused_sim_high, 300)
+        focused_pnl_at_expiry = []
+        for price in focused_price_range:
+            pnl_at_price = 0
+            for leg in legs:
+                pnl_multiplier = 1 if leg['direction'] == 'long' else -1
+                leg_pnl = (max(0, price - leg['strike_price']) if leg['type'] == 'call'
+                           else max(0, leg['strike_price'] - price)) - leg['entry_premium']
+                pnl_at_price += leg_pnl * pnl_multiplier * self.lot_size
+            focused_pnl_at_expiry.append(pnl_at_price)
+
+        positive_pnls = [p for p in focused_pnl_at_expiry if p > 0]
+        negative_pnls = [p for p in focused_pnl_at_expiry if p <= 0]
         
         sum_of_wins = sum(positive_pnls)
         sum_of_losses = abs(sum(negative_pnls))
         
         profit_factor = 0.0
-        if sum_of_losses > 1e-6: # Avoid division by zero
+        if sum_of_losses > 1e-6:
             profit_factor = sum_of_wins / sum_of_losses
-        else: # If there are no losses, the profit factor is effectively infinite
-            # <<< FIX APPLIED HERE: Return a JSON-compatible number instead of Infinity.
-            profit_factor = 0.0
-        # --- END OF FIX ---
+        else: # No losses in the focused range, implies excellent R:R
+            profit_factor = 999.0 # Use a large, JSON-safe number
 
         # --- 3. Final Capping and Return ---
         final_max_profit = min(self.undefined_risk_cap, max_profit)
