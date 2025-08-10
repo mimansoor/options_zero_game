@@ -81,7 +81,7 @@ class PortfolioManager:
                 total_vega += leg_greeks['vega'] * self.lot_size * direction_multiplier
 
         legs_from_portfolio = self.portfolio.to_dict(orient='records')
-        pnl_profile = self._calculate_strategy_pnl(legs_from_portfolio, "SUMMARY")
+        pnl_profile  = self._calculate_universal_risk_profile(legs_from_portfolio)
 
         return {
             'delta': total_delta,
@@ -193,6 +193,8 @@ class PortfolioManager:
         Applies time decay and handles expirations. Crucially,
         """
         
+        self.receipts_for_current_step = []
+
         # Now, the rest of the method proceeds as before.
         if days_of_decay == 0 or self.portfolio.empty:
             return
@@ -263,7 +265,7 @@ class PortfolioManager:
             # Determine the new strategy name and profile.
             num_legs = len(remaining_legs)
             new_strategy_name = f"CUSTOM_{num_legs}_LEGS"
-            pnl_profile = self._calculate_strategy_pnl(remaining_legs, new_strategy_name)
+            pnl_profile  = self._calculate_universal_risk_profile(remaining_legs)
             pnl_profile['strategy_id'] = self.strategy_name_to_id.get(new_strategy_name, -3)
 
             # Re-add the remaining legs with their new, correct, unified risk profile.
@@ -517,7 +519,7 @@ class PortfolioManager:
             elif num_legs == 4:
                 new_strategy_name = "SHORT_IRON_FLY"
             
-            pnl = self._calculate_strategy_pnl(transformed_strategy_legs, new_strategy_name)
+            pnl  = self._calculate_universal_risk_profile(transformed_strategy_legs)
             pnl['strategy_id'] = self.strategy_name_to_id.get(new_strategy_name, -1)
             
             # --- 5. Update Portfolio Atomically ---
@@ -571,7 +573,7 @@ class PortfolioManager:
             }
             
             legs = self._price_legs([new_leg], current_price, iv_bin_index)
-            pnl = self._calculate_strategy_pnl(legs, "SHIFT")
+            pnl  = self._calculate_universal_risk_profile(legs)
             strategy_name = f"{legs[0]['direction'].upper()}_{legs[0]['type'].upper()}"
             pnl['strategy_id'] = self.strategy_name_to_id.get(strategy_name, -1)
             self._execute_trades(legs, pnl)
@@ -602,7 +604,7 @@ class PortfolioManager:
             }
 
             legs = self._price_legs([new_leg], current_price, iv_bin_index)
-            pnl = self._calculate_strategy_pnl(legs, "SHIFT_ATM")
+            pnl  = self._calculate_universal_risk_profile(legs)
             strategy_name = f"{legs[0]['direction'].upper()}_{legs[0]['type'].upper()}"
             pnl['strategy_id'] = self.strategy_name_to_id.get(strategy_name, -1)
             self._execute_trades(legs, pnl)
@@ -612,89 +614,72 @@ class PortfolioManager:
 
     def get_portfolio_summary(self, current_price: float, iv_bin_index: int) -> dict:
         """
-        The definitive, correct, and final summary calculator. It is fully strategy-aware and
-        correctly calculates the Probability of Profit for all major structures.
+        The definitive and universal summary calculator. It uses the universal risk engine
+        to get breakeven points and then calculates POP for ANY strategy shape.
         """
         # --- 1. Handle Empty Portfolio ---
         if self.portfolio.empty:
-            pnl = self.get_total_pnl(current_price, iv_bin_index)
-            prob_profit = 1.0 if pnl > 0 else 0.0
-            return {'max_profit': 0.0, 'max_loss': 0.0, 'rr_ratio': 0.0, 'prob_profit': prob_profit}
+            return {'max_profit': 0.0, 'max_loss': 0.0, 'rr_ratio': 0.0, 'prob_profit': 0.0}
 
-        # --- 2. Calculate Base Stats and PnL Buffer ---
-        max_profit = self.portfolio.iloc[0]['strategy_max_profit']
-        max_loss = self.portfolio.iloc[0]['strategy_max_loss']
+        def _get_pnl_at_price(price, trade_legs):
+            pnl = 0.0
+            for _, leg in trade_legs.iterrows(): # Iterate over DataFrame rows
+                pnl_mult = 1 if leg['direction'] == 'long' else -1
+                leg_pnl = max(0, price - leg['strike_price']) if leg['type'] == 'call' else max(0, leg['strike_price'] - price)
+                pnl += (leg_pnl - leg['entry_premium']) * pnl_mult
+            return pnl * self.lot_size
+
+        # --- 2. Get Risk Profile from Universal Engine ---
+        portfolio_legs_as_dict = self.portfolio.to_dict(orient='records')
+        risk_profile = self._calculate_universal_risk_profile(portfolio_legs_as_dict)
+        
+        max_profit = risk_profile['max_profit']
+        max_loss = risk_profile['max_loss']
+        breakevens = risk_profile['breakevens']
         rr_ratio = abs(max_profit / max_loss) if max_loss != 0 else float('inf')
         
-        pnl_buffer = self.get_total_pnl(current_price, iv_bin_index) / self.lot_size
-        net_premium = self.initial_net_premium
-        premium_cushion = abs(net_premium)
-        is_debit_trade = net_premium > 0
         days_to_expiry = self.portfolio.iloc[0]['days_to_expiry']
-
-        # --- 3. Determine Profitable Range and Calculate POP ---
-        prob_profit = 0.5 # Default fallback
-        
-        lower_be, upper_be = 0.0, float('inf')
-        
-        # Determine strategy structure
-        is_single_leg = len(self.portfolio) == 1
-        short_strikes = sorted([p['strike_price'] for _, p in self.portfolio.iterrows() if p['direction'] == 'short'])
-        
-        # Get market volatility for calculation
         vol = self.market_rules_manager.get_implied_volatility(0, 'call', iv_bin_index)
+        
+        # --- 3. Calculate POP based on the found breakevens ---
+        total_pop = 0.0
 
-        if is_single_leg:
-            pos = self.portfolio.iloc[0]
-            if pos['direction'] == 'long':
-                # Single Long Call/Put (Debit)
-                if pos['type'] == 'call':
-                    lower_be = pos['strike_price'] + premium_cushion - pnl_buffer
-                    # POP = Prob(Price > lower_be)
-                    greeks = self.bs_manager.get_all_greeks_and_price(current_price, lower_be, days_to_expiry, vol, True)
-                    prob_profit = _numba_cdf(greeks['d2'])
-                else: # Put
-                    upper_be = pos['strike_price'] - premium_cushion - pnl_buffer
-                    # POP = Prob(Price < upper_be)
-                    greeks = self.bs_manager.get_all_greeks_and_price(current_price, upper_be, days_to_expiry, vol, False)
-                    prob_profit = _numba_cdf(-greeks['d2'])
-            else: # Single Short Call/Put (Credit)
-                if pos['type'] == 'call':
-                    upper_be = pos['strike_price'] + premium_cushion - pnl_buffer
-                    # POP = Prob(Price < upper_be)
-                    greeks = self.bs_manager.get_all_greeks_and_price(current_price, upper_be, days_to_expiry, vol, False)
-                    prob_profit = _numba_cdf(-greeks['d2'])
-                else: # Short Put
-                    lower_be = pos['strike_price'] - premium_cushion - pnl_buffer
-                    # POP = Prob(Price > lower_be)
-                    greeks = self.bs_manager.get_all_greeks_and_price(current_price, lower_be, days_to_expiry, vol, True)
-                    prob_profit = _numba_cdf(greeks['d2'])
-        elif is_debit_trade:
-            # Multi-Leg Debit (Long Strangle, Long Vertical, etc.)
-            put_legs = self.portfolio[self.portfolio['type'] == 'put']
-            call_legs = self.portfolio[self.portfolio['type'] == 'call']
-            if not put_legs.empty and not call_legs.empty: # Long Strangle
-                lower_be = put_legs.iloc[0]['strike_price'] - premium_cushion - pnl_buffer
-                upper_be = call_legs.iloc[0]['strike_price'] + premium_cushion - pnl_buffer
-                # POP = Prob(Price < lower_be) + Prob(Price > upper_be)
-                greeks_l = self.bs_manager.get_all_greeks_and_price(current_price, lower_be, days_to_expiry, vol, False)
-                greeks_u = self.bs_manager.get_all_greeks_and_price(current_price, upper_be, days_to_expiry, vol, True)
-                prob_profit = _numba_cdf(-greeks_l['d2']) + _numba_cdf(greeks_u['d2'])
-            # (Add more specific debit spread logic here if needed)
-        else: # Multi-Leg Credit (Short Strangle, Condor, Fly, etc.)
-            if short_strikes:
-                lower_be = short_strikes[0] - premium_cushion - pnl_buffer
-                upper_be = short_strikes[-1] + premium_cushion - pnl_buffer
-                # POP = Prob(Price > lower_be) - Prob(Price > upper_be)
-                greeks_l = self.bs_manager.get_all_greeks_and_price(current_price, lower_be, days_to_expiry, vol, True)
-                greeks_u = self.bs_manager.get_all_greeks_and_price(current_price, upper_be, days_to_expiry, vol, True)
-                prob_profit = _numba_cdf(greeks_l['d2']) - _numba_cdf(greeks_u['d2'])
+        if not breakevens:
+            if max_profit > 0 and max_loss >= 0: total_pop = 1.0
+            else: total_pop = 0.0
+        
+        elif len(breakevens) == 1:
+            be = breakevens[0]
+            # Use the local helper function to test the profitable side
+            if _get_pnl_at_price(be * 1.5, self.portfolio) > 0:
+                greeks = self.bs_manager.get_all_greeks_and_price(current_price, be, days_to_expiry, vol, is_call=True)
+                total_pop = _numba_cdf(greeks['d2'])
+            else:
+                greeks = self.bs_manager.get_all_greeks_and_price(current_price, be, days_to_expiry, vol, is_call=False)
+                total_pop = _numba_cdf(-greeks['d2'])
+        
+        else: # Two or more breakevens
+            boundaries = [-np.inf] + breakevens + [np.inf]
+            
+            for i in range(len(boundaries) - 1):
+                lower_b, upper_b = boundaries[i], boundaries[i+1]
+                
+                test_price = (lower_b + upper_b) / 2 if -np.inf < lower_b and np.inf > upper_b else \
+                             (upper_b - self.strike_distance if lower_b == -np.inf else lower_b + self.strike_distance)
+                
+                # Use the local helper function to find profitable zones
+                if _get_pnl_at_price(test_price, self.portfolio) > 0:
+                    greeks_upper = self.bs_manager.get_all_greeks_and_price(current_price, upper_b, days_to_expiry, vol, False) if upper_b != np.inf else None
+                    prob_below_upper = _numba_cdf(-greeks_upper['d2']) if greeks_upper else 1.0
+
+                    greeks_lower = self.bs_manager.get_all_greeks_and_price(current_price, lower_b, days_to_expiry, vol, False) if lower_b != -np.inf else None
+                    prob_below_lower = _numba_cdf(-greeks_lower['d2']) if greeks_lower else 0.0
+                    
+                    total_pop += (prob_below_upper - prob_below_lower)
 
         return {
-            'max_profit': max_profit,
-            'max_loss': max_loss,
-            'rr_ratio': rr_ratio,
-            'prob_profit': np.clip(prob_profit, 0.0, 1.0)
+            'max_profit': max_profit, 'max_loss': max_loss,
+            'rr_ratio': rr_ratio, 'prob_profit': np.clip(total_pop, 0.0, 1.0)
         }
 
     def _calculate_position_breakevens(self, portfolio_df: pd.DataFrame, net_premium: float) -> Tuple[float, float]:
@@ -899,72 +884,71 @@ class PortfolioManager:
             leg['entry_premium'] = self.bs_manager.get_price_with_spread(greeks['price'], is_buy=(leg['direction'] == 'long'), bid_ask_spread_pct=self.bid_ask_spread_pct)
         return legs
 
-    def _calculate_strategy_pnl(self, legs: List[Dict], strategy_name: str) -> Dict:
+    def _calculate_universal_risk_profile(self, legs: List[Dict]) -> Dict:
         """
-        The definitive, simulation-based risk engine. It now also calculates the
-        Profit Factor by analyzing the entire distribution of payoff outcomes.
-        This version uses a hybrid simulation approach for safety and relevance.
+        The definitive, single-pass, universal risk engine.
+        It simulates the P&L curve for any given set of legs and calculates
+        max profit, max loss, profit factor, and all breakeven points in one go.
         """
-        if not legs: return {'max_profit': 0.0, 'max_loss': 0.0, 'profit_factor': 0.0}
+        # --- A. Handle Edge Cases ---
+        if not legs:
+            return {'max_profit': 0.0, 'max_loss': 0.0, 'profit_factor': 0.0, 'breakevens': []}
 
-        # --- Handle Naked Shorts (Special Case) ---
         if len(legs) == 1 and legs[0]['direction'] == 'short':
             entry_premium_total = legs[0]['entry_premium'] * self.lot_size
             return {
-                'max_profit': entry_premium_total,
-                'max_loss': -self.undefined_risk_cap,
-                'profit_factor': 0.01
+                'max_profit': entry_premium_total, 'max_loss': -self.undefined_risk_cap,
+                'profit_factor': 0.01, 'breakevens': [legs[0]['strike_price'] + legs[0]['entry_premium']]
             }
 
-        # --- 1. WIDE SIMULATION for Max Profit/Loss (Safety First) ---
-        wide_sim_high = self.start_price * 2.5 # Even wider for safety
-        wide_sim_low = 0.01
-        wide_price_range = np.linspace(wide_sim_low, wide_sim_high, 300)
-        wide_pnl_at_expiry = []
-        for price in wide_price_range:
-            pnl_at_price = 0
-            for leg in legs:
-                pnl_multiplier = 1 if leg['direction'] == 'long' else -1
-                leg_pnl = (max(0, price - leg['strike_price']) if leg['type'] == 'call' 
-                           else max(0, leg['strike_price'] - price)) - leg['entry_premium']
-                pnl_at_price += leg_pnl * pnl_multiplier * self.lot_size
-            wide_pnl_at_expiry.append(pnl_at_price)
-            
-        max_profit = max(wide_pnl_at_expiry)
-        max_loss = min(wide_pnl_at_expiry)
+        # --- B. The Main Simulation Loop ---
+        # Helper function for P&L calculation to avoid code duplication
+        def get_pnl_at_price(price, trade_legs):
+            pnl = 0.0
+            for leg in trade_legs:
+                pnl_mult = 1 if leg['direction'] == 'long' else -1
+                leg_pnl = max(0, price - leg['strike_price']) if leg['type'] == 'call' else max(0, leg['strike_price'] - price)
+                pnl += (leg_pnl - leg['entry_premium']) * pnl_mult
+            return pnl * self.lot_size
 
-        # --- 2. FOCUSED SIMULATION for Profit Factor (Relevance) ---
-        price_offset = self.strike_distance * self.max_strike_offset
-        focused_sim_low = max(0.01, self.start_price - price_offset)
-        focused_sim_high = self.start_price + price_offset
-        focused_price_range = np.linspace(focused_sim_low, focused_sim_high, 300)
-        focused_pnl_at_expiry = []
-        for price in focused_price_range:
-            pnl_at_price = 0
-            for leg in legs:
-                pnl_multiplier = 1 if leg['direction'] == 'long' else -1
-                leg_pnl = (max(0, price - leg['strike_price']) if leg['type'] == 'call'
-                           else max(0, leg['strike_price'] - price)) - leg['entry_premium']
-                pnl_at_price += leg_pnl * pnl_multiplier * self.lot_size
-            focused_pnl_at_expiry.append(pnl_at_price)
-
-        positive_pnls = [p for p in focused_pnl_at_expiry if p > 0]
-        negative_pnls = [p for p in focused_pnl_at_expiry if p <= 0]
+        sim_low = self.start_price * 0.25
+        sim_high = self.start_price * 2.5
+        price_range = np.linspace(sim_low, sim_high, 500)
         
-        sum_of_wins = sum(positive_pnls)
-        sum_of_losses = abs(sum(negative_pnls))
-        
-        profit_factor = 0.0
-        if sum_of_losses > 1e-6:
-            profit_factor = sum_of_wins / sum_of_losses
-        else: # No losses in the focused range, implies excellent R:R
-            profit_factor = 999.0 # Use a large, JSON-safe number
+        pnl_values = []
+        breakevens = []
+        pnl_prev = get_pnl_at_price(price_range[0], legs)
 
-        # --- 3. Final Capping and Return ---
-        final_max_profit = min(self.undefined_risk_cap, max_profit)
-        final_max_loss = max(-self.undefined_risk_cap, max_loss)
-            
-        return {'max_profit': final_max_profit, 'max_loss': final_max_loss, 'profit_factor': profit_factor}
+        for i in range(len(price_range)):
+            price_curr = price_range[i]
+            pnl_curr = get_pnl_at_price(price_curr, legs)
+            pnl_values.append(pnl_curr)
+
+            # Check for breakeven (sign change)
+            if np.sign(pnl_curr) != np.sign(pnl_prev) and i > 0:
+                price_prev = price_range[i-1]
+                # Linear interpolation for precision
+                be = price_prev - pnl_prev * (price_curr - price_prev) / (pnl_curr - pnl_prev)
+                breakevens.append(be)
+            pnl_prev = pnl_curr
+
+        # --- C. Calculate Final Metrics from Simulation Results ---
+        max_profit = max(pnl_values) if pnl_values else 0.0
+        max_loss = min(pnl_values) if pnl_values else 0.0
+        
+        positive_pnls = [p for p in pnl_values if p > 0]
+        negative_pnls = [p for p in pnl_values if p <= 0]
+        sum_wins = sum(positive_pnls)
+        sum_losses = abs(sum(negative_pnls))
+        
+        profit_factor = 999.0 if sum_losses < 1e-6 else sum_wins / sum_losses
+
+        return {
+            'max_profit': min(self.undefined_risk_cap, max_profit),
+            'max_loss': max(-self.undefined_risk_cap, max_loss),
+            'profit_factor': profit_factor,
+            'breakevens': sorted(breakevens)
+        }
 
     def _open_single_leg(self, action_name: str, current_price: float, iv_bin_index: int, current_step: int, days_to_expiry: float):
         # --- Defensive Assertion ---
@@ -977,7 +961,7 @@ class PortfolioManager:
         strike_price = atm_price + (offset * self.strike_distance)
         legs = [{'type': type.lower(), 'direction': direction.lower(), 'strike_price': strike_price, 'entry_step': current_step, 'days_to_expiry': days_to_expiry}]
         legs = self._price_legs(legs, current_price, iv_bin_index)
-        pnl = self._calculate_strategy_pnl(legs, action_name)
+        pnl  = self._calculate_universal_risk_profile(legs)
         pnl['strategy_id'] = self.strategy_name_to_id.get(f"{direction}_{type}", -1)
         self._execute_trades(legs, pnl)
 
@@ -990,7 +974,7 @@ class PortfolioManager:
         legs = [{'type': 'call', 'direction': direction, 'strike_price': atm_price, 'entry_step': current_step, 'days_to_expiry': days_to_expiry},
                 {'type': 'put', 'direction': direction, 'strike_price': atm_price, 'entry_step': current_step, 'days_to_expiry': days_to_expiry}]
         legs = self._price_legs(legs, current_price, iv_bin_index)
-        pnl = self._calculate_strategy_pnl(legs, action_name)
+        pnl  = self._calculate_universal_risk_profile(legs)
         pnl['strategy_id'] = self.strategy_name_to_id.get(action_name.replace('OPEN_', '').replace('_ATM', ''), -1)
         self._execute_trades(legs, pnl)
 
@@ -1016,7 +1000,7 @@ class PortfolioManager:
         # --- THE FIX ---
         canonical_strategy_name = action_name.replace('OPEN_', '').replace('_ATM', '')
         
-        pnl = self._calculate_strategy_pnl(legs, action_name)
+        pnl  = self._calculate_universal_risk_profile(legs)
         pnl['strategy_id'] = self.strategy_name_to_id.get(canonical_strategy_name, -1)
         self._execute_trades(legs, pnl)
 
@@ -1141,7 +1125,7 @@ class PortfolioManager:
         
         legs = self._price_legs(legs, current_price, iv_bin_index)
         canonical_strategy_name = action_name.replace('OPEN_', '')
-        pnl = self._calculate_strategy_pnl(legs, action_name)
+        pnl  = self._calculate_universal_risk_profile(legs)
         pnl['strategy_id'] = self.strategy_name_to_id.get(canonical_strategy_name, -1)
         self._execute_trades(legs, pnl)
 
@@ -1223,7 +1207,7 @@ class PortfolioManager:
         
         legs = self._price_legs(legs, current_price, iv_bin_index)
         canonical_strategy_name = action_name.replace('OPEN_', '')
-        pnl = self._calculate_strategy_pnl(legs, action_name)
+        pnl  = self._calculate_universal_risk_profile(legs)
         pnl['strategy_id'] = self.strategy_name_to_id.get(canonical_strategy_name, -1)
         self._execute_trades(legs, pnl)
 
@@ -1258,7 +1242,7 @@ class PortfolioManager:
         # --- THE FIX ---
         canonical_strategy_name = action_name.replace('OPEN_', '')
         
-        pnl = self._calculate_strategy_pnl(legs, action_name)
+        pnl  = self._calculate_universal_risk_profile(legs)
         pnl['strategy_id'] = self.strategy_name_to_id.get(canonical_strategy_name, -1)
         self._execute_trades(legs, pnl)
 
@@ -1300,7 +1284,7 @@ class PortfolioManager:
         # This turns 'OPEN_LONG_CALL_FLY_1' into 'LONG_CALL_FLY_1'
         canonical_strategy_name = action_name.replace('OPEN_', '')
 
-        pnl = self._calculate_strategy_pnl(legs, action_name)
+        pnl  = self._calculate_universal_risk_profile(legs)
         # Look up the correct, derived key.
         pnl['strategy_id'] = self.strategy_name_to_id.get(canonical_strategy_name, -1)
         self._execute_trades(legs, pnl)
@@ -1352,7 +1336,7 @@ class PortfolioManager:
         
         # Use the original action name for the ID to give the agent proper credit
         canonical_strategy_name = action_name.replace('OPEN_', '')
-        pnl = self._calculate_strategy_pnl(legs, action_name)
+        pnl  = self._calculate_universal_risk_profile(legs)
         pnl['strategy_id'] = self.strategy_name_to_id.get(canonical_strategy_name, -1)
         self._execute_trades(legs, pnl)
 

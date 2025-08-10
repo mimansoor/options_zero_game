@@ -96,21 +96,20 @@ class OptionsZeroGameEnv(gym.Env):
         illegal_action_penalty=-1.0,
         
         # Advanced Trading Rules
-        profit_target_pct=10.0,
+        profit_target_pct=100.0,
 
         #Close the short leg if the premium is below 2.0
         close_short_leg_on_profit_threshold=2.0,
         jackpot_reward=1.0,
 
-        # --- NEW DYNAMIC TAKE-PROFIT RULES ---
         # For credit strategies, target is a % of the max possible profit (the credit received).
         credit_strategy_take_profit_pct=0, # Target 25% of max profit. Set to 0 to disable.
         
         # For debit strategies, target is a multiple of the initial debit paid.
         debit_strategy_take_profit_multiple=0, # Target 2x the debit paid (200% return). Set to 0 to disable.
 
-        stop_loss_multiple_of_cost=10.0, # NEW: Added stop loss multiple
-        use_stop_loss=False,
+        stop_loss_multiple_of_cost=3.0, # NEW: Added stop loss multiple
+        use_stop_loss=True,
         forced_opening_strategy_name=None,
         disable_opening_curriculum=False,
         
