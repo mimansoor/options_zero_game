@@ -196,7 +196,8 @@ function AgentBehaviorChart({ episodeHistory, historicalContext }) {
 function PortfolioRiskDashboard({ portfolioStats }) {
   if (!portfolioStats) return <p className="empty-message">Awaiting data...</p>;
 
-  const { delta, gamma, theta, vega, max_profit, max_loss, rr_ratio, prob_profit, profit_factor } = portfolioStats;
+  const { delta, gamma, theta, vega, max_profit, max_loss, rr_ratio, prob_profit, profit_factor,
+	  highest_realized_profit, lowest_realized_loss, mtm_pnl_high, mtm_pnl_low } = portfolioStats;
 
   const deltaColor = delta > 0 ? '#4CAF50' : delta < 0 ? '#F44336' : 'white';
   const gammaColor = gamma > 0 ? '#4CAF50' : gamma < 0 ? '#F44336' : 'white';
@@ -231,6 +232,32 @@ function PortfolioRiskDashboard({ portfolioStats }) {
       
       <div className="risk-item"><span>Prob. of Profit:</span> <p>{(prob_profit * 100).toFixed(2)}%</p></div>
       <div className="risk-item"><span>Profit Factor:</span> <p style={{ color: '#03A9F4' }}>{isFinite(profit_factor) ? profit_factor.toFixed(2) : '∞'}</p></div>
+      {/* --- NEW: Display the Best Win and Worst Loss --- */}
+      <div className="risk-item">
+        <span>Best Trade (P&L):</span>
+        <p style={{ color: '#4CAF50' }}>
+          ${(highest_realized_profit || 0).toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2})}
+        </p>
+      </div>
+      <div className="risk-item">
+        <span>Worst Trade (P&L):</span>
+        <p style={{ color: '#F44336' }}>
+          ${(lowest_realized_loss || 0).toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2})}
+        </p>
+      </div>
+      {/* --- NEW: Display the MtM High-Water Mark and Max Drawdown --- */}
+      <div className="risk-item">
+        <span>High-Water Mark (PnL):</span>
+        <p style={{ color: '#4CAF50' }}>
+          ${(mtm_pnl_high || 0).toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2})}
+        </p>
+      </div>
+      <div className="risk-item">
+        <span>Max Drawdown (PnL):</span>
+        <p style={{ color: '#F44336' }}>
+          ${(mtm_pnl_low || 0).toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2})}
+        </p>
+      </div>
     </div>
   );
 }

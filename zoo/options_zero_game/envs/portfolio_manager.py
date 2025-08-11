@@ -42,6 +42,10 @@ class PortfolioManager:
         self.initial_net_premium: float = 0.0
         self.portfolio_columns = ['type', 'direction', 'entry_step', 'strike_price', 'entry_premium', 'days_to_expiry', 'creation_id', 'strategy_id', 'strategy_max_profit', 'strategy_max_loss', 'is_hedged']
         self.portfolio_dtypes = {'type': 'object', 'direction': 'object', 'entry_step': 'int64', 'strike_price': 'float64', 'entry_premium': 'float64', 'days_to_expiry': 'float64', 'creation_id': 'int64', 'strategy_id': 'int64', 'strategy_max_profit': 'float64', 'strategy_max_loss': 'float64', 'is_hedged': 'bool'}
+        self.highest_realized_profit = 0.0
+        self.lowest_realized_loss = 0.0
+        self.mtm_pnl_high = 0.0  # Tracks the highest MtM P&L seen
+        self.mtm_pnl_low = 0.0   # Tracks the lowest MtM P&L seen (max drawdown)
     
     def reset(self):
         """Resets the portfolio to an empty state for a new episode."""
@@ -52,8 +56,23 @@ class PortfolioManager:
         self.next_creation_id = 0
         self.initial_net_premium = 0.0
         self.receipts_for_current_step = []
+        # Reset the MtM trackers for the new episode
+        self.mtm_pnl_high = 0.0
+        self.mtm_pnl_low = 0.0
+        self.highest_realized_profit = 0.0
+        self.lowest_realized_loss = 0.0
 
     # --- Public Methods (called by the main environment) ---
+
+    def update_mtm_water_marks(self, current_total_pnl: float):
+        """
+        Updates the high-water mark and low-water mark (max drawdown) for the
+        total Mark-to-Market P&L of the portfolio.
+        This should be called EVERY step by the environment.
+        """
+        self.mtm_pnl_high = max(self.mtm_pnl_high, current_total_pnl)
+        self.mtm_pnl_low = min(self.mtm_pnl_low, current_total_pnl)
+        self.high_water_mark = max(self.high_water_mark, equity)
 
     def get_raw_portfolio_stats(self, current_price: float, iv_bin_index: int) -> dict:
         """
@@ -92,7 +111,12 @@ class PortfolioManager:
             'max_loss': summary['max_loss'],
             'rr_ratio': summary['rr_ratio'],
             'prob_profit': summary['prob_profit'],
-            'profit_factor': pnl_profile['profit_factor']
+            'profit_factor': pnl_profile['profit_factor'],
+            'highest_realized_profit': self.highest_realized_profit, # Add this
+            'lowest_realized_loss': self.lowest_realized_loss,       # Add this
+            # <<< NEW: Add the new MtM metrics for the logger >>>
+            'mtm_pnl_high': self.mtm_pnl_high,
+            'mtm_pnl_low': self.mtm_pnl_low,
         }
 
     def get_portfolio(self) -> pd.DataFrame:
@@ -185,9 +209,6 @@ class PortfolioManager:
     def get_current_equity(self, current_price: float, iv_bin_index: int) -> float:
         return self.initial_cash + self.get_total_pnl(current_price, iv_bin_index)
 
-    def update_high_water_mark(self, equity: float):
-        self.high_water_mark = max(self.high_water_mark, equity)
-
     def update_positions_after_time_step(self, days_of_decay: int, current_price: float, iv_bin_index: int):
         """
         Applies time decay and handles expirations. Crucially,
@@ -240,6 +261,11 @@ class PortfolioManager:
 
         # Deduct the brokerage fee for closing this leg.
         self.realized_pnl -= self.brokerage_per_leg
+
+        if pnl_for_leg > self.highest_realized_profit:
+            self.highest_realized_profit = pnl_for_leg
+        if pnl_for_leg < self.lowest_realized_loss:
+            self.lowest_realized_loss = pnl_for_leg
 
         receipt = {
             'position': f"{pos_to_close['direction'].upper()} {pos_to_close['type'].upper()}",
@@ -833,43 +859,37 @@ class PortfolioManager:
 
     def _execute_trades(self, trades_to_execute: List[Dict], strategy_pnl: Dict):
         """
-        The definitive method to add new legs to the portfolio. It correctly:
-        1. Asserts the strategy_id is valid.
-        2. Calculates and stores the initial net premium for the stop-loss rule.
-        3. Adds all necessary keys before creating the DataFrame.
-        4. Updates the hedge status correctly.
-        """
-        """
         The definitive method for adding legs to the portfolio. It is the single
         source of truth for updating hedge status and taking the post-action snapshot.
+        This version ensures state is finalized even when trades_to_execute is empty.
         """
-        if not trades_to_execute:
-            return
+        # --- 1. Add New Trades (if any) ---
+        if trades_to_execute:
+            # Deduct brokerage from realized PnL for each new leg being opened.
+            opening_brokerage = len(trades_to_execute) * self.brokerage_per_leg
+            self.realized_pnl -= opening_brokerage
+            
+            transaction_id = self.next_creation_id
+            self.next_creation_id += 1
+            
+            strategy_id = strategy_pnl.get('strategy_id', -1)
+            assert strategy_id != -1, (f"CRITICAL ERROR: Strategy ID not found for PnL object: {strategy_pnl}")
+            
+            self.initial_net_premium = sum(leg['entry_premium'] * (1 if leg['direction'] == 'long' else -1) for leg in trades_to_execute)
+            
+            for trade in trades_to_execute:
+                trade['creation_id'] = transaction_id
+                trade['is_hedged'] = False # Default to False before the update
+                trade['strategy_id'] = strategy_id
+                trade['strategy_max_profit'] = strategy_pnl.get('max_profit', 0.0)
+                trade['strategy_max_loss'] = strategy_pnl.get('max_loss', 0.0)
+            
+            new_positions_df = pd.DataFrame(trades_to_execute).astype(self.portfolio_dtypes)
+            self.portfolio = pd.concat([self.portfolio, new_positions_df], ignore_index=True)
 
-        # Deduct brokerage from realized PnL for each new leg being opened.
-        opening_brokerage = len(trades_to_execute) * self.brokerage_per_leg
-        self.realized_pnl -= opening_brokerage
-        
-        # 1. Get a single ID for this entire transaction.
-        transaction_id = self.next_creation_id
-        self.next_creation_id += 1
-        
-        strategy_id = strategy_pnl.get('strategy_id', -1)
-        assert strategy_id != -1, (f"CRITICAL ERROR: Strategy ID not found for PnL object: {strategy_pnl}")
-        
-        self.initial_net_premium = sum(leg['entry_premium'] * (1 if leg['direction'] == 'long' else -1) for leg in trades_to_execute)
-        
-        for trade in trades_to_execute:
-            # 2. Assign the SAME transaction_id to all legs.
-            trade['creation_id'] = transaction_id
-            trade['is_hedged'] = False
-            trade['strategy_id'] = strategy_id
-            trade['strategy_max_profit'] = strategy_pnl.get('max_profit', 0.0)
-            trade['strategy_max_loss'] = strategy_pnl.get('max_loss', 0.0)
-        
-        new_positions_df = pd.DataFrame(trades_to_execute).astype(self.portfolio_dtypes)
-        self.portfolio = pd.concat([self.portfolio, new_positions_df], ignore_index=True)
-
+        # --- 2. Finalize State (ALWAYS runs) ---
+        # This ensures that after any modification (add, close, shift),
+        # the hedge status and the post-action snapshot are correctly updated.
         self._update_hedge_status()
         self.post_action_portfolio = self.portfolio.copy()
 
