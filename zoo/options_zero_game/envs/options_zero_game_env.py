@@ -689,130 +689,206 @@ class OptionsZeroGameEnv(gym.Env):
         
     def _get_true_action_mask(self) -> np.ndarray:
         """
-        The definitive, correct implementation of the action mask. It correctly
-        prioritizes all trading rules, including delta/offset thresholds,
-        slot availability, and the liquidation period, for all game states.
+        Computes the correct action mask, applying all trading rules in priority order.
         """
         action_mask = np.zeros(self.action_space_size, dtype=np.int8)
 
-        # --- Rule 0: Forced Strategy for Analysis (Highest Priority) ---
+        # Rule 0: Forced strategy (Step 0 only)
+        if self._apply_forced_strategy(action_mask):
+            return action_mask
+
+        # Rule 1: Liquidation period
+        if self._apply_liquidation_period_rules(action_mask):
+            return action_mask
+
+        # Rule 2: Non-empty portfolio
+        if not self.portfolio_manager.portfolio.empty:
+            return self._get_non_empty_portfolio_mask()
+
+        # Rule 3: Empty portfolio
+        return self._get_empty_portfolio_mask()
+
+
+    # ----------------- HELPER METHODS -----------------
+
+    def _apply_forced_strategy(self, action_mask: np.ndarray) -> bool:
+        """Handles Rule 0: Forced strategy for analysis."""
         forced_strategy = self.forced_opening_strategy_name
         if self.current_step == 0 and forced_strategy:
             action_index = self.actions_to_indices.get(forced_strategy)
             assert action_index is not None, f"Forced strategy '{forced_strategy}' is invalid."
             action_mask[action_index] = 1
-            return action_mask
+            return True
+        return False
 
-        # --- Rule 1: Liquidation Period (Overrides all other trading) ---
+    def _apply_liquidation_period_rules(self, action_mask: np.ndarray) -> bool:
+        """Handles Rule 1: Liquidation period logic."""
         is_liquidation_period = self.current_day_index >= (self.episode_time_to_expiry - 2)
+
         if is_liquidation_period:
             if self.portfolio_manager.portfolio.empty:
-                # If already flat, the only choice is to wait for the episode to end.
                 action_mask[self.actions_to_indices['HOLD']] = 1
             else:
-                # If there are positions, the agent MUST close them.
                 action_mask[self.actions_to_indices['CLOSE_ALL']] = 1
                 for i in range(len(self.portfolio_manager.portfolio)):
-                    if f'CLOSE_POSITION_{i}' in self.actions_to_indices:
-                        action_mask[self.actions_to_indices[f'CLOSE_POSITION_{i}']] = 1
-            return action_mask
-            
-        # --- Rule 2: Logic for a Non-Empty Portfolio (Mid-Episode) ---
-        if not self.portfolio_manager.portfolio.empty:
-            action_mask[self.actions_to_indices['HOLD']] = 1
-            action_mask[self.actions_to_indices['CLOSE_ALL']] = 1
-            
-            portfolio_df = self.portfolio_manager.portfolio
-            atm_price = self.market_rules_manager.get_atm_price(self.price_manager.current_price)
-            
-            for i in range(len(portfolio_df)):
-                original_pos = portfolio_df.iloc[i]
-                
-                # Closing is always legal for an existing position
-                if f'CLOSE_POSITION_{i}' in self.actions_to_indices:
-                    action_mask[self.actions_to_indices[f'CLOSE_POSITION_{i}']] = 1
-                
-                # Guard Rails for SHIFT_UP/DOWN
-                new_strike_up = original_pos['strike_price'] + self._cfg.strike_distance
-                is_conflict_up = any((other_pos['strike_price'] == new_strike_up and other_pos['type'] == original_pos['type']) for _, other_pos in portfolio_df.drop(i).iterrows())
-                if not is_conflict_up and f'SHIFT_UP_POS_{i}' in self.actions_to_indices:
-                     action_mask[self.actions_to_indices[f'SHIFT_UP_POS_{i}']] = 1
+                    close_action = f'CLOSE_POSITION_{i}'
+                    if close_action in self.actions_to_indices:
+                        action_mask[self.actions_to_indices[close_action]] = 1
+            return True # Handled the state
 
-                new_strike_down = original_pos['strike_price'] - self._cfg.strike_distance
-                is_conflict_down = any((other_pos['strike_price'] == new_strike_down and other_pos['type'] == original_pos['type']) for _, other_pos in portfolio_df.drop(i).iterrows())
-                if not is_conflict_down and f'SHIFT_DOWN_POS_{i}' in self.actions_to_indices:
-                     action_mask[self.actions_to_indices[f'SHIFT_DOWN_POS_{i}']] = 1
+        return False # Did not handle the state
 
-                # Guard Rails for SHIFT_TO_ATM
-                if f'SHIFT_TO_ATM_{i}' in self.actions_to_indices:
-                    if original_pos['strike_price'] != atm_price:
-                        is_conflict_atm = any((other_pos['strike_price'] == atm_price and other_pos['type'] == original_pos['type']) for _, other_pos in portfolio_df.drop(i).iterrows())
-                        if not is_conflict_atm:
-                            action_mask[self.actions_to_indices[f'SHIFT_TO_ATM_{i}']] = 1
-            return action_mask
-
-        # --- Rule 3: Definitive Logic for an Empty Portfolio (Covers Step 0 and Mid-Episode) ---
-        base_opening_mask = np.zeros(self.action_space_size, dtype=np.int8)
+    def _get_non_empty_portfolio_mask(self) -> np.ndarray:
+        """Handles Rule 2: Logic for when the portfolio is not empty."""
+        action_mask = np.zeros(self.action_space_size, dtype=np.int8)
+        portfolio_df = self.portfolio_manager.portfolio
         atm_price = self.market_rules_manager.get_atm_price(self.price_manager.current_price)
-        days_to_expiry = (self.episode_time_to_expiry - self.current_day_index) * (self.TOTAL_DAYS_IN_WEEK / self.TRADING_DAYS_IN_WEEK)
-        
-        for action_name, index in self.actions_to_indices.items():
-            if not action_name.startswith('OPEN_'): continue
-            
-            is_legal = True
-            is_single_leg = 'ATM' in action_name and 'STRADDLE' not in action_name and 'STRANGLE' not in action_name
-            
-            if is_single_leg:
-                parts = action_name.split('_'); direction, option_type, offset_str = parts[1], parts[2].lower(), parts[3].replace('ATM',''); offset = int(offset_str)
-                
-                if direction == 'SHORT' and abs(offset) > self._cfg.short_leg_max_offset:
-                    is_legal = False
-                else:
-                    strike_price = atm_price + (offset * self._cfg.strike_distance); vol = self.market_rules_manager.get_implied_volatility(offset, option_type, self.iv_bin_index)
-                    greeks = self.bs_manager.get_all_greeks_and_price(self.price_manager.current_price, strike_price, days_to_expiry, vol, option_type == 'call'); abs_delta = abs(greeks['delta'])
-                    if direction == 'LONG' and (abs_delta < self._cfg.otm_long_delta_threshold or abs_delta > self._cfg.itm_long_delta_threshold): is_legal = False
-                    elif direction == 'SHORT' and abs_delta > self._cfg.itm_short_delta_threshold: is_legal = False
-            
-            if is_legal: base_opening_mask[index] = 1
 
-        final_opening_mask = np.zeros(self.action_space_size, dtype=np.int8)
-        available_slots = self.portfolio_manager.max_positions
-        for index, is_legal in enumerate(base_opening_mask):
-            if not is_legal: continue
-            action_name = self.indices_to_actions[index]
-            if 'CONDOR' in action_name or 'FLY' in action_name:
-                if available_slots >= 4: final_opening_mask[index] = 1
-            elif 'STRADDLE' in action_name or 'STRANGLE' in action_name or 'VERTICAL' in action_name:
-                if available_slots >= 2: final_opening_mask[index] = 1
-            elif 'ATM' in action_name:
-                if available_slots >= 1: final_opening_mask[index] = 1
-        
+        # Basic actions always allowed
+        action_mask[self.actions_to_indices['HOLD']] = 1
+        action_mask[self.actions_to_indices['CLOSE_ALL']] = 1
+
+        for i, original_pos in portfolio_df.iterrows():
+            # Closing position always allowed
+            self._set_if_exists(action_mask, f'CLOSE_POSITION_{i}')
+
+            # SHIFT_UP
+            self._set_shift_if_no_conflict(action_mask, i, original_pos, direction="UP")
+
+            # SHIFT_DOWN
+            self._set_shift_if_no_conflict(action_mask, i, original_pos, direction="DOWN")
+
+            # SHIFT_TO_ATM
+            if original_pos['strike_price'] != atm_price:
+                self._set_shift_to_atm_if_no_conflict(action_mask, i, original_pos, atm_price)
+
+        return action_mask
+
+    def _set_shift_if_no_conflict(self, action_mask, i, original_pos, direction):
+        """Set SHIFT_UP or SHIFT_DOWN if no strike conflict."""
+        delta = self._cfg.strike_distance if direction == "UP" else -self._cfg.strike_distance
+        new_strike = original_pos['strike_price'] + delta
+        portfolio_df = self.portfolio_manager.portfolio.drop(i)
+
+        is_conflict = any(
+            (pos['strike_price'] == new_strike and pos['type'] == original_pos['type'])
+            for _, pos in portfolio_df.iterrows()
+        )
+
+        action_name = f'SHIFT_{direction}_POS_{i}'
+        if not is_conflict:
+            self._set_if_exists(action_mask, action_name)
+
+    def _set_shift_to_atm_if_no_conflict(self, action_mask, i, original_pos, atm_price):
+        """Set SHIFT_TO_ATM if no strike conflict."""
+        portfolio_df = self.portfolio_manager.portfolio.drop(i)
+        is_conflict = any(
+            (pos['strike_price'] == atm_price and pos['type'] == original_pos['type'])
+            for _, pos in portfolio_df.iterrows()
+        )
+        if not is_conflict:
+            self._set_if_exists(action_mask, f'SHIFT_TO_ATM_{i}')
+
+    def _set_if_exists(self, action_mask, action_name):
+        """Safely set action if it exists in actions_to_indices."""
+        if action_name in self.actions_to_indices:
+            action_mask[self.actions_to_indices[action_name]] = 1
+
+    def _get_empty_portfolio_mask(self) -> np.ndarray:
+        """Handles Rule 3: Opening strategies when portfolio is empty."""
+        atm_price = self.market_rules_manager.get_atm_price(self.price_manager.current_price)
+        days_to_expiry = (self.episode_time_to_expiry - self.current_day_index) * (
+            self.TOTAL_DAYS_IN_WEEK / self.TRADING_DAYS_IN_WEEK
+        )
+
+        base_opening_mask = self._compute_base_opening_mask(atm_price, days_to_expiry)
+        final_opening_mask = self._apply_slot_constraints(base_opening_mask)
+
+        # Apply opening curriculum at Step 0 (training only)
         if self.current_step == 0 and not self._cfg.disable_opening_curriculum:
-            strategy_families = {
-                "SINGLE_LEG": lambda name: 'ATM' in name and 'STRADDLE' not in name and 'STRANGLE' not in name,
-                "STRADDLE": lambda name: 'STRADDLE' in name,
-                "STRANGLE": lambda name: 'STRANGLE' in name,
-                "VERTICAL": lambda name: 'VERTICAL' in name,
-                "IRON_FLY_CONDOR": lambda name: 'IRON' in name,
-                "BUTTERFLY": lambda name: 'FLY' in name and 'IRON' not in name,
-            }
-            chosen_family_name = random.choice(list(strategy_families.keys()))
-            is_in_family = strategy_families[chosen_family_name]
-            curriculum_mask = np.zeros(self.action_space_size, dtype=np.int8)
-            for index, is_legal in enumerate(final_opening_mask):
-                if is_legal and is_in_family(self.indices_to_actions[index]):
-                    curriculum_mask[index] = 1
-            
-            # Failsafe: if the filter results in no legal moves, use the original full mask
-            if not np.any(curriculum_mask):
-                return final_opening_mask
-            else:
-                return curriculum_mask
-        else:
-            # For evaluation on Step 0, or any mid-episode re-opening
-            if self.current_step > 0:
-                final_opening_mask[self.actions_to_indices['HOLD']] = 1
-            return final_opening_mask
+            return self._apply_opening_curriculum(final_opening_mask)
+
+        if self.current_step > 0:
+            final_opening_mask[self.actions_to_indices['HOLD']] = 1
+
+        return final_opening_mask
+
+    def _compute_base_opening_mask(self, atm_price, days_to_expiry) -> np.ndarray:
+        """Compute legality of each opening action based on greeks/delta rules."""
+        base_mask = np.zeros(self.action_space_size, dtype=np.int8)
+        for action_name, index in self.actions_to_indices.items():
+            if not action_name.startswith('OPEN_'):
+                continue
+            if self._is_legal_opening_action(action_name, atm_price, days_to_expiry):
+                base_mask[index] = 1
+        return base_mask
+
+    def _is_legal_opening_action(self, action_name, atm_price, days_to_expiry) -> bool:
+        """Check if a given opening action is legal."""
+        is_single_leg = 'ATM' in action_name and 'STRADDLE' not in action_name and 'STRANGLE' not in action_name
+        if not is_single_leg:
+            return True  # multi-leg assumed legal for now
+
+        parts = action_name.split('_')
+        direction, option_type, offset_str = parts[1], parts[2].lower(), parts[3].replace('ATM', '')
+        offset = int(offset_str)
+
+        if direction == 'SHORT' and abs(offset) > self._cfg.short_leg_max_offset:
+            return False
+
+        strike_price = atm_price + (offset * self._cfg.strike_distance)
+        vol = self.market_rules_manager.get_implied_volatility(offset, option_type, self.iv_bin_index)
+        greeks = self.bs_manager.get_all_greeks_and_price(
+            self.price_manager.current_price, strike_price, days_to_expiry, vol, option_type == 'call'
+        )
+        abs_delta = abs(greeks['delta'])
+
+        if direction == 'LONG':
+            return self._cfg.otm_long_delta_threshold <= abs_delta <= self._cfg.itm_long_delta_threshold
+        elif direction == 'SHORT':
+            return abs_delta <= self._cfg.itm_short_delta_threshold
+        return True
+
+    def _apply_slot_constraints(self, base_mask: np.ndarray) -> np.ndarray:
+        """Apply max position slot constraints to legal opening actions."""
+        final_mask = np.zeros_like(base_mask)
+        available_slots = self.portfolio_manager.max_positions
+
+        for index, is_legal in enumerate(base_mask):
+            if not is_legal:
+                continue
+            name = self.indices_to_actions[index]
+            if 'CONDOR' in name or 'FLY' in name:
+                if available_slots >= 4:
+                    final_mask[index] = 1
+            elif 'STRADDLE' in name or 'STRANGLE' in name or 'VERTICAL' in name:
+                if available_slots >= 2:
+                    final_mask[index] = 1
+            elif 'ATM' in name:
+                if available_slots >= 1:
+                    final_mask[index] = 1
+        return final_mask
+
+    def _apply_opening_curriculum(self, final_mask: np.ndarray) -> np.ndarray:
+        """Randomly choose a strategy family for Step 0 training."""
+        strategy_families = {
+            "SINGLE_LEG": lambda name: 'ATM' in name and 'STRADDLE' not in name and 'STRANGLE' not in name,
+            "STRADDLE": lambda name: 'STRADDLE' in name,
+            "STRANGLE": lambda name: 'STRANGLE' in name,
+            "VERTICAL": lambda name: 'VERTICAL' in name,
+            "IRON_FLY_CONDOR": lambda name: 'IRON' in name,
+            "BUTTERFLY": lambda name: 'FLY' in name and 'IRON' not in name,
+        }
+
+        chosen_family_name = random.choice(list(strategy_families.keys()))
+        is_in_family = strategy_families[chosen_family_name]
+        curriculum_mask = np.zeros_like(final_mask)
+
+        for index, is_legal in enumerate(final_mask):
+            if is_legal and is_in_family(self.indices_to_actions[index]):
+                curriculum_mask[index] = 1
+
+        return curriculum_mask if np.any(curriculum_mask) else final_mask
 
     def render(self, mode: str = 'human') -> None:
         total_pnl = self.portfolio_manager.get_total_pnl(self.price_manager.current_price, self.iv_bin_index)
