@@ -682,7 +682,7 @@ class OptionsZeroGameEnv(gym.Env):
 
         # New actions to hedge an existing naked position.
         for j in range(self._cfg.max_positions):
-            actions[f'HEDGE_POS_{j}'] = i; i+=1
+            actions[f'HEDGE_NAKED_POS_{j}'] = i; i+=1
 
         actions['CLOSE_ALL'] = i
         return actions
@@ -751,6 +751,10 @@ class OptionsZeroGameEnv(gym.Env):
         for i, original_pos in portfolio_df.iterrows():
             # Closing position always allowed
             self._set_if_exists(action_mask, f'CLOSE_POSITION_{i}')
+
+            # A hedge is only possible for a position that is currently un-hedged (naked).
+            if not original_pos['is_hedged']:
+                self._set_if_exists(action_mask, f'HEDGE_NAKED_POS_{i}')
 
             # SHIFT_UP
             self._set_shift_if_no_conflict(action_mask, i, original_pos, direction="UP")
