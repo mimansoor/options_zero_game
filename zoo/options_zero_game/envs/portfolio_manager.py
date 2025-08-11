@@ -820,7 +820,7 @@ class PortfolioManager:
         """
         if not self.portfolio.empty:
             # The key for human analysis and debugging
-            sort_key = ['strike_price', 'type', 'direction', 'creation_id']
+            sort_key = ['creation_id']
             self.portfolio = self.portfolio.sort_values(by=sort_key).reset_index(drop=True)
 
     def render(self, current_price: float, current_step: int, iv_bin_index: int, steps_per_day: int):
