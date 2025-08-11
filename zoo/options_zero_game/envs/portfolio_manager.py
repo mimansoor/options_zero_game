@@ -72,7 +72,7 @@ class PortfolioManager:
         """
         self.mtm_pnl_high = max(self.mtm_pnl_high, current_total_pnl)
         self.mtm_pnl_low = min(self.mtm_pnl_low, current_total_pnl)
-        self.high_water_mark = max(self.high_water_mark, equity)
+        self.high_water_mark = max(self.high_water_mark, current_total_pnl)
 
     def get_raw_portfolio_stats(self, current_price: float, iv_bin_index: int) -> dict:
         """
