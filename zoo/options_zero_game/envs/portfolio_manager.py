@@ -70,8 +70,9 @@ class PortfolioManager:
         total Mark-to-Market P&L of the portfolio.
         This should be called EVERY step by the environment.
         """
-        self.mtm_pnl_high = max(self.mtm_pnl_high, current_total_pnl)
-        self.mtm_pnl_low = min(self.mtm_pnl_low, current_total_pnl)
+        #current_total_pnl includes initial_cash
+        self.mtm_pnl_high = max(self.mtm_pnl_high, (current_total_pnl-self.initial_cash))
+        self.mtm_pnl_low = min(self.mtm_pnl_low, (current_total_pnl-self.initial_cash))
         self.high_water_mark = max(self.high_water_mark, current_total_pnl)
 
     def get_raw_portfolio_stats(self, current_price: float, iv_bin_index: int) -> dict:
@@ -79,28 +80,45 @@ class PortfolioManager:
         Calculates and returns a dictionary of the key, un-normalized portfolio
         statistics for logging and visualization.
         """
-        # We can reuse our existing methods to get the data
+        # This first check is the primary guard clause for an empty portfolio.
+        if self.portfolio.empty:
+            return {
+                'delta': 0.0, 'gamma': 0.0, 'theta': 0.0, 'vega': 0.0,
+                'max_profit': 0.0, 'max_loss': 0.0, 'rr_ratio': 0.0,
+                'prob_profit': 0.0, 'profit_factor': 0.0,
+                'mtm_pnl_high': self.mtm_pnl_high, 'mtm_pnl_low': self.mtm_pnl_low,
+                'highest_realized_profit': self.highest_realized_profit,
+                'lowest_realized_loss': self.lowest_realized_loss,
+                'net_premium': 0.0
+            }
+
         summary = self.get_portfolio_summary(current_price, iv_bin_index)
 
-        # The greek values in the 'greeks' dict are already normalized.
-        # We need to recalculate the raw totals here.
         total_delta, total_gamma, total_theta, total_vega = 0.0, 0.0, 0.0, 0.0
-        if not self.portfolio.empty:
-            atm_price = self.market_rules_manager.get_atm_price(current_price)
-            for _, pos in self.portfolio.iterrows():
-                direction_multiplier = 1 if pos['direction'] == 'long' else -1
-                is_call = pos['type'] == 'call'
-                offset = round((pos['strike_price'] - atm_price) / self.strike_distance)
-                vol = self.market_rules_manager.get_implied_volatility(offset, pos['type'], iv_bin_index)
-                leg_greeks = self.bs_manager.get_all_greeks_and_price(current_price, pos['strike_price'], pos['days_to_expiry'], vol, is_call)
-                
-                total_delta += leg_greeks['delta'] * self.lot_size * direction_multiplier
-                total_gamma += leg_greeks['gamma'] * (self.lot_size**2 * current_price**2 / 100) * direction_multiplier
-                total_theta += leg_greeks['theta'] * self.lot_size * direction_multiplier
-                total_vega += leg_greeks['vega'] * self.lot_size * direction_multiplier
+        current_net_premium = 0.0
+        
+        # <<< YOUR SUGGESTION APPLIED: Redundant 'if' is removed >>>
+        atm_price = self.market_rules_manager.get_atm_price(current_price)
+        for _, pos in self.portfolio.iterrows():
+            direction_multiplier = 1 if pos['direction'] == 'long' else -1
+            is_call = pos['type'] == 'call'
+            offset = round((pos['strike_price'] - atm_price) / self.strike_distance)
+            vol = self.market_rules_manager.get_implied_volatility(offset, pos['type'], iv_bin_index)
+            leg_greeks = self.bs_manager.get_all_greeks_and_price(current_price, pos['strike_price'], pos['days_to_expiry'], vol, is_call)
 
+            total_delta += leg_greeks['delta'] * self.lot_size * direction_multiplier
+            total_gamma += leg_greeks['gamma'] * (self.lot_size**2 * current_price**2 / 100) * direction_multiplier
+            total_theta += leg_greeks['theta'] * self.lot_size * direction_multiplier
+            total_vega += leg_greeks['vega'] * self.lot_size * direction_multiplier
+
+            current_premium = self.bs_manager.get_price_with_spread(
+                leg_greeks['price'], is_buy=(pos['direction'] == 'short'), bid_ask_spread_pct=self.bid_ask_spread_pct
+            )
+            current_net_premium += current_premium * direction_multiplier
+
+        final_net_premium = current_net_premium * self.lot_size
         legs_from_portfolio = self.portfolio.to_dict(orient='records')
-        pnl_profile  = self._calculate_universal_risk_profile(legs_from_portfolio)
+        pnl_profile  = self._calculate_universal_risk_profile(legs_from_portfolio, self.realized_pnl)
 
         return {
             'delta': total_delta,
@@ -112,11 +130,11 @@ class PortfolioManager:
             'rr_ratio': summary['rr_ratio'],
             'prob_profit': summary['prob_profit'],
             'profit_factor': pnl_profile['profit_factor'],
-            'highest_realized_profit': self.highest_realized_profit, # Add this
-            'lowest_realized_loss': self.lowest_realized_loss,       # Add this
-            # <<< NEW: Add the new MtM metrics for the logger >>>
+            'highest_realized_profit': self.highest_realized_profit,
+            'lowest_realized_loss': self.lowest_realized_loss,
             'mtm_pnl_high': self.mtm_pnl_high,
             'mtm_pnl_low': self.mtm_pnl_low,
+            'net_premium': final_net_premium,
         }
 
     def get_portfolio(self) -> pd.DataFrame:
@@ -645,15 +663,21 @@ class PortfolioManager:
         """
         # --- 1. Handle Empty Portfolio ---
         if self.portfolio.empty:
-            return {'max_profit': 0.0, 'max_loss': 0.0, 'rr_ratio': 0.0, 'prob_profit': 0.0}
+            # When portfolio is empty, the only P&L is what's been realized.
+            is_profitable = self.realized_pnl > 0
+            return {
+                'max_profit': self.realized_pnl, 'max_loss': self.realized_pnl,
+                'rr_ratio': 0.0, 'prob_profit': 1.0 if is_profitable else 0.0
+            }
 
-        def _get_pnl_at_price(price, trade_legs):
-            pnl = 0.0
-            for _, leg in trade_legs.iterrows(): # Iterate over DataFrame rows
+        # <<< THE FIX: The local helper now requires realized_pnl >>>
+        def _get_total_pnl_at_price(price, trade_legs, realized_pnl):
+            unrealized_pnl = 0.0
+            for _, leg in trade_legs.iterrows():
                 pnl_mult = 1 if leg['direction'] == 'long' else -1
                 leg_pnl = max(0, price - leg['strike_price']) if leg['type'] == 'call' else max(0, leg['strike_price'] - price)
-                pnl += (leg_pnl - leg['entry_premium']) * pnl_mult
-            return pnl * self.lot_size
+                unrealized_pnl += (leg_pnl - leg['entry_premium']) * pnl_mult
+            return (unrealized_pnl * self.lot_size) + realized_pnl
 
         # --- 2. Get Risk Profile from Universal Engine ---
         portfolio_legs_as_dict = self.portfolio.to_dict(orient='records')
@@ -662,7 +686,7 @@ class PortfolioManager:
         max_profit = risk_profile['max_profit']
         max_loss = risk_profile['max_loss']
         breakevens = risk_profile['breakevens']
-        rr_ratio = abs(max_profit / max_loss) if max_loss != 0 else float('inf')
+        rr_ratio = abs(max_profit / max_loss) if max_loss != 0 and max_profit is not None and max_loss is not None else float('inf')
         
         days_to_expiry = self.portfolio.iloc[0]['days_to_expiry']
         vol = self.market_rules_manager.get_implied_volatility(0, 'call', iv_bin_index)
@@ -676,8 +700,10 @@ class PortfolioManager:
         
         elif len(breakevens) == 1:
             be = breakevens[0]
-            # Use the local helper function to test the profitable side
-            if _get_pnl_at_price(be * 1.5, self.portfolio) > 0:
+            test_price = be + (self.strike_distance * 0.1) 
+            
+            # <<< THE FIX: Pass self.realized_pnl to the helper >>>
+            if _get_total_pnl_at_price(test_price, self.portfolio, self.realized_pnl) > 0:
                 greeks = self.bs_manager.get_all_greeks_and_price(current_price, be, days_to_expiry, vol, is_call=True)
                 total_pop = _numba_cdf(greeks['d2'])
             else:
@@ -693,8 +719,8 @@ class PortfolioManager:
                 test_price = (lower_b + upper_b) / 2 if -np.inf < lower_b and np.inf > upper_b else \
                              (upper_b - self.strike_distance if lower_b == -np.inf else lower_b + self.strike_distance)
                 
-                # Use the local helper function to find profitable zones
-                if _get_pnl_at_price(test_price, self.portfolio) > 0:
+                # <<< THE FIX: Pass self.realized_pnl to the helper >>>
+                if _get_total_pnl_at_price(test_price, self.portfolio, self.realized_pnl) > 0:
                     greeks_upper = self.bs_manager.get_all_greeks_and_price(current_price, upper_b, days_to_expiry, vol, False) if upper_b != np.inf else None
                     prob_below_upper = _numba_cdf(-greeks_upper['d2']) if greeks_upper else 1.0
 

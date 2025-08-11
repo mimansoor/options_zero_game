@@ -197,7 +197,7 @@ function PortfolioRiskDashboard({ portfolioStats }) {
   if (!portfolioStats) return <p className="empty-message">Awaiting data...</p>;
 
   const { delta, gamma, theta, vega, max_profit, max_loss, rr_ratio, prob_profit, profit_factor,
-	  highest_realized_profit, lowest_realized_loss, mtm_pnl_high, mtm_pnl_low } = portfolioStats;
+	  highest_realized_profit, lowest_realized_loss, mtm_pnl_high, mtm_pnl_low, net_premium } = portfolioStats;
 
   const deltaColor = delta > 0 ? '#4CAF50' : delta < 0 ? '#F44336' : 'white';
   const gammaColor = gamma > 0 ? '#4CAF50' : gamma < 0 ? '#F44336' : 'white';
@@ -218,6 +218,13 @@ function PortfolioRiskDashboard({ portfolioStats }) {
     return `1 : ${ratio.toFixed(2)}`;
   };
 
+  // <<< NEW: Add display logic for Net Premium >>>
+  const premiumValue = net_premium || 0;
+  const premiumColor = premiumValue > 0 ? '#F44336' : premiumValue < 0 ? '#4CAF50' : 'white'; // Debit is red (cost), Credit is green (gain)
+  // A positive value is an asset (can be sold for cash), a negative value is a liability (costs cash to close).
+  const premiumLabel = premiumValue > 0 ? '(Asset)' : premiumValue < 0 ? '(Liability)' : '';
+
+
   return (
     <div className="risk-dashboard">
       <div className="risk-item"><span>Portfolio Delta:</span> <p style={{ color: deltaColor }}>{delta.toFixed(2)}</p></div>
@@ -232,6 +239,15 @@ function PortfolioRiskDashboard({ portfolioStats }) {
       
       <div className="risk-item"><span>Prob. of Profit:</span> <p>{(prob_profit * 100).toFixed(2)}%</p></div>
       <div className="risk-item"><span>Profit Factor:</span> <p style={{ color: '#03A9F4' }}>{isFinite(profit_factor) ? profit_factor.toFixed(2) : '∞'}</p></div>
+      {/* --- NEW: Display Net Liq. Value --- */}
+      <div className="risk-item">
+        {/* <<< MODIFICATION: Change the label text here >>> */}
+        <span>Net Liq. Value:</span>
+        <p style={{ color: premiumColor }}>
+          {/* We now show a signed value, as "liability" is clearer with a negative sign */}
+          {`${premiumValue < 0 ? '-' : ''}$${Math.abs(premiumValue).toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2})}`}
+        </p>
+      </div>
       {/* --- NEW: Display the Best Win and Worst Loss --- */}
       <div className="risk-item">
         <span>Best Trade (P&L):</span>
