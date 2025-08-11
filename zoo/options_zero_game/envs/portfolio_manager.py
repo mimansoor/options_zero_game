@@ -89,7 +89,8 @@ class PortfolioManager:
                 'mtm_pnl_high': self.mtm_pnl_high, 'mtm_pnl_low': self.mtm_pnl_low,
                 'highest_realized_profit': self.highest_realized_profit,
                 'lowest_realized_loss': self.lowest_realized_loss,
-                'net_premium': 0.0
+                'net_premium': 0.0,
+                'breakevens': []
             }
 
         summary = self.get_portfolio_summary(current_price, iv_bin_index)
@@ -129,6 +130,7 @@ class PortfolioManager:
             'max_loss': summary['max_loss'],
             'rr_ratio': summary['rr_ratio'],
             'prob_profit': summary['prob_profit'],
+            'breakevens': pnl_profile['breakevens'],
             'profit_factor': pnl_profile['profit_factor'],
             'highest_realized_profit': self.highest_realized_profit,
             'lowest_realized_loss': self.lowest_realized_loss,

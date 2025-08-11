@@ -197,7 +197,7 @@ function PortfolioRiskDashboard({ portfolioStats }) {
   if (!portfolioStats) return <p className="empty-message">Awaiting data...</p>;
 
   const { delta, gamma, theta, vega, max_profit, max_loss, rr_ratio, prob_profit, profit_factor,
-	  highest_realized_profit, lowest_realized_loss, mtm_pnl_high, mtm_pnl_low, net_premium } = portfolioStats;
+	  highest_realized_profit, lowest_realized_loss, mtm_pnl_high, mtm_pnl_low, net_premium, breakevens } = portfolioStats;
 
   const deltaColor = delta > 0 ? '#4CAF50' : delta < 0 ? '#F44336' : 'white';
   const gammaColor = gamma > 0 ? '#4CAF50' : gamma < 0 ? '#F44336' : 'white';
@@ -224,6 +224,17 @@ function PortfolioRiskDashboard({ portfolioStats }) {
   // A positive value is an asset (can be sold for cash), a negative value is a liability (costs cash to close).
   const premiumLabel = premiumValue > 0 ? '(Asset)' : premiumValue < 0 ? '(Liability)' : '';
 
+  // <<< NEW: Add a helper function to format the breakevens array >>>
+  const formatBreakevens = (beArray) => {
+    // If the array is missing or empty, show N/A
+    if (!beArray || beArray.length === 0) {
+      return 'N/A';
+    }
+    // Map each breakeven number to a formatted currency string
+    return beArray.map(be => 
+      `$${be.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2})}`
+    ).join(' & '); // Join multiple breakevens with a clear separator
+  };
 
   return (
     <div className="risk-dashboard">
@@ -239,6 +250,13 @@ function PortfolioRiskDashboard({ portfolioStats }) {
       
       <div className="risk-item"><span>Prob. of Profit:</span> <p>{(prob_profit * 100).toFixed(2)}%</p></div>
       <div className="risk-item"><span>Profit Factor:</span> <p style={{ color: '#03A9F4' }}>{isFinite(profit_factor) ? profit_factor.toFixed(2) : '∞'}</p></div>
+      {/* --- NEW: Display the Breakeven Points --- */}
+      <div className="risk-item">
+        <span>Breakeven(s):</span>
+        <p style={{ color: '#FFC107' }}> {/* Use a neutral/info color */}
+          {formatBreakevens(breakevens)}
+        </p>
+      </div>
       {/* --- NEW: Display Net Liq. Value --- */}
       <div className="risk-item">
         {/* <<< MODIFICATION: Change the label text here >>> */}
