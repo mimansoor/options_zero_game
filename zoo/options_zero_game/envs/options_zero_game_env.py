@@ -324,7 +324,6 @@ class OptionsZeroGameEnv(gym.Env):
 
         # 4. Sort the portfolio and take the crucial snapshot.
         self.portfolio_manager.sort_portfolio()
-        self.portfolio_manager.take_post_action_portfolio_snapshot()
 
     def _advance_market_and_get_outcome(self, equity_before: float) -> BaseEnvTimestep:
         """

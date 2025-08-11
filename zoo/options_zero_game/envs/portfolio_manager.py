@@ -631,7 +631,7 @@ class PortfolioManager:
 
         # --- 2. Get Risk Profile from Universal Engine ---
         portfolio_legs_as_dict = self.portfolio.to_dict(orient='records')
-        risk_profile = self._calculate_universal_risk_profile(portfolio_legs_as_dict)
+        risk_profile = self._calculate_universal_risk_profile(portfolio_legs_as_dict, self.realized_pnl)
         
         max_profit = risk_profile['max_profit']
         max_loss = risk_profile['max_loss']
@@ -798,19 +798,29 @@ class PortfolioManager:
             'vega_norm': math.tanh(total_vega / self.initial_cash)
         }
 
+    def get_human_readable_portfolio_snapshot(self) -> pd.DataFrame:
+        """
+        Returns a copy of the post-action portfolio, sorted in a way that is
+        intuitive for human analysis in logs and visualizers.
+        THIS METHOD SHOULD ONLY BE CALLED BY THE LOGGER.
+        """
+        if self.post_action_portfolio.empty:
+            return self.post_action_portfolio
+
+        # The more complex, human-friendly sort key
+        human_readable_sort_key = ['strike_price', 'type', 'direction', 'creation_id']
+        
+        # Return a sorted COPY, leaving the original portfolio untouched.
+        return self.post_action_portfolio.sort_values(by=human_readable_sort_key).reset_index(drop=True)
+
     def sort_portfolio(self):
         """
         Sorts the portfolio. Uses a simple, chronological sort for training and a
         more complex, human-readable sort for evaluation.
         """
         if not self.portfolio.empty:
-            if self.is_eval_mode:
-                # The key for human analysis and debugging
-                sort_key = ['strike_price', 'type', 'direction', 'creation_id']
-            else:
-                # The simplest, most stable key for the training agent
-                sort_key = ['creation_id']
-            
+            # The key for human analysis and debugging
+            sort_key = ['strike_price', 'type', 'direction', 'creation_id']
             self.portfolio = self.portfolio.sort_values(by=sort_key).reset_index(drop=True)
 
     def render(self, current_price: float, current_step: int, iv_bin_index: int, steps_per_day: int):
@@ -819,18 +829,6 @@ class PortfolioManager:
         print(f"Step: {current_step:04d} | Day: {day:02d} | Price: ${current_price:9.2f} | Positions: {len(self.portfolio):1d} | Total PnL: ${total_pnl:9.2f}")
         if not self.portfolio.empty:
             print(self.portfolio.to_string(index=False))
-        return
-
-    def take_post_action_portfolio_snapshot(self):
-        """
-        Takes a definitive snapshot of the current portfolio state, but only if
-        the environment is in a mode that requires it (e.g., evaluation/logging).
-        This is a performance optimization.
-        """
-        if self.is_eval_mode:
-            self.post_action_portfolio = self.portfolio.copy()
-
-        # In training mode, this function does nothing to save computation.
         return
 
     def _execute_trades(self, trades_to_execute: List[Dict], strategy_pnl: Dict):
@@ -884,25 +882,32 @@ class PortfolioManager:
             leg['entry_premium'] = self.bs_manager.get_price_with_spread(greeks['price'], is_buy=(leg['direction'] == 'long'), bid_ask_spread_pct=self.bid_ask_spread_pct)
         return legs
 
-    def _calculate_universal_risk_profile(self, legs: List[Dict]) -> Dict:
+    def _calculate_universal_risk_profile(self, legs: List[Dict], realized_pnl: float = 0.0) -> Dict:
         """
         The definitive, single-pass, universal risk engine.
         It simulates the P&L curve for any given set of legs and calculates
         max profit, max loss, profit factor, and all breakeven points in one go.
+        It now correctly includes realized P&L for a total portfolio view.
         """
         # --- A. Handle Edge Cases ---
         if not legs:
-            return {'max_profit': 0.0, 'max_loss': 0.0, 'profit_factor': 0.0, 'breakevens': []}
+            return {
+                'max_profit': realized_pnl, 'max_loss': realized_pnl,
+                'profit_factor': float('inf') if realized_pnl > 0 else 0.0, 'breakevens': []
+            }
 
         if len(legs) == 1 and legs[0]['direction'] == 'short':
             entry_premium_total = legs[0]['entry_premium'] * self.lot_size
+            # Even the naked short needs to consider realized pnl for its final value
+            breakeven = legs[0]['strike_price'] + legs[0]['entry_premium']
             return {
-                'max_profit': entry_premium_total, 'max_loss': -self.undefined_risk_cap,
-                'profit_factor': 0.01, 'breakevens': [legs[0]['strike_price'] + legs[0]['entry_premium']]
+                'max_profit': entry_premium_total + realized_pnl,
+                'max_loss': -self.undefined_risk_cap + realized_pnl,
+                'profit_factor': 0.01,
+                'breakevens': [breakeven]
             }
 
         # --- B. The Main Simulation Loop ---
-        # Helper function for P&L calculation to avoid code duplication
         def get_pnl_at_price(price, trade_legs):
             pnl = 0.0
             for leg in trade_legs:
@@ -917,17 +922,20 @@ class PortfolioManager:
         
         pnl_values = []
         breakevens = []
-        pnl_prev = get_pnl_at_price(price_range[0], legs)
 
-        for i in range(len(price_range)):
+        # Calculate the initial P&L for the first point
+        unrealized_pnl_prev = get_pnl_at_price(price_range[0], legs)
+        pnl_prev = unrealized_pnl_prev + realized_pnl
+        pnl_values.append(pnl_prev)
+
+        for i in range(1, len(price_range)):
             price_curr = price_range[i]
-            pnl_curr = get_pnl_at_price(price_curr, legs)
+            unrealized_pnl_curr = get_pnl_at_price(price_curr, legs)
+            pnl_curr = unrealized_pnl_curr + realized_pnl
             pnl_values.append(pnl_curr)
 
-            # Check for breakeven (sign change)
-            if np.sign(pnl_curr) != np.sign(pnl_prev) and i > 0:
+            if np.sign(pnl_curr) != np.sign(pnl_prev):
                 price_prev = price_range[i-1]
-                # Linear interpolation for precision
                 be = price_prev - pnl_prev * (price_curr - price_prev) / (pnl_curr - pnl_prev)
                 breakevens.append(be)
             pnl_prev = pnl_curr
@@ -941,7 +949,7 @@ class PortfolioManager:
         sum_wins = sum(positive_pnls)
         sum_losses = abs(sum(negative_pnls))
         
-        profit_factor = 999.0 if sum_losses < 1e-6 else sum_wins / sum_losses
+        profit_factor = 999.0 if sum_losses < 1e-6 and sum_wins > 0 else (sum_wins / sum_losses if sum_losses > 1e-6 else 0.0)
 
         return {
             'max_profit': min(self.undefined_risk_cap, max_profit),

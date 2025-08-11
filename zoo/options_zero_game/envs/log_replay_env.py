@@ -82,7 +82,7 @@ class LogReplayEnv(gym.Wrapper):
         
         if is_post_action:
             log_step, log_day = step_num, day_num
-            portfolio_to_log = self.env.portfolio_manager.get_post_action_portfolio()
+            portfolio_to_log = self.env.portfolio_manager.get_human_readable_portfolio_snapshot()
             info['executed_action_name'] = action_info['final_action_name']
             reward, done = None, False
             obs_for_bias = self.env._get_observation()
