@@ -337,9 +337,6 @@ class OptionsZeroGameEnv(gym.Env):
         self._update_realized_vol()
         self.portfolio_manager.update_positions_after_time_step(time_decay_days, self.price_manager.current_price, self.iv_bin_index)
 
-        # Take the final end-of-day snapshot for the logger
-        self.portfolio_manager.take_post_action_portfolio_snapshot()
-
         # --- FINAL, THREE-TIERED TERMINATION LOGIC ---
         terminated_by_rule = False
         final_shaped_reward_override = None
