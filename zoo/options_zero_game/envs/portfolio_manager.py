@@ -858,14 +858,15 @@ class PortfolioManager:
         intuitive for human analysis in logs and visualizers.
         THIS METHOD SHOULD ONLY BE CALLED BY THE LOGGER.
         """
-        if self.post_action_portfolio.empty:
-            return self.post_action_portfolio
+        #if self.post_action_portfolio.empty:
+        #    return self.post_action_portfolio
 
         # The more complex, human-friendly sort key
-        human_readable_sort_key = ['strike_price', 'type', 'direction', 'creation_id']
+        #human_readable_sort_key = ['strike_price', 'type', 'direction', 'creation_id']
         
         # Return a sorted COPY, leaving the original portfolio untouched.
-        return self.post_action_portfolio.sort_values(by=human_readable_sort_key).reset_index(drop=True)
+        #return self.post_action_portfolio.sort_values(by=human_readable_sort_key).reset_index(drop=True)
+        return self.post_action_portfolio
 
     def sort_portfolio(self):
         """

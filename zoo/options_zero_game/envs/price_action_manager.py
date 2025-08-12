@@ -178,8 +178,8 @@ class PriceActionManager:
 
         start_index = random.randint(0, len(data) - self.total_steps - 1)
 
-        # 1. Capture the 30 days of price data *before* the episode starts.
-        context_start_index = start_index - 30
+        # 1. Capture the price data *before* the episode starts, safely handling edge cases.
+        context_start_index = max(0, start_index - 30)
         context_segment = data['Close'].iloc[context_start_index:start_index]
         
         # 2. Slice the main episode data.
