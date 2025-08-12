@@ -534,14 +534,33 @@ class PortfolioManager:
                 else: # Put
                     hedge_strike = atm_strike - self.strike_distance
             else:
-                # --- OTM Rule ---
-                # The position is not yet a loser. Create a standard 1-strike wide spread
-                # relative to the NAKED leg's strike.
-                hedge_width = self.strike_distance * 2
+                # --- OTM Rule (Your New Dynamic Hedging Logic) ---
+                # The position is not yet a loser. Create a risk-defined spread
+                # by placing the hedge at the breakeven point.
+
+                # <<< 1. Get the entry premium of the naked leg >>>
+                entry_premium = naked_leg_to_hedge['entry_premium']
+                
+                # <<< 2. Calculate the theoretical breakeven price >>>
                 if hedge_type == 'call':
-                    hedge_strike = naked_strike + hedge_width
+                    # For a short call, BE = Strike + Credit Received
+                    breakeven_price = naked_strike + entry_premium
                 else: # Put
-                    hedge_strike = naked_strike - hedge_width
+                    # For a short put, BE = Strike - Credit Received
+                    breakeven_price = naked_strike - entry_premium
+                    
+                # <<< 3. Find the closest valid market strike to the breakeven price >>>
+                # We can reuse the get_atm_price helper for this rounding logic.
+                closest_valid_strike = self.market_rules_manager.get_atm_price(breakeven_price)
+                
+                # <<< 4. Set the hedge strike, with a safety fallback >>>
+                # Edge Case: If breakeven is very close to the naked strike,
+                # ensure the hedge is at least one strike away.
+                if closest_valid_strike == naked_strike:
+                    hedge_strike = (naked_strike + self.strike_distance if hedge_type == 'call' 
+                                    else naked_strike - self.strike_distance)
+                else:
+                    hedge_strike = closest_valid_strike
 
             # --- 3. Create, Price, and Assemble the Full Strategy ---
             hedge_leg_definition = {
