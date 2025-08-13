@@ -76,6 +76,47 @@ class LogReplayEnv(gym.Wrapper):
             
         return timestep
 
+    # <<< ADD THIS NEW, CORRECTED METHOD >>>
+    def _get_live_pnl(self, portfolio_df: pd.DataFrame, current_price: float, iv_bin_index: int) -> list:
+        """
+        Calculates the live, un-realized P&L for each individual leg in the
+        portfolio for logging purposes. This is a corrected, robust version.
+        """
+        if portfolio_df.empty:
+            return []
+
+        live_pnl_data = []
+        atm_price = self.env.market_rules_manager.get_atm_price(current_price)
+        lot_size = self.env.portfolio_manager.lot_size
+
+        for _, leg in portfolio_df.iterrows():
+            is_call = leg['type'] == 'call'
+            
+            # 1. Get the current, live market premium for the leg
+            offset = round((leg['strike_price'] - atm_price) / self.env.strike_distance)
+            vol = self.env.iv_calculator(offset, leg['type'])
+            greeks = self.env.bs_manager.get_all_greeks_and_price(
+                current_price, leg['strike_price'], leg['days_to_expiry'], vol, is_call
+            )
+            
+            # Determine the exit price, including the bid-ask spread
+            current_premium = self.env.bs_manager.get_price_with_spread(
+                greeks['price'], is_buy=(leg['direction'] == 'short'), bid_ask_spread_pct=self.env.bid_ask_spread_pct
+            )
+
+            # 2. Correctly calculate the P&L based on direction
+            direction_multiplier = 1 if leg['direction'] == 'long' else -1
+            pnl_per_share = current_premium - leg['entry_premium']
+            live_pnl = pnl_per_share * direction_multiplier * lot_size
+
+            # 3. Create a dictionary with all necessary data for the UI
+            leg_data = leg.to_dict()
+            leg_data['current_premium'] = current_premium
+            leg_data['live_pnl'] = live_pnl
+            live_pnl_data.append(leg_data)
+            
+        return live_pnl_data
+
     def _log_state_snapshot(self, step_num, day_num, is_post_action, price_for_log, action_info, final_timestep=None):
         info = copy.deepcopy(final_timestep.info) if final_timestep else {}
         
@@ -161,33 +202,48 @@ class LogReplayEnv(gym.Wrapper):
         self._episode_history.append(settlement_entry)
 
     def _serialize_portfolio(self, portfolio_df: pd.DataFrame, current_price: float) -> list:
-        """Calculates live PnL for the current portfolio and returns a serializable list."""
-        serializable_portfolio = []
-        if portfolio_df is None or portfolio_df.empty:
-            return serializable_portfolio
+        """
+        Calculates the live, un-realized P&L for each individual leg in the
+        portfolio and returns a list of dictionaries ready for JSON logging.
+        This is the corrected, robust version.
+        """
+        if portfolio_df.empty:
+            return []
+
+        serialized_data = []
+        atm_price = self.env.market_rules_manager.get_atm_price(current_price)
+        lot_size = self.env.portfolio_manager.lot_size
+
+        for _, leg in portfolio_df.iterrows():
+            is_call = leg['type'] == 'call'
             
-        for index, pos in portfolio_df.iterrows():
-            is_call = pos['type'] == 'call'
-            atm_price = self.env.market_rules_manager.get_atm_price(current_price)
-            offset = round((pos['strike_price'] - atm_price) / self.env.strike_distance)
-            vol = self.env.market_rules_manager.get_implied_volatility(offset, pos['type'], self.env.iv_bin_index)
-            greeks = self.env.bs_manager.get_all_greeks_and_price(current_price, pos['strike_price'], pos['days_to_expiry'], vol, is_call)
+            # --- 1. Get the current, live market premium for the leg ---
+            offset = round((leg['strike_price'] - atm_price) / self.env.strike_distance)
             
-            mid_price = greeks['price']
-            current_premium = self.env.bs_manager.get_price_with_spread(mid_price, is_buy=(pos['direction'] == 'short'), bid_ask_spread_pct=self.env.bid_ask_spread_pct)
+            # Use the environment's official IV calculator for consistency
+            vol = self.env._get_dynamic_iv(offset, leg['type'])
             
-            pnl_multiplier = 1 if pos['direction'] == 'long' else -1
-            pnl = (current_premium - pos['entry_premium']) * self.env.portfolio_manager.lot_size * pnl_multiplier
-                
-            serializable_portfolio.append({
-                'type': pos['type'], 'direction': pos['direction'],
-                'strike_price': round(pos['strike_price'], 2),
-                'entry_premium': round(pos['entry_premium'], 2),
-                'current_premium': round(current_premium, 2),
-                'live_pnl': round(pnl, 2),
-                'days_to_expiry': float(pos['days_to_expiry']),
-            })
-        return serializable_portfolio
+            greeks = self.env.bs_manager.get_all_greeks_and_price(
+                current_price, leg['strike_price'], leg['days_to_expiry'], vol, is_call
+            )
+            
+            # Determine the current market value (exit price), including the bid-ask spread
+            current_premium = self.env.bs_manager.get_price_with_spread(
+                greeks['price'], is_buy=(leg['direction'] == 'short'), bid_ask_spread_pct=self.env.bid_ask_spread_pct
+            )
+
+            # --- 2. Correctly calculate the Live P&L based on direction ---
+            direction_multiplier = 1 if leg['direction'] == 'long' else -1
+            pnl_per_share = current_premium - leg['entry_premium']
+            live_pnl = pnl_per_share * direction_multiplier * lot_size
+
+            # --- 3. Create a dictionary with all necessary data for the UI ---
+            leg_data = leg.to_dict()
+            leg_data['current_premium'] = current_premium
+            leg_data['live_pnl'] = live_pnl
+            serialized_data.append(leg_data)
+            
+        return serialized_data
 
     def save_log(self):
         """Saves the complete episode history to a JSON file."""

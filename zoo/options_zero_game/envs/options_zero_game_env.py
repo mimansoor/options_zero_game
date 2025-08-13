@@ -22,6 +22,7 @@ from .price_action_manager import PriceActionManager
 from .portfolio_manager import PortfolioManager
 from .market_rules_manager import MarketRulesManager
 from ..entry.bias_meter import BiasMeter
+from .utils import generate_dynamic_iv_skew_table
 
 @ENV_REGISTRY.register('options_zero_game')
 class OptionsZeroGameEnv(gym.Env):
@@ -58,38 +59,13 @@ class OptionsZeroGameEnv(gym.Env):
         lot_size=75,
         max_positions=4,
         strike_distance=50.0,
-        max_strike_offset=20,
+        max_strike_offset=30,
         bid_ask_spread_pct=0.002,
-        brokerage_per_leg=20.0,
+        brokerage_per_leg=25.0,
         days_before_liquidation=1,
         
         # Black-Scholes Manager Config
         risk_free_rate=0.10,
-
-        iv_skew_table={
-            'call': {
-                '-20':(18.0,20.5),'-19':(17.8,20.3),'-18':(17.6,20.1),'-17':(17.4,19.9),'-16':(17.2,19.7),
-                '-15':(17.0,19.5),'-14':(16.8,19.3),'-13':(16.6,19.1),'-12':(16.4,18.9),'-11':(16.2,18.7),
-                '-10':(16.0,18.5),'-9':(15.8,18.3),'-8':(15.6,18.1),'-7':(15.4,17.9),'-6':(15.2,17.7),
-                '-5':(15.0,17.5),'-4':(14.8,17.3),'-3':(14.6,17.1),'-2':(14.4,16.9),'-1':(14.2,16.7),
-                '0': (14.0,16.5),
-                '1':(14.2,16.7),'2':(14.4,16.9),'3':(14.6,17.1),'4':(14.8,17.3),'5':(15.0,17.5),
-                '6':(15.2,17.7),'7':(15.4,17.9),'8':(15.6,18.1),'9':(15.8,18.3),'10':(16.0,18.5),
-                '11':(16.2,18.7),'12':(16.4,18.9),'13':(16.6,19.1),'14':(16.8,19.3),'15':(17.0,19.5),
-                '16':(17.2,19.7),'17':(17.4,19.9),'18':(17.6,20.1),'19':(17.8,20.3),'20':(18.0,20.5)
-            },
-            'put':  {
-                '-20':(18.5,21.0),'-19':(18.3,20.8),'-18':(18.1,20.6),'-17':(17.9,20.4),'-16':(17.7,20.2),
-                '-15':(17.5,20.0),'-14':(17.3,19.8),'-13':(17.1,19.6),'-12':(16.9,19.4),'-11':(16.7,19.2),
-                '-10':(16.5,19.0),'-9':(16.3,18.8),'-8':(16.1,18.6),'-7':(15.9,18.4),'-6':(15.7,18.2),
-                '-5':(15.5,18.0),'-4':(15.3,17.8),'-3':(15.1,17.6),'-2':(14.9,17.4),'-1':(14.7,17.2),
-                '0': (14.5,17.0),
-                '1':(14.7,17.2),'2':(14.9,17.4),'3':(15.1,17.6),'4':(15.3,17.8),'5':(15.5,18.0),
-                '6':(15.7,18.2),'7':(15.9,18.4),'8':(16.1,18.6),'9':(16.3,18.8),'10':(16.5,19.0),
-                '11':(16.7,19.2),'12':(16.9,19.4),'13':(17.1,19.6),'14':(17.3,19.8),'15':(17.5,20.0),
-                '16':(17.7,20.2),'17':(17.9,20.4),'18':(18.1,20.6),'19':(18.3,20.8),'20':(18.5,21.0)
-            },
-        },
 
         # Reward and Penalty Config
         pnl_scaling_factor=1000,
@@ -145,19 +121,15 @@ class OptionsZeroGameEnv(gym.Env):
         # environment (for the action mask) and the portfolio manager.
         self.strategy_name_to_id = cfg.get('strategy_name_to_id', {})
 
+        self.iv_regimes = self._cfg.get('iv_regimes', [])
+        self.current_iv_regime_name = "N/A" # For logging
+
         self.bs_manager = BlackScholesManager(self._cfg)
         self.price_manager = PriceActionManager(self._cfg, self.np_random)
-        self.market_rules_manager = MarketRulesManager(self._cfg)
+        self.market_rules_manager = None
         
         # The PortfolioManager needs references to the other managers
-        self.portfolio_manager = PortfolioManager(
-            cfg=self._cfg,
-            bs_manager=self.bs_manager,
-            market_rules_manager=self.market_rules_manager,
-            iv_calculator_func=self._get_dynamic_iv,
-            # The portfolio manager still gets the dictionary as well.
-            strategy_name_to_id=self.strategy_name_to_id
-        )
+        self.portfolio_manager = None
         
         self.actions_to_indices = self._build_action_space()
         self.indices_to_actions = {v: k for k, v in self.actions_to_indices.items()}
@@ -267,7 +239,6 @@ class OptionsZeroGameEnv(gym.Env):
             #Evaluation mode
             self.forced_opening_strategy_name = self._cfg.get('forced_opening_strategy_name') 
 
-        # --- THE DEFINITIVE FIX ---
         # 1. First, determine the definitive number of trading days for this episode.
         forced_length = self._cfg.get('forced_episode_length', 0)
         if forced_length > 0:
@@ -285,12 +256,41 @@ class OptionsZeroGameEnv(gym.Env):
         
         # 3. NOW, reset all managers and state variables using the correct total_steps.
         self.price_manager.reset(self.total_steps)
-        self.portfolio_manager.reset()
         
         self.current_step = 0
         self.final_eval_reward = 0.0
         self.illegal_action_count = 0
         self.realized_vol_series = np.zeros(self.total_steps + 1, dtype=np.float32)
+
+        # <<< NEW: DYNAMIC IV REGIME SELECTION >>>
+        # 1. Randomly select a regime for this episode.
+        chosen_regime = random.choice(self.iv_regimes)
+        self.current_iv_regime_name = chosen_regime['name']
+        
+        # 2. Generate the skew table for this specific regime.
+        episode_skew_table = generate_dynamic_iv_skew_table(
+            max_offset=self._cfg.max_strike_offset,
+            atm_iv=chosen_regime['atm_iv'],
+            far_otm_put_iv=chosen_regime['far_otm_put_iv'],
+            far_otm_call_iv=chosen_regime['far_otm_call_iv']
+        )
+        
+        # 3. Create a new MarketRulesManager for this episode with the new skew.
+        # We need to temporarily add the skew table to the config for initialization.
+        temp_cfg = self._cfg.copy()
+        temp_cfg['iv_skew_table'] = episode_skew_table
+        self.market_rules_manager = MarketRulesManager(temp_cfg)
+
+        # 4. Now that we have a valid MarketRulesManager, create the PortfolioManager.
+        self.portfolio_manager = PortfolioManager(
+            cfg=self._cfg,
+            bs_manager=self.bs_manager,
+            market_rules_manager=self.market_rules_manager,
+            iv_calculator_func=self._get_dynamic_iv,
+            strategy_name_to_id=self.strategy_name_to_id
+        )
+        self.portfolio_manager.reset() # Reset its internal state
+
         self.iv_bin_index = random.randint(0, len(self.market_rules_manager.iv_bins['call']['0']) - 1)
 
         # 4. Get the initial observation.
@@ -553,6 +553,7 @@ class OptionsZeroGameEnv(gym.Env):
             'portfolio_stats': self.portfolio_manager.get_raw_portfolio_stats(self.price_manager.current_price, self.iv_bin_index),
             'market_regime': self.price_manager.current_regime_name,
             'total_steps_in_episode': self.total_steps,
+            'market_regime': self.current_iv_regime_name,
             'termination_reason': termination_reason
         }
 
@@ -744,9 +745,10 @@ class OptionsZeroGameEnv(gym.Env):
 
     def _build_action_space(self) -> Dict[str, int]:
         actions = {'HOLD': 0}; i = 1
+        agent_max_open_offset = self._cfg.get('agent_max_open_offset', 10)
 
         # Use the configurable max_strike_offset instead of a hardcoded range.
-        for offset in range(-self._cfg.max_strike_offset, self._cfg.max_strike_offset + 1):
+        for offset in range(-agent_max_open_offset, agent_max_open_offset + 1):
             sign = '+' if offset >= 0 else ''
             # We can simplify the action name for offsets > 9, e.g., ATM+10 instead of ATM+ 10
             offset_str = f"{sign}{offset}"

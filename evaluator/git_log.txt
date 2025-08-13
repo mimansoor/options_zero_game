@@ -1,0 +1,56 @@
+2eb6aca
+
+commit 2eb6aca3d2d711f47955f6e1c6d0dcb7d3fcf7b7
+Author: Illyas Mansoor <mimansoor@gmail.com>
+Date:   Thu Aug 14 01:40:24 2025 +0530
+
+    added new strategy morphing actions convert_bull_call/bear_call/bull_put/bear_put
+
+ .../config/options_zero_game_muzero_config.py      |  46 +++-
+ .../entry/options_zero_game_eval.py                |   4 +
+ zoo/options_zero_game/envs/market_rules_manager.py |   9 +-
+ .../envs/options_zero_game_env.py                  |  35 +++
+ zoo/options_zero_game/envs/portfolio_manager.py    | 241 ++++++++++++++++-----
+ 5 files changed, 267 insertions(+), 68 deletions(-)
+
+commit b69231fe75c92099a8ebb9139006708e132e9aa6
+Author: Illyas Mansoor <mimansoor@gmail.com>
+Date:   Thu Aug 14 00:25:06 2025 +0530
+
+    adding new actions for convert_to_iron_fly/condor/strangle/straddle and adjust_to_delta_neutral
+
+ .../config/options_zero_game_muzero_config.py      |   9 +
+ .../envs/options_zero_game_env.py                  | 131 ++++-
+ zoo/options_zero_game/envs/portfolio_manager.py    | 645 ++++++++++++++-------
+ 3 files changed, 556 insertions(+), 229 deletions(-)
+
+commit 86f5ffc405259b1ca0ff39f2c91c28a601e218da
+Author: Illyas Mansoor <mimansoor@gmail.com>
+Date:   Wed Aug 13 19:50:59 2025 +0530
+
+    added dynamic risk adjusted vertical spreads
+
+ .../config/options_zero_game_muzero_config.py      |  28 +++--
+ .../envs/options_zero_game_env.py                  |  34 +++--
+ zoo/options_zero_game/envs/portfolio_manager.py    | 140 ++++++++++++++++-----
+ 3 files changed, 144 insertions(+), 58 deletions(-)
+
+commit 31624c089c17c3ec84dcc3b96d502ee4864d8db0
+Author: Illyas Mansoor <mimansoor@gmail.com>
+Date:   Wed Aug 13 16:46:04 2025 +0530
+
+    using vol expert to provide the predicted vol to use in IV calculation
+
+ .../config/options_zero_game_muzero_config.py      |  4 +++
+ .../envs/options_zero_game_env.py                  | 37 +++++++++++++++++++++-
+ zoo/options_zero_game/envs/portfolio_manager.py    | 30 ++++++++++--------
+ 3 files changed, 57 insertions(+), 14 deletions(-)
+
+commit 51c82f47c1736d27daa938cae21da7d623f6f8ac
+Author: Illyas Mansoor <mimansoor@gmail.com>
+Date:   Wed Aug 13 16:20:44 2025 +0530
+
+    changed day_before liquidation to 1
+
+ zoo/options_zero_game/envs/options_zero_game_env.py | 5 +++--
+ 1 file changed, 3 insertions(+), 2 deletions(-)

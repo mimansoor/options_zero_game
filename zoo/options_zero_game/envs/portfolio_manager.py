@@ -28,7 +28,7 @@ class PortfolioManager:
         self.close_short_leg_on_profit_threshold = cfg.get('close_short_leg_on_profit_threshold', 0.0)
         self.is_eval_mode = cfg.get('is_eval_mode', False)
         self.brokerage_per_leg = cfg.get('brokerage_per_leg', 0.0)
-        self.max_strike_offset = cfg['max_strike_offset']
+        self.max_strike_offset = cfg.get('max_strike_offset', 30)
         self.receipts_for_current_step: List[dict] = []
         self.steps_per_day = cfg.get('steps_per_day', 1)
         self.butterfly_target_cost_pct = cfg.get('butterfly_target_cost_pct', 0.01)
@@ -1534,7 +1534,7 @@ class PortfolioManager:
                         {'type': 'put', 'direction': 'long', 'strike_price': strike_long_put, 'days_to_expiry': days_to_expiry},
                         {'type': 'call', 'direction': 'long', 'strike_price': strike_long_call, 'days_to_expiry': days_to_expiry}
                     ]
-                    # print(f"DEBUG: Successfully found strikes for tier {tier['short']}/{tier['long']}.")
+                    #print(f"DEBUG: Successfully found strikes for tier {tier['short']}/{tier['long']}.")
                     break # Exit the loop as we have found a valid strategy
             
             if not legs:

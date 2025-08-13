@@ -1,0 +1,504 @@
+diff --git a/zoo/options_zero_game/config/options_zero_game_muzero_config.py b/zoo/options_zero_game/config/options_zero_game_muzero_config.py
+index 490af54..3735f14 100644
+--- a/zoo/options_zero_game/config/options_zero_game_muzero_config.py
++++ b/zoo/options_zero_game/config/options_zero_game_muzero_config.py
+@@ -1,8 +1,11 @@
++# zoo/options_zero_game/config/options_zero_game_muzero_config.py
++import numpy as np # Make sure numpy is imported
+ import copy
+ from easydict import EasyDict
+ 
+ # Import the environment to get its version and default parameters
+ from zoo.options_zero_game.envs.options_zero_game_env import OptionsZeroGameEnv
++from zoo.options_zero_game.envs.utils import generate_dynamic_iv_skew_table
+ 
+ # ==============================================================
+ #                 Static Parameters
+@@ -17,6 +20,46 @@ replay_ratio = 0.25
+ max_env_step = int(5e7)
+ reanalyze_ratio = 0.
+ 
++# <<< NEW: Add this powerful helper function at the top of your config file >>>
++def generate_dynamic_iv_skew_table(max_offset: int, atm_iv: float, far_otm_put_iv: float, far_otm_call_iv: float) -> dict:
++    """
++    Generates a realistic, dynamic IV skew table using a quadratic curve.
++    This creates a "volatility smirk" where OTM puts have the highest IV.
++
++    Args:
++        max_offset: The max number of strikes from ATM (e.g., 30).
++        atm_iv: The IV at the money (e.g., 20.0 for 20%).
++        far_otm_put_iv: The IV at the furthest OTM put strike (e.g., 45.0).
++        far_otm_call_iv: The IV at the furthest OTM call strike (e.g., 18.0).
++
++    Returns:
++        A dictionary in the format required by the MarketRulesManager.
++    """
++    # We solve a system of equations for a quadratic: y = ax^2 + bx + c
++    # The points are (-max_offset, far_otm_put_iv), (0, atm_iv), (max_offset, far_otm_call_iv)
++
++    A = np.array([
++        [max_offset**2, -max_offset, 1],
++        [0, 0, 1],
++        [max_offset**2, max_offset, 1]
++    ])
++    B = np.array([far_otm_put_iv, atm_iv, far_otm_call_iv])
++
++    a, b, c = np.linalg.solve(A, B)
++
++    skew_table = {'call': {}, 'put': {}}
++    for offset in range(-max_offset, max_offset + 1):
++        # Calculate the IV on the quadratic curve
++        iv = a * offset**2 + b * offset + c
++        # The table expects a [min_iv, max_iv] range, so we create a small range around the point.
++        iv_range = [max(5.0, iv - 1.0), iv + 1.0] # Ensure IV doesn't drop below 5%
++
++        # The same skew curve applies to both puts and calls
++        skew_table['call'][str(offset)] = iv_range
++        skew_table['put'][str(offset)] = iv_range
++
++    return skew_table
++
+ market_regimes = [
+     # Name, mu, omega, alpha, beta, overnight_vol_multiplier
+     {'name': 'Bond_Markets', 'mu': 0.00001, 'omega': 0.000002, 'alpha': 0.05, 'beta': 0.92, 'overnight_vol_multiplier': 1.1},
+@@ -162,10 +205,55 @@ class CurriculumHolder:
+         # Return the string representation of the dictionary itself.
+         return repr(self.schedule)
+ 
++# ==============================================================
++#           IV Regime Definitions
++# ==============================================================
++# Define different "personalities" for the volatility market.
++# The environment will randomly pick one of these for each episode.
++IV_REGIMES = [
++    {
++        'name': 'Normal Market',
++        'atm_iv': 25.0,
++        'far_otm_put_iv': 50.0,
++        'far_otm_call_iv': 20.0,
++    },
++    {
++        'name': 'High Volatility (Fear)',
++        'atm_iv': 50.0,
++        'far_otm_put_iv': 90.0,  # Put skew is very steep in a panic
++        'far_otm_call_iv': 40.0,
++    },
++    {
++        'name': 'Medium Low Volatility',
++        'atm_iv': 15.0,
++        'far_otm_put_iv': 25.0,  # Skew is much flatter in a calm market
++        'far_otm_call_iv': 12.0,
++    },
++    {
++        'name': 'Low Volatility (Complacency)',
++        'atm_iv': 10.0,
++        'far_otm_put_iv': 16.5,  # Skew is much flatter in a calm market
++        'far_otm_call_iv': 10.5,
++    },
++]
++
+ # ==============================================================
+ #           Main Config (The Parameters)
+ # ==============================================================
+ # This makes the script runnable from anywhere.
++# <<< NEW: Define high-level volatility parameters >>>
++MAX_STRIKE_OFFSET = 40
++ATM_IV = 25.0  # Volatility at the money is 25%
++FAR_OTM_PUT_IV = 50.0 # Volatility for the -30 strike put is 50%
++FAR_OTM_CALL_IV = 20.0 # Volatility for the +30 strike call is 20% (creating a "smirk")
++
++# <<< THE FIX: Generate the skew table dynamically >>>
++dynamic_iv_skew_table = generate_dynamic_iv_skew_table(
++    max_offset=MAX_STRIKE_OFFSET,
++    atm_iv=ATM_IV,
++    far_otm_put_iv=FAR_OTM_PUT_IV,
++    far_otm_call_iv=FAR_OTM_CALL_IV
++)
+ 
+ options_zero_game_muzero_config = dict(
+     # Define the main output directory for all experiments.
+@@ -219,6 +307,13 @@ options_zero_game_muzero_config = dict(
+         # The target net debit for a butterfly as a percentage of the ATM strike.
+         # 0.01 means we are trying to pay ~1% of the stock price for the butterfly.
+         butterfly_target_cost_pct=0.01, 
++
++        max_strike_offset=MAX_STRIKE_OFFSET,
++        iv_regimes=IV_REGIMES,
++        
++        # <<< NEW: Add a parameter specifically for the agent's naked opening actions >>>
++        # The agent can only OPEN naked positions within this narrower range.
++        agent_max_open_offset=10,
+     ),
+     policy=dict(
+         model=dict(
+@@ -282,36 +377,6 @@ del temp_env  # Clean up
+ main_config.policy.model.observation_shape = observation_shape
+ main_config.policy.model.action_space_size = action_space_size
+ 
+-# ==============================================================
+-#           Automatic Training Resumption Logic
+-# ==============================================================
+-import os
+-from easydict import EasyDict
+-
+-# --- Define the path to the checkpoint you want to resume from ---
+-# This is now the single source of truth for resuming.
+-# Let's point it to the 'ckpt_latest.pth.tar' in a specific experiment for robustness.
+-# NOTE: You might want to update this path to a more general one like './best_ckpt/ckpt_best.pth.tar'
+-# if that is your intended workflow.
+-resume_path = os.path.join(main_config.exp_name, './best_ckpt/ckpt_best.pth.tar')
+-
+-# Check if the checkpoint file actually exists.
+-if os.path.exists(resume_path):
+-    print(f"\n--- Checkpoint found at '{resume_path}'. ---")
+-    print("--- Configuring to RESUME training. ---\n")
+-    
+-    # If it exists, dynamically create and populate the 'learn' hook.
+-    # We create empty EasyDicts to ensure the nested structure exists.
+-    main_config.policy.learn = EasyDict({})
+-    main_config.policy.learn.learner = EasyDict({})
+-    main_config.policy.learn.learner.hook = EasyDict({})
+-    main_config.policy.learn.learner.hook.load_ckpt_before_run = resume_path
+-else:
+-    print(f"\n--- No checkpoint found at '{resume_path}'. ---")
+-    print("--- Starting a FRESH training run. ---\n")
+-    # If the file does not exist, we do nothing. The 'learn' hook will not be
+-    # added to the config, and the framework will start training from scratch.
+-
+ # ==============================================================
+ #                  Create-Config (The Blueprint)
+ # ==============================================================
+@@ -329,6 +394,36 @@ create_config = dict(
+ create_config = EasyDict(create_config)
+ 
+ if __name__ == "__main__":
++    # ==============================================================
++    #           Automatic Training Resumption Logic
++    # ==============================================================
++    import os
++    from easydict import EasyDict
++
++    # --- Define the path to the checkpoint you want to resume from ---
++    # This is now the single source of truth for resuming.
++    # Let's point it to the 'ckpt_latest.pth.tar' in a specific experiment for robustness.
++    # NOTE: You might want to update this path to a more general one like './best_ckpt/ckpt_best.pth.tar'
++    # if that is your intended workflow.
++    resume_path = './best_ckpt/ckpt_best.pth.tar'
++
++    # Check if the checkpoint file actually exists.
++    if os.path.exists(resume_path):
++        print(f"\n--- Checkpoint found at '{resume_path}'. ---")
++        print("--- Configuring to RESUME training. ---\n")
++        
++        # If it exists, dynamically create and populate the 'learn' hook.
++        # We create empty EasyDicts to ensure the nested structure exists.
++        main_config.policy.learn = EasyDict({})
++        main_config.policy.learn.learner = EasyDict({})
++        main_config.policy.learn.learner.hook = EasyDict({})
++        main_config.policy.learn.learner.hook.load_ckpt_before_run = resume_path
++    else:
++        print(f"\n--- No checkpoint found at '{resume_path}'. ---")
++        print("--- Starting a FRESH training run. ---\n")
++        # If the file does not exist, we do nothing. The 'learn' hook will not be
++        # added to the config, and the framework will start training from scratch.
++
+     import argparse
+     import time
+     from lzero.entry import train_muzero
+diff --git a/zoo/options_zero_game/envs/log_replay_env.py b/zoo/options_zero_game/envs/log_replay_env.py
+index b3723bf..2a349a5 100644
+--- a/zoo/options_zero_game/envs/log_replay_env.py
++++ b/zoo/options_zero_game/envs/log_replay_env.py
+@@ -76,6 +76,47 @@ class LogReplayEnv(gym.Wrapper):
+             
+         return timestep
+ 
++    # <<< ADD THIS NEW, CORRECTED METHOD >>>
++    def _get_live_pnl(self, portfolio_df: pd.DataFrame, current_price: float, iv_bin_index: int) -> list:
++        """
++        Calculates the live, un-realized P&L for each individual leg in the
++        portfolio for logging purposes. This is a corrected, robust version.
++        """
++        if portfolio_df.empty:
++            return []
++
++        live_pnl_data = []
++        atm_price = self.env.market_rules_manager.get_atm_price(current_price)
++        lot_size = self.env.portfolio_manager.lot_size
++
++        for _, leg in portfolio_df.iterrows():
++            is_call = leg['type'] == 'call'
++            
++            # 1. Get the current, live market premium for the leg
++            offset = round((leg['strike_price'] - atm_price) / self.env.strike_distance)
++            vol = self.env.iv_calculator(offset, leg['type'])
++            greeks = self.env.bs_manager.get_all_greeks_and_price(
++                current_price, leg['strike_price'], leg['days_to_expiry'], vol, is_call
++            )
++            
++            # Determine the exit price, including the bid-ask spread
++            current_premium = self.env.bs_manager.get_price_with_spread(
++                greeks['price'], is_buy=(leg['direction'] == 'short'), bid_ask_spread_pct=self.env.bid_ask_spread_pct
++            )
++
++            # 2. Correctly calculate the P&L based on direction
++            direction_multiplier = 1 if leg['direction'] == 'long' else -1
++            pnl_per_share = current_premium - leg['entry_premium']
++            live_pnl = pnl_per_share * direction_multiplier * lot_size
++
++            # 3. Create a dictionary with all necessary data for the UI
++            leg_data = leg.to_dict()
++            leg_data['current_premium'] = current_premium
++            leg_data['live_pnl'] = live_pnl
++            live_pnl_data.append(leg_data)
++            
++        return live_pnl_data
++
+     def _log_state_snapshot(self, step_num, day_num, is_post_action, price_for_log, action_info, final_timestep=None):
+         info = copy.deepcopy(final_timestep.info) if final_timestep else {}
+         
+@@ -161,33 +202,48 @@ class LogReplayEnv(gym.Wrapper):
+         self._episode_history.append(settlement_entry)
+ 
+     def _serialize_portfolio(self, portfolio_df: pd.DataFrame, current_price: float) -> list:
+-        """Calculates live PnL for the current portfolio and returns a serializable list."""
+-        serializable_portfolio = []
+-        if portfolio_df is None or portfolio_df.empty:
+-            return serializable_portfolio
++        """
++        Calculates the live, un-realized P&L for each individual leg in the
++        portfolio and returns a list of dictionaries ready for JSON logging.
++        This is the corrected, robust version.
++        """
++        if portfolio_df.empty:
++            return []
++
++        serialized_data = []
++        atm_price = self.env.market_rules_manager.get_atm_price(current_price)
++        lot_size = self.env.portfolio_manager.lot_size
++
++        for _, leg in portfolio_df.iterrows():
++            is_call = leg['type'] == 'call'
+             
+-        for index, pos in portfolio_df.iterrows():
+-            is_call = pos['type'] == 'call'
+-            atm_price = self.env.market_rules_manager.get_atm_price(current_price)
+-            offset = round((pos['strike_price'] - atm_price) / self.env.strike_distance)
+-            vol = self.env.market_rules_manager.get_implied_volatility(offset, pos['type'], self.env.iv_bin_index)
+-            greeks = self.env.bs_manager.get_all_greeks_and_price(current_price, pos['strike_price'], pos['days_to_expiry'], vol, is_call)
++            # --- 1. Get the current, live market premium for the leg ---
++            offset = round((leg['strike_price'] - atm_price) / self.env.strike_distance)
+             
+-            mid_price = greeks['price']
+-            current_premium = self.env.bs_manager.get_price_with_spread(mid_price, is_buy=(pos['direction'] == 'short'), bid_ask_spread_pct=self.env.bid_ask_spread_pct)
++            # Use the environment's official IV calculator for consistency
++            vol = self.env._get_dynamic_iv(offset, leg['type'])
++            
++            greeks = self.env.bs_manager.get_all_greeks_and_price(
++                current_price, leg['strike_price'], leg['days_to_expiry'], vol, is_call
++            )
++            
++            # Determine the current market value (exit price), including the bid-ask spread
++            current_premium = self.env.bs_manager.get_price_with_spread(
++                greeks['price'], is_buy=(leg['direction'] == 'short'), bid_ask_spread_pct=self.env.bid_ask_spread_pct
++            )
++
++            # --- 2. Correctly calculate the Live P&L based on direction ---
++            direction_multiplier = 1 if leg['direction'] == 'long' else -1
++            pnl_per_share = current_premium - leg['entry_premium']
++            live_pnl = pnl_per_share * direction_multiplier * lot_size
++
++            # --- 3. Create a dictionary with all necessary data for the UI ---
++            leg_data = leg.to_dict()
++            leg_data['current_premium'] = current_premium
++            leg_data['live_pnl'] = live_pnl
++            serialized_data.append(leg_data)
+             
+-            pnl_multiplier = 1 if pos['direction'] == 'long' else -1
+-            pnl = (current_premium - pos['entry_premium']) * self.env.portfolio_manager.lot_size * pnl_multiplier
+-                
+-            serializable_portfolio.append({
+-                'type': pos['type'], 'direction': pos['direction'],
+-                'strike_price': round(pos['strike_price'], 2),
+-                'entry_premium': round(pos['entry_premium'], 2),
+-                'current_premium': round(current_premium, 2),
+-                'live_pnl': round(pnl, 2),
+-                'days_to_expiry': float(pos['days_to_expiry']),
+-            })
+-        return serializable_portfolio
++        return serialized_data
+ 
+     def save_log(self):
+         """Saves the complete episode history to a JSON file."""
+diff --git a/zoo/options_zero_game/envs/options_zero_game_env.py b/zoo/options_zero_game/envs/options_zero_game_env.py
+index 929e385..3642e96 100644
+--- a/zoo/options_zero_game/envs/options_zero_game_env.py
++++ b/zoo/options_zero_game/envs/options_zero_game_env.py
+@@ -22,6 +22,7 @@ from .price_action_manager import PriceActionManager
+ from .portfolio_manager import PortfolioManager
+ from .market_rules_manager import MarketRulesManager
+ from ..entry.bias_meter import BiasMeter
++from .utils import generate_dynamic_iv_skew_table
+ 
+ @ENV_REGISTRY.register('options_zero_game')
+ class OptionsZeroGameEnv(gym.Env):
+@@ -58,39 +59,14 @@ class OptionsZeroGameEnv(gym.Env):
+         lot_size=75,
+         max_positions=4,
+         strike_distance=50.0,
+-        max_strike_offset=20,
++        max_strike_offset=30,
+         bid_ask_spread_pct=0.002,
+-        brokerage_per_leg=20.0,
++        brokerage_per_leg=25.0,
+         days_before_liquidation=1,
+         
+         # Black-Scholes Manager Config
+         risk_free_rate=0.10,
+ 
+-        iv_skew_table={
+-            'call': {
+-                '-20':(18.0,20.5),'-19':(17.8,20.3),'-18':(17.6,20.1),'-17':(17.4,19.9),'-16':(17.2,19.7),
+-                '-15':(17.0,19.5),'-14':(16.8,19.3),'-13':(16.6,19.1),'-12':(16.4,18.9),'-11':(16.2,18.7),
+-                '-10':(16.0,18.5),'-9':(15.8,18.3),'-8':(15.6,18.1),'-7':(15.4,17.9),'-6':(15.2,17.7),
+-                '-5':(15.0,17.5),'-4':(14.8,17.3),'-3':(14.6,17.1),'-2':(14.4,16.9),'-1':(14.2,16.7),
+-                '0': (14.0,16.5),
+-                '1':(14.2,16.7),'2':(14.4,16.9),'3':(14.6,17.1),'4':(14.8,17.3),'5':(15.0,17.5),
+-                '6':(15.2,17.7),'7':(15.4,17.9),'8':(15.6,18.1),'9':(15.8,18.3),'10':(16.0,18.5),
+-                '11':(16.2,18.7),'12':(16.4,18.9),'13':(16.6,19.1),'14':(16.8,19.3),'15':(17.0,19.5),
+-                '16':(17.2,19.7),'17':(17.4,19.9),'18':(17.6,20.1),'19':(17.8,20.3),'20':(18.0,20.5)
+-            },
+-            'put':  {
+-                '-20':(18.5,21.0),'-19':(18.3,20.8),'-18':(18.1,20.6),'-17':(17.9,20.4),'-16':(17.7,20.2),
+-                '-15':(17.5,20.0),'-14':(17.3,19.8),'-13':(17.1,19.6),'-12':(16.9,19.4),'-11':(16.7,19.2),
+-                '-10':(16.5,19.0),'-9':(16.3,18.8),'-8':(16.1,18.6),'-7':(15.9,18.4),'-6':(15.7,18.2),
+-                '-5':(15.5,18.0),'-4':(15.3,17.8),'-3':(15.1,17.6),'-2':(14.9,17.4),'-1':(14.7,17.2),
+-                '0': (14.5,17.0),
+-                '1':(14.7,17.2),'2':(14.9,17.4),'3':(15.1,17.6),'4':(15.3,17.8),'5':(15.5,18.0),
+-                '6':(15.7,18.2),'7':(15.9,18.4),'8':(16.1,18.6),'9':(16.3,18.8),'10':(16.5,19.0),
+-                '11':(16.7,19.2),'12':(16.9,19.4),'13':(17.1,19.6),'14':(17.3,19.8),'15':(17.5,20.0),
+-                '16':(17.7,20.2),'17':(17.9,20.4),'18':(18.1,20.6),'19':(18.3,20.8),'20':(18.5,21.0)
+-            },
+-        },
+-
+         # Reward and Penalty Config
+         pnl_scaling_factor=1000,
+         drawdown_penalty_weight=0.1,
+@@ -145,19 +121,15 @@ class OptionsZeroGameEnv(gym.Env):
+         # environment (for the action mask) and the portfolio manager.
+         self.strategy_name_to_id = cfg.get('strategy_name_to_id', {})
+ 
++        self.iv_regimes = self._cfg.get('iv_regimes', [])
++        self.current_iv_regime_name = "N/A" # For logging
++
+         self.bs_manager = BlackScholesManager(self._cfg)
+         self.price_manager = PriceActionManager(self._cfg, self.np_random)
+-        self.market_rules_manager = MarketRulesManager(self._cfg)
++        self.market_rules_manager = None
+         
+         # The PortfolioManager needs references to the other managers
+-        self.portfolio_manager = PortfolioManager(
+-            cfg=self._cfg,
+-            bs_manager=self.bs_manager,
+-            market_rules_manager=self.market_rules_manager,
+-            iv_calculator_func=self._get_dynamic_iv,
+-            # The portfolio manager still gets the dictionary as well.
+-            strategy_name_to_id=self.strategy_name_to_id
+-        )
++        self.portfolio_manager = None
+         
+         self.actions_to_indices = self._build_action_space()
+         self.indices_to_actions = {v: k for k, v in self.actions_to_indices.items()}
+@@ -267,7 +239,6 @@ class OptionsZeroGameEnv(gym.Env):
+             #Evaluation mode
+             self.forced_opening_strategy_name = self._cfg.get('forced_opening_strategy_name') 
+ 
+-        # --- THE DEFINITIVE FIX ---
+         # 1. First, determine the definitive number of trading days for this episode.
+         forced_length = self._cfg.get('forced_episode_length', 0)
+         if forced_length > 0:
+@@ -285,12 +256,41 @@ class OptionsZeroGameEnv(gym.Env):
+         
+         # 3. NOW, reset all managers and state variables using the correct total_steps.
+         self.price_manager.reset(self.total_steps)
+-        self.portfolio_manager.reset()
+         
+         self.current_step = 0
+         self.final_eval_reward = 0.0
+         self.illegal_action_count = 0
+         self.realized_vol_series = np.zeros(self.total_steps + 1, dtype=np.float32)
++
++        # <<< NEW: DYNAMIC IV REGIME SELECTION >>>
++        # 1. Randomly select a regime for this episode.
++        chosen_regime = random.choice(self.iv_regimes)
++        self.current_iv_regime_name = chosen_regime['name']
++        
++        # 2. Generate the skew table for this specific regime.
++        episode_skew_table = generate_dynamic_iv_skew_table(
++            max_offset=self._cfg.max_strike_offset,
++            atm_iv=chosen_regime['atm_iv'],
++            far_otm_put_iv=chosen_regime['far_otm_put_iv'],
++            far_otm_call_iv=chosen_regime['far_otm_call_iv']
++        )
++        
++        # 3. Create a new MarketRulesManager for this episode with the new skew.
++        # We need to temporarily add the skew table to the config for initialization.
++        temp_cfg = self._cfg.copy()
++        temp_cfg['iv_skew_table'] = episode_skew_table
++        self.market_rules_manager = MarketRulesManager(temp_cfg)
++
++        # 4. Now that we have a valid MarketRulesManager, create the PortfolioManager.
++        self.portfolio_manager = PortfolioManager(
++            cfg=self._cfg,
++            bs_manager=self.bs_manager,
++            market_rules_manager=self.market_rules_manager,
++            iv_calculator_func=self._get_dynamic_iv,
++            strategy_name_to_id=self.strategy_name_to_id
++        )
++        self.portfolio_manager.reset() # Reset its internal state
++
+         self.iv_bin_index = random.randint(0, len(self.market_rules_manager.iv_bins['call']['0']) - 1)
+ 
+         # 4. Get the initial observation.
+@@ -553,6 +553,7 @@ class OptionsZeroGameEnv(gym.Env):
+             'portfolio_stats': self.portfolio_manager.get_raw_portfolio_stats(self.price_manager.current_price, self.iv_bin_index),
+             'market_regime': self.price_manager.current_regime_name,
+             'total_steps_in_episode': self.total_steps,
++            'market_regime': self.current_iv_regime_name,
+             'termination_reason': termination_reason
+         }
+ 
+@@ -744,9 +745,10 @@ class OptionsZeroGameEnv(gym.Env):
+ 
+     def _build_action_space(self) -> Dict[str, int]:
+         actions = {'HOLD': 0}; i = 1
++        agent_max_open_offset = self._cfg.get('agent_max_open_offset', 10)
+ 
+         # Use the configurable max_strike_offset instead of a hardcoded range.
+-        for offset in range(-self._cfg.max_strike_offset, self._cfg.max_strike_offset + 1):
++        for offset in range(-agent_max_open_offset, agent_max_open_offset + 1):
+             sign = '+' if offset >= 0 else ''
+             # We can simplify the action name for offsets > 9, e.g., ATM+10 instead of ATM+ 10
+             offset_str = f"{sign}{offset}"
+diff --git a/zoo/options_zero_game/envs/portfolio_manager.py b/zoo/options_zero_game/envs/portfolio_manager.py
+index 79f4e94..91498b9 100644
+--- a/zoo/options_zero_game/envs/portfolio_manager.py
++++ b/zoo/options_zero_game/envs/portfolio_manager.py
+@@ -28,7 +28,7 @@ class PortfolioManager:
+         self.close_short_leg_on_profit_threshold = cfg.get('close_short_leg_on_profit_threshold', 0.0)
+         self.is_eval_mode = cfg.get('is_eval_mode', False)
+         self.brokerage_per_leg = cfg.get('brokerage_per_leg', 0.0)
+-        self.max_strike_offset = cfg['max_strike_offset']
++        self.max_strike_offset = cfg.get('max_strike_offset', 30)
+         self.receipts_for_current_step: List[dict] = []
+         self.steps_per_day = cfg.get('steps_per_day', 1)
+         self.butterfly_target_cost_pct = cfg.get('butterfly_target_cost_pct', 0.01)
+@@ -1534,7 +1534,7 @@ class PortfolioManager:
+                         {'type': 'put', 'direction': 'long', 'strike_price': strike_long_put, 'days_to_expiry': days_to_expiry},
+                         {'type': 'call', 'direction': 'long', 'strike_price': strike_long_call, 'days_to_expiry': days_to_expiry}
+                     ]
+-                    # print(f"DEBUG: Successfully found strikes for tier {tier['short']}/{tier['long']}.")
++                    #print(f"DEBUG: Successfully found strikes for tier {tier['short']}/{tier['long']}.")
+                     break # Exit the loop as we have found a valid strategy
+             
+             if not legs:

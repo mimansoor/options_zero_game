@@ -1,8 +1,11 @@
+# zoo/options_zero_game/config/options_zero_game_muzero_config.py
+import numpy as np # Make sure numpy is imported
 import copy
 from easydict import EasyDict
 
 # Import the environment to get its version and default parameters
 from zoo.options_zero_game.envs.options_zero_game_env import OptionsZeroGameEnv
+from zoo.options_zero_game.envs.utils import generate_dynamic_iv_skew_table
 
 # ==============================================================
 #                 Static Parameters
@@ -16,6 +19,46 @@ update_per_collect = 1000
 replay_ratio = 0.25
 max_env_step = int(5e7)
 reanalyze_ratio = 0.
+
+# <<< NEW: Add this powerful helper function at the top of your config file >>>
+def generate_dynamic_iv_skew_table(max_offset: int, atm_iv: float, far_otm_put_iv: float, far_otm_call_iv: float) -> dict:
+    """
+    Generates a realistic, dynamic IV skew table using a quadratic curve.
+    This creates a "volatility smirk" where OTM puts have the highest IV.
+
+    Args:
+        max_offset: The max number of strikes from ATM (e.g., 30).
+        atm_iv: The IV at the money (e.g., 20.0 for 20%).
+        far_otm_put_iv: The IV at the furthest OTM put strike (e.g., 45.0).
+        far_otm_call_iv: The IV at the furthest OTM call strike (e.g., 18.0).
+
+    Returns:
+        A dictionary in the format required by the MarketRulesManager.
+    """
+    # We solve a system of equations for a quadratic: y = ax^2 + bx + c
+    # The points are (-max_offset, far_otm_put_iv), (0, atm_iv), (max_offset, far_otm_call_iv)
+
+    A = np.array([
+        [max_offset**2, -max_offset, 1],
+        [0, 0, 1],
+        [max_offset**2, max_offset, 1]
+    ])
+    B = np.array([far_otm_put_iv, atm_iv, far_otm_call_iv])
+
+    a, b, c = np.linalg.solve(A, B)
+
+    skew_table = {'call': {}, 'put': {}}
+    for offset in range(-max_offset, max_offset + 1):
+        # Calculate the IV on the quadratic curve
+        iv = a * offset**2 + b * offset + c
+        # The table expects a [min_iv, max_iv] range, so we create a small range around the point.
+        iv_range = [max(5.0, iv - 1.0), iv + 1.0] # Ensure IV doesn't drop below 5%
+
+        # The same skew curve applies to both puts and calls
+        skew_table['call'][str(offset)] = iv_range
+        skew_table['put'][str(offset)] = iv_range
+
+    return skew_table
 
 market_regimes = [
     # Name, mu, omega, alpha, beta, overnight_vol_multiplier
@@ -163,9 +206,54 @@ class CurriculumHolder:
         return repr(self.schedule)
 
 # ==============================================================
+#           IV Regime Definitions
+# ==============================================================
+# Define different "personalities" for the volatility market.
+# The environment will randomly pick one of these for each episode.
+IV_REGIMES = [
+    {
+        'name': 'Normal Market',
+        'atm_iv': 25.0,
+        'far_otm_put_iv': 50.0,
+        'far_otm_call_iv': 20.0,
+    },
+    {
+        'name': 'High Volatility (Fear)',
+        'atm_iv': 50.0,
+        'far_otm_put_iv': 90.0,  # Put skew is very steep in a panic
+        'far_otm_call_iv': 40.0,
+    },
+    {
+        'name': 'Medium Low Volatility',
+        'atm_iv': 15.0,
+        'far_otm_put_iv': 25.0,  # Skew is much flatter in a calm market
+        'far_otm_call_iv': 12.0,
+    },
+    {
+        'name': 'Low Volatility (Complacency)',
+        'atm_iv': 10.0,
+        'far_otm_put_iv': 16.5,  # Skew is much flatter in a calm market
+        'far_otm_call_iv': 10.5,
+    },
+]
+
+# ==============================================================
 #           Main Config (The Parameters)
 # ==============================================================
 # This makes the script runnable from anywhere.
+# <<< NEW: Define high-level volatility parameters >>>
+MAX_STRIKE_OFFSET = 40
+ATM_IV = 25.0  # Volatility at the money is 25%
+FAR_OTM_PUT_IV = 50.0 # Volatility for the -30 strike put is 50%
+FAR_OTM_CALL_IV = 20.0 # Volatility for the +30 strike call is 20% (creating a "smirk")
+
+# <<< THE FIX: Generate the skew table dynamically >>>
+dynamic_iv_skew_table = generate_dynamic_iv_skew_table(
+    max_offset=MAX_STRIKE_OFFSET,
+    atm_iv=ATM_IV,
+    far_otm_put_iv=FAR_OTM_PUT_IV,
+    far_otm_call_iv=FAR_OTM_CALL_IV
+)
 
 options_zero_game_muzero_config = dict(
     # Define the main output directory for all experiments.
@@ -219,6 +307,13 @@ options_zero_game_muzero_config = dict(
         # The target net debit for a butterfly as a percentage of the ATM strike.
         # 0.01 means we are trying to pay ~1% of the stock price for the butterfly.
         butterfly_target_cost_pct=0.01, 
+
+        max_strike_offset=MAX_STRIKE_OFFSET,
+        iv_regimes=IV_REGIMES,
+        
+        # <<< NEW: Add a parameter specifically for the agent's naked opening actions >>>
+        # The agent can only OPEN naked positions within this narrower range.
+        agent_max_open_offset=10,
     ),
     policy=dict(
         model=dict(
@@ -283,36 +378,6 @@ main_config.policy.model.observation_shape = observation_shape
 main_config.policy.model.action_space_size = action_space_size
 
 # ==============================================================
-#           Automatic Training Resumption Logic
-# ==============================================================
-import os
-from easydict import EasyDict
-
-# --- Define the path to the checkpoint you want to resume from ---
-# This is now the single source of truth for resuming.
-# Let's point it to the 'ckpt_latest.pth.tar' in a specific experiment for robustness.
-# NOTE: You might want to update this path to a more general one like './best_ckpt/ckpt_best.pth.tar'
-# if that is your intended workflow.
-resume_path = os.path.join(main_config.exp_name, './best_ckpt/ckpt_best.pth.tar')
-
-# Check if the checkpoint file actually exists.
-if os.path.exists(resume_path):
-    print(f"\n--- Checkpoint found at '{resume_path}'. ---")
-    print("--- Configuring to RESUME training. ---\n")
-    
-    # If it exists, dynamically create and populate the 'learn' hook.
-    # We create empty EasyDicts to ensure the nested structure exists.
-    main_config.policy.learn = EasyDict({})
-    main_config.policy.learn.learner = EasyDict({})
-    main_config.policy.learn.learner.hook = EasyDict({})
-    main_config.policy.learn.learner.hook.load_ckpt_before_run = resume_path
-else:
-    print(f"\n--- No checkpoint found at '{resume_path}'. ---")
-    print("--- Starting a FRESH training run. ---\n")
-    # If the file does not exist, we do nothing. The 'learn' hook will not be
-    # added to the config, and the framework will start training from scratch.
-
-# ==============================================================
 #                  Create-Config (The Blueprint)
 # ==============================================================
 create_config = dict(
@@ -329,6 +394,36 @@ create_config = dict(
 create_config = EasyDict(create_config)
 
 if __name__ == "__main__":
+    # ==============================================================
+    #           Automatic Training Resumption Logic
+    # ==============================================================
+    import os
+    from easydict import EasyDict
+
+    # --- Define the path to the checkpoint you want to resume from ---
+    # This is now the single source of truth for resuming.
+    # Let's point it to the 'ckpt_latest.pth.tar' in a specific experiment for robustness.
+    # NOTE: You might want to update this path to a more general one like './best_ckpt/ckpt_best.pth.tar'
+    # if that is your intended workflow.
+    resume_path = './best_ckpt/ckpt_best.pth.tar'
+
+    # Check if the checkpoint file actually exists.
+    if os.path.exists(resume_path):
+        print(f"\n--- Checkpoint found at '{resume_path}'. ---")
+        print("--- Configuring to RESUME training. ---\n")
+        
+        # If it exists, dynamically create and populate the 'learn' hook.
+        # We create empty EasyDicts to ensure the nested structure exists.
+        main_config.policy.learn = EasyDict({})
+        main_config.policy.learn.learner = EasyDict({})
+        main_config.policy.learn.learner.hook = EasyDict({})
+        main_config.policy.learn.learner.hook.load_ckpt_before_run = resume_path
+    else:
+        print(f"\n--- No checkpoint found at '{resume_path}'. ---")
+        print("--- Starting a FRESH training run. ---\n")
+        # If the file does not exist, we do nothing. The 'learn' hook will not be
+        # added to the config, and the framework will start training from scratch.
+
     import argparse
     import time
     from lzero.entry import train_muzero
