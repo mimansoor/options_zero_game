@@ -253,14 +253,14 @@ options_zero_game_muzero_config = dict(
         collector_env_num=collector_env_num,
         evaluator_env_num=evaluator_env_num,
 
-        learn=dict(
-            learner=dict(
-                hook=dict(
-                    # Provide the full path to the checkpoint you want to resume from
-                    load_ckpt_before_run='./best_ckpt/ckpt_best.pth.tar'
-                )
-            )
-        ),
+        #learn=dict(
+        #    learner=dict(
+        #        hook=dict(
+        #            # Provide the full path to the checkpoint you want to resume from
+        #            load_ckpt_before_run='./best_ckpt/ckpt_best.pth.tar'
+        #        )
+        #    )
+        #),
     ),
 )
 main_config = EasyDict(options_zero_game_muzero_config)
@@ -281,6 +281,36 @@ del temp_env  # Clean up
 # --- Update the main_config with the correct, dynamically-determined values ---
 main_config.policy.model.observation_shape = observation_shape
 main_config.policy.model.action_space_size = action_space_size
+
+# ==============================================================
+#           Automatic Training Resumption Logic
+# ==============================================================
+import os
+from easydict import EasyDict
+
+# --- Define the path to the checkpoint you want to resume from ---
+# This is now the single source of truth for resuming.
+# Let's point it to the 'ckpt_latest.pth.tar' in a specific experiment for robustness.
+# NOTE: You might want to update this path to a more general one like './best_ckpt/ckpt_best.pth.tar'
+# if that is your intended workflow.
+resume_path = os.path.join(main_config.exp_name, './best_ckpt/ckpt_best.pth.tar')
+
+# Check if the checkpoint file actually exists.
+if os.path.exists(resume_path):
+    print(f"\n--- Checkpoint found at '{resume_path}'. ---")
+    print("--- Configuring to RESUME training. ---\n")
+    
+    # If it exists, dynamically create and populate the 'learn' hook.
+    # We create empty EasyDicts to ensure the nested structure exists.
+    main_config.policy.learn = EasyDict({})
+    main_config.policy.learn.learner = EasyDict({})
+    main_config.policy.learn.learner.hook = EasyDict({})
+    main_config.policy.learn.learner.hook.load_ckpt_before_run = resume_path
+else:
+    print(f"\n--- No checkpoint found at '{resume_path}'. ---")
+    print("--- Starting a FRESH training run. ---\n")
+    # If the file does not exist, we do nothing. The 'learn' hook will not be
+    # added to the config, and the framework will start training from scratch.
 
 # ==============================================================
 #                  Create-Config (The Blueprint)

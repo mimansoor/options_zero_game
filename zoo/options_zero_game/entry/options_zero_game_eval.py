@@ -30,6 +30,10 @@ if __name__ == "__main__":
     
     model_path = './best_ckpt/ckpt_best.pth.tar'
 
+    # This tells the DI-engine framework to put all logs and other output
+    # files for this run into a clean './evaluator' directory.
+    eval_main_config.exp_name = 'evaluator'
+
     # --- Standard Evaluation Setup ---
     eval_create_config.env.type = 'log_replay'
     eval_main_config.env.log_file_path = 'zoo/options_zero_game/visualizer-ui/build/replay_log.json'

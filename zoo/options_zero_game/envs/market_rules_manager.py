@@ -21,10 +21,15 @@ class MarketRulesManager:
                 binned_ivs[option_type][offset_str] = np.linspace(min_iv, max_iv, num_bins, dtype=np.float32) / 100.0
         return binned_ivs
 
+    def _round_to_strike_increment(self, value: float) -> float:
+        """Rounds any given value to the nearest multiple of the strike distance."""
+        if self.strike_distance <= 0: return value
+        # Using the robust and efficient "add 0.5 and truncate" method
+        return int(value / self.strike_distance + 0.5) * self.strike_distance
+
     def get_atm_price(self, current_price: float) -> float:
         """Calculates and returns the current at-the-money strike price."""
-        if self.strike_distance <= 0: return current_price
-        return int(current_price / self.strike_distance + 0.5) * self.strike_distance
+        return self._round_to_strike_increment(current_price)
 
     def get_implied_volatility(self, offset: int, option_type: str, iv_bin_index: int) -> float:
         """Gets the correct implied volatility from the skew table for a given strike offset."""

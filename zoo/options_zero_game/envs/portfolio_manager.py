@@ -87,7 +87,7 @@ class PortfolioManager:
             greeks = self.bs_manager.get_all_greeks_and_price(current_price, leg['strike_price'], days_to_expiry, vol, leg['type'] == 'call')
             current_straddle_credit += self.bs_manager.get_price_with_spread(greeks['price'], is_buy=True, bid_ask_spread_pct=self.bid_ask_spread_pct)
         
-        wing_width = self.market_rules_manager.get_atm_price(current_straddle_credit)
+        wing_width = self.market_rules_manager._round_to_strike_increment(current_straddle_credit)
         wing_width = max(wing_width, self.strike_distance * 2) # Safety net
 
         # 2. Define and price the new legs
@@ -110,28 +110,55 @@ class PortfolioManager:
 
     def convert_to_iron_condor(self, current_price: float, iv_bin_index: int, current_step: int):
         """
-        Adds long wings to a short strangle to define its risk using the
-        robust atomic transformation pattern.
+        Adds long wings to a short strangle to define its risk.
+        This superior version places the protective wings at the strangle's
+        breakeven points, creating a perfectly tailored and risk-defined condor.
         """
-        if len(self.portfolio) != 2 or len(self.portfolio) > self.max_positions - 2: return
+        # --- 1. Failsafe Checks and Setup ---
+        current_id = self.portfolio.iloc[0]['strategy_id']
+        current_name = self.id_to_strategy_name.get(current_id, '')
+        if len(self.portfolio) != 2 or 'SHORT_STRANGLE' not in current_name:
+            print(f"Warning: convert_to_iron_condor called on an invalid strategy: '{current_name}'. Aborting.")
+            return
+        if len(self.portfolio) > self.max_positions - 2: return
 
         original_legs = self.portfolio.to_dict(orient='records')
         original_creation_id = original_legs[0]['creation_id']
         days_to_expiry = original_legs[0]['days_to_expiry']
         
-        strike_long_put = self._find_strike_for_delta(-0.05, 'put', current_price, iv_bin_index, days_to_expiry)
-        strike_long_call = self._find_strike_for_delta(0.05, 'call', current_price, iv_bin_index, days_to_expiry)
-        if strike_long_put is None or strike_long_call is None: return
+        # --- 2. Calculate the Breakeven Points of the Strangle ---
+        # The total credit received when the strangle was opened.
+        initial_credit = sum(leg['entry_premium'] for leg in original_legs)
+        
+        # Identify the put and call strikes
+        put_leg = next(leg for leg in original_legs if leg['type'] == 'put')
+        call_leg = next(leg for leg in original_legs if leg['type'] == 'call')
+        
+        # Calculate the theoretical breakeven prices
+        breakeven_lower = put_leg['strike_price'] - initial_credit
+        breakeven_upper = call_leg['strike_price'] + initial_credit
+        
+        # --- 3. Find the Closest Valid Market Strikes for the Wings ---
+        # We reuse our powerful get_atm_price helper to round to the nearest valid strike.
+        strike_long_put = self.market_rules_manager.get_atm_price(breakeven_lower)
+        strike_long_call = self.market_rules_manager.get_atm_price(breakeven_upper)
+        
+        # Safety Check: Ensure wings are outside the short strikes
+        if strike_long_put >= put_leg['strike_price']:
+            strike_long_put = put_leg['strike_price'] - self.strike_distance
+        if strike_long_call <= call_leg['strike_price']:
+            strike_long_call = call_leg['strike_price'] + self.strike_distance
 
-        # 2. Define and price the new legs
+        # --- 4. Define, Price, and Assemble the Final Strategy ---
         new_wing_legs_def = [
-            {'type': 'put', 'direction': 'long', 'strike_price': strike_long_put, 'days_to_expiry': days_to_expiry, 'entry_step': current_step}, # <<< ADD entry_step
-            {'type': 'call', 'direction': 'long', 'strike_price': strike_long_call, 'days_to_expiry': days_to_expiry, 'entry_step': current_step} # <<< ADD entry_step
+            {'type': 'put', 'direction': 'long', 'strike_price': strike_long_put, 'entry_step': current_step, 'days_to_expiry': days_to_expiry},
+            {'type': 'call', 'direction': 'long', 'strike_price': strike_long_call, 'entry_step': current_step, 'days_to_expiry': days_to_expiry}
         ]
         priced_wings = self._price_legs(new_wing_legs_def, current_price, iv_bin_index)
-           
+        
         final_condor_legs = original_legs + priced_wings
         
+        # --- 5. Calculate Unified Profile and Atomically Update Portfolio ---
         pnl_profile = self._calculate_universal_risk_profile(final_condor_legs, self.realized_pnl)
         pnl_profile['strategy_id'] = self.strategy_name_to_id.get('SHORT_IRON_CONDOR')
         
@@ -140,72 +167,59 @@ class PortfolioManager:
 
     def add_hedge(self, action_name: str, current_price: float, iv_bin_index: int, current_step: int):
         """
-        Adds a protective leg to a naked position using the robust atomic
-        transformation pattern. The hedge strike is placed dynamically based on
-        whether the naked leg is in-the-money or out-of-the-money.
+        Adds a protective leg to ANY specified un-hedged leg in the portfolio.
+        This robust version works on multi-leg portfolios and correctly determines
+        the hedge direction (long vs. short).
         """
         try:
-            # --- 1. Failsafe Checks and Setup ---
+            # --- 1. Identify Target Leg and Perform Failsafe Checks ---
             position_index = int(action_name.split('_')[-1])
+            
+            if not (0 <= position_index < len(self.portfolio)): return
+            if len(self.portfolio) >= self.max_positions: return
 
-            # A hedge can only be added to a single, naked position.
-            if not (0 <= position_index < len(self.portfolio)) or len(self.portfolio) != 1:
-                return
-
-            naked_leg_dict = self.portfolio.iloc[position_index].to_dict()
-            if naked_leg_dict['is_hedged']:
-                return # Can't hedge an already-hedged position
-
-            original_creation_id = naked_leg_dict['creation_id']
-            days_to_expiry = naked_leg_dict['days_to_expiry']
-            hedge_type = naked_leg_dict['type']
-            naked_strike = naked_leg_dict['strike_price']
+            naked_leg_to_hedge = self.portfolio.iloc[position_index]
+            if naked_leg_to_hedge['is_hedged']: return
+            
+            # --- 2. Correctly Determine Hedge Characteristics ---
+            hedge_type = naked_leg_to_hedge['type']
+            days_to_expiry = naked_leg_to_hedge['days_to_expiry']
+            
+            hedge_direction = 'short' if naked_leg_to_hedge['direction'] == 'long' else 'long'
+            
+            # --- 3. Dynamic Hedge Strike Placement (This logic is correct) ---
+            naked_strike = naked_leg_to_hedge['strike_price']
             atm_strike = self.market_rules_manager.get_atm_price(current_price)
-
-            # --- 2. Dynamic Hedge Strike Placement Logic ---
+            # ... [Same dynamic logic as before to calculate hedge_strike] ...
             is_itm = (hedge_type == 'call' and current_price > naked_strike) or \
                      (hedge_type == 'put' and current_price < naked_strike)
-
-            hedge_strike = 0.0
             if is_itm:
-                # ITM Rule: The position is a loser. Place hedge defensively near the current price.
                 hedge_strike = atm_strike + self.strike_distance if hedge_type == 'call' else atm_strike - self.strike_distance
             else:
-                # OTM Rule: The position is a winner/neutral. Place hedge at the breakeven point.
-                entry_premium = naked_leg_dict['entry_premium']
+                entry_premium = naked_leg_to_hedge['entry_premium']
                 breakeven_price = naked_strike + entry_premium if hedge_type == 'call' else naked_strike - entry_premium
-                
                 closest_valid_strike = self.market_rules_manager.get_atm_price(breakeven_price)
-                
-                # Safety fallback: ensure hedge is at least one strike away.
-                if closest_valid_strike == naked_strike:
-                    hedge_strike = (naked_strike + self.strike_distance if hedge_type == 'call' 
-                                    else naked_strike - self.strike_distance)
-                else:
-                    hedge_strike = closest_valid_strike
+                hedge_strike = closest_valid_strike if closest_valid_strike != naked_strike else \
+                               (naked_strike + self.strike_distance if hedge_type == 'call' else naked_strike - self.strike_distance)
 
-            # --- 3. Define, Price, and Assemble the Final Strategy ---
-            # Define the new long leg, ensuring it has all necessary keys.
+            # --- 4. Define, Price, and Assemble the Final Strategy ---
             hedge_leg_def = [{
-                'type': hedge_type,
-                'direction': 'long',
-                'strike_price': hedge_strike,
-                'days_to_expiry': days_to_expiry,
-                'entry_step': current_step  # Prevents the IntCastingNaNError
+                'type': hedge_type, 'direction': hedge_direction, 'strike_price': hedge_strike,
+                'days_to_expiry': days_to_expiry, 'entry_step': current_step
             }]
             priced_hedge_leg = self._price_legs(hedge_leg_def, current_price, iv_bin_index)
             
-            # The final state is the original naked leg plus the new hedge leg.
-            final_spread_legs = [naked_leg_dict] + priced_hedge_leg
+            original_legs = self.portfolio.to_dict(orient='records')
+            final_strategy_legs = original_legs + priced_hedge_leg
             
-            # --- 4. Calculate the Unified Risk Profile for the New Spread ---
-            new_strategy_name = f"BULL_{hedge_type.upper()}_SPREAD" if hedge_type == 'put' else f"BEAR_{hedge_type.upper()}_SPREAD"
-            pnl_profile = self._calculate_universal_risk_profile(final_spread_legs, self.realized_pnl)
-            pnl_profile['strategy_id'] = self.strategy_name_to_id.get(new_strategy_name, -2) # -2 for "Custom Hedged"
+            # --- 5. Atomically Replace the Old Position with the New, Unified One ---
+            original_creation_id = original_legs[0]['creation_id']
+            pnl_profile = self._calculate_universal_risk_profile(final_strategy_legs, self.realized_pnl)
+            # Give it a generic "custom" ID, as it's now a complex, non-standard position
+            pnl_profile['strategy_id'] = self.strategy_name_to_id.get("CUSTOM_HEDGED", -2)
             
-            # --- 5. Atomically Replace the Old Position with the New One ---
             self.portfolio = self.portfolio[self.portfolio['creation_id'] != original_creation_id].reset_index(drop=True)
-            self._execute_trades(final_spread_legs, pnl_profile)
+            self._execute_trades(final_strategy_legs, pnl_profile)
 
         except (ValueError, IndexError) as e:
             print(f"Warning: Could not parse HEDGE action '{action_name}'. Error: {e}")
@@ -261,6 +275,117 @@ class PortfolioManager:
         if not self.portfolio.empty:
             new_straddle_id = self.strategy_name_to_id.get('SHORT_STRADDLE')
             self.portfolio['strategy_id'] = new_straddle_id
+
+    def convert_to_bull_put_spread(self, current_price: float, iv_bin_index: int, current_step: int):
+        """
+        Converts an Iron Condor/Fly into a Bull Put Spread by closing the call legs.
+        """
+        # --- 1. Failsafe Checks ---
+        current_id = self.portfolio.iloc[0]['strategy_id']
+        current_name = self.id_to_strategy_name.get(current_id, '')
+        if len(self.portfolio) != 4 or current_name not in ['SHORT_IRON_CONDOR', 'SHORT_IRON_FLY']:
+            print(f"Warning: convert_to_bull_put_spread called on an invalid strategy: '{current_name}'. Aborting.")
+            return
+
+        # --- 2. Identify and Close the Call Legs ---
+        indices_to_close = self.portfolio[self.portfolio['type'] == 'call'].index
+        for index in sorted(indices_to_close, reverse=True):
+            self.close_position(index, current_price, iv_bin_index)
+
+        # --- 3. Final State Update ---
+        if not self.portfolio.empty:
+            new_spread_id = self.strategy_name_to_id.get('BULL_PUT_SPREAD')
+            self.portfolio['strategy_id'] = new_spread_id
+            self.post_action_portfolio = self.portfolio.copy()
+
+    def convert_to_bear_call_spread(self, current_price: float, iv_bin_index: int, current_step: int):
+        """
+        Converts an Iron Condor/Fly into a Bear Call Spread by closing the put legs.
+        """
+        # --- 1. Failsafe Checks ---
+        current_id = self.portfolio.iloc[0]['strategy_id']
+        current_name = self.id_to_strategy_name.get(current_id, '')
+        if len(self.portfolio) != 4 or current_name not in ['SHORT_IRON_CONDOR', 'SHORT_IRON_FLY']:
+            print(f"Warning: convert_to_bear_call_spread called on an invalid strategy: '{current_name}'. Aborting.")
+            return
+
+        # --- 2. Identify and Close the Put Legs ---
+        indices_to_close = self.portfolio[self.portfolio['type'] == 'put'].index
+        for index in sorted(indices_to_close, reverse=True):
+            self.close_position(index, current_price, iv_bin_index)
+
+        # --- 3. Final State Update ---
+        if not self.portfolio.empty:
+            new_spread_id = self.strategy_name_to_id.get('BEAR_CALL_SPREAD')
+            self.portfolio['strategy_id'] = new_spread_id
+            self.post_action_portfolio = self.portfolio.copy()
+
+    def convert_call_fly_to_vertical(self, new_spread_type: str, current_price: float, iv_bin_index: int, current_step: int):
+        """
+        Decomposes a Call Butterfly into a single vertical spread by closing the other half.
+        """
+        # --- 1. Failsafe Checks ---
+        if len(self.portfolio) != 4: return
+        
+        # --- 2. Identify the Legs to Close ---
+        short_legs = self.portfolio[self.portfolio['direction'] == 'short']
+        long_legs = self.portfolio[self.portfolio['direction'] == 'long']
+
+        # The two legs to close will be one short leg and one long wing.
+        short_leg_to_close = short_legs.iloc[0] # Take the first short leg at the body
+        long_leg_to_close = None
+
+        if new_spread_type == 'BULL_CALL_SPREAD':
+            # We want to keep the bull spread, so we close the bear spread part.
+            # The bear spread consists of one short leg and the HIGHEST strike long wing.
+            long_leg_to_close = long_legs.loc[long_legs['strike_price'].idxmax()]
+        elif new_spread_type == 'BEAR_CALL_SPREAD':
+            # We want to keep the bear spread, so we close the bull spread part.
+            # The bull spread consists of one short leg and the LOWEST strike long wing.
+            long_leg_to_close = long_legs.loc[long_legs['strike_price'].idxmin()]
+        else: return # Invalid new spread type
+
+        indices_to_close = [short_leg_to_close.name, long_leg_to_close.name]
+
+        # --- 3. Close the Identified Legs ---
+        for index in sorted(indices_to_close, reverse=True):
+            self.close_position(index, current_price, iv_bin_index)
+        
+        # --- 4. Final State Update ---
+        if not self.portfolio.empty:
+            new_spread_id = self.strategy_name_to_id.get(new_spread_type)
+            self.portfolio['strategy_id'] = new_spread_id
+            self.post_action_portfolio = self.portfolio.copy()
+
+    def convert_put_fly_to_vertical(self, new_spread_type: str, current_price: float, iv_bin_index: int, current_step: int):
+        """
+        Decomposes a Put Butterfly into a single vertical spread.
+        """
+        if len(self.portfolio) != 4: return
+
+        short_legs = self.portfolio[self.portfolio['direction'] == 'short']
+        long_legs = self.portfolio[self.portfolio['direction'] == 'long']
+        
+        short_leg_to_close = short_legs.iloc[0]
+        long_leg_to_close = None
+
+        if new_spread_type == 'BEAR_PUT_SPREAD':
+            # Keep the bear spread, close the bull spread part (one short + lowest long wing).
+            long_leg_to_close = long_legs.loc[long_legs['strike_price'].idxmin()]
+        elif new_spread_type == 'BULL_PUT_SPREAD':
+            # Keep the bull spread, close the bear spread part (one short + highest long wing).
+            long_leg_to_close = long_legs.loc[long_legs['strike_price'].idxmax()]
+        else: return
+
+        indices_to_close = [short_leg_to_close.name, long_leg_to_close.name]
+
+        for index in sorted(indices_to_close, reverse=True):
+            self.close_position(index, current_price, iv_bin_index)
+
+        if not self.portfolio.empty:
+            new_spread_id = self.strategy_name_to_id.get(new_spread_type)
+            self.portfolio['strategy_id'] = new_spread_id
+            self.post_action_portfolio = self.portfolio.copy()
 
     # ==============================================================================
     #                      DYNAMIC DELTA-NEUTRAL ADJUSTMENT

@@ -764,6 +764,10 @@ class OptionsZeroGameEnv(gym.Env):
         actions['CONVERT_TO_IRON_FLY'] = i; i+=1
         actions['CONVERT_TO_STRANGLE'] = i; i+=1
         actions['CONVERT_TO_STRADDLE'] = i; i+=1
+        actions['CONVERT_TO_BULL_CALL_SPREAD'] = i; i+=1
+        actions['CONVERT_TO_BEAR_CALL_SPREAD'] = i; i+=1
+        actions['CONVERT_TO_BULL_PUT_SPREAD'] = i; i+=1
+        actions['CONVERT_TO_BEAR_PUT_SPREAD'] = i; i+=1
 
         actions['ADJUST_TO_DELTA_NEUTRAL'] = i; i+=1
 
@@ -887,6 +891,8 @@ class OptionsZeroGameEnv(gym.Env):
             straddle_id = s_map.get('SHORT_STRADDLE')
             condor_id = s_map.get('SHORT_IRON_CONDOR')
             fly_id = s_map.get('SHORT_IRON_FLY')
+            call_fly_ids = {s_map.get('LONG_CALL_FLY_1'), s_map.get('SHORT_CALL_FLY_1'), s_map.get('LONG_CALL_FLY_2'), s_map.get('SHORT_CALL_FLY_2')}
+            put_fly_ids = {s_map.get('LONG_PUT_FLY_1'), s_map.get('SHORT_PUT_FLY_1'), s_map.get('LONG_PUT_FLY_2'), s_map.get('SHORT_PUT_FLY_2')}
 
             # Rule: Strangle -> Iron Condor
             if current_strategy_id in strangle_ids:
@@ -905,6 +911,35 @@ class OptionsZeroGameEnv(gym.Env):
             # Rule: Iron Fly -> Straddle
             if current_strategy_id == fly_id:
                 self._set_if_exists(action_mask, 'CONVERT_TO_STRADDLE')
+
+            # --- NEW: Logic for converting Condors/Flies to Verticals ---
+            if current_strategy_id == condor_id or current_strategy_id == fly_id:
+                put_legs = portfolio_df[portfolio_df['type'] == 'put']
+                call_legs = portfolio_df[portfolio_df['type'] == 'call']
+
+                if not put_legs.empty and not call_legs.empty:
+                    # Find the midpoint of each spread
+                    put_spread_midpoint = put_legs['strike_price'].mean()
+                    call_spread_midpoint = call_legs['strike_price'].mean()
+                    
+                    current_price = self.price_manager.current_price
+                    
+                    # If price is closer to the put side, the call side is the winner to close
+                    if abs(current_price - put_spread_midpoint) < abs(current_price - call_spread_midpoint):
+                        self._set_if_exists(action_mask, 'CONVERT_TO_BULL_PUT_SPREAD')
+                    else: # Otherwise, the put side is the winner to close
+                        self._set_if_exists(action_mask, 'CONVERT_TO_BEAR_CALL_SPREAD')
+
+            # <<< NEW: Logic for converting Butterflies to Verticals >>>
+            elif current_strategy_id in call_fly_ids:
+                # A call butterfly can be decomposed into a Bull Call or a Bear Call spread.
+                self._set_if_exists(action_mask, 'CONVERT_TO_BULL_CALL_SPREAD')
+                self._set_if_exists(action_mask, 'CONVERT_TO_BEAR_CALL_SPREAD')
+
+            elif current_strategy_id in put_fly_ids:
+                # A put butterfly can be decomposed into a Bull Put or a Bear Put spread.
+                self._set_if_exists(action_mask, 'CONVERT_TO_BULL_PUT_SPREAD')
+                self._set_if_exists(action_mask, 'CONVERT_TO_BEAR_PUT_SPREAD')
         
         return action_mask
 
