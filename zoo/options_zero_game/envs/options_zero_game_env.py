@@ -112,7 +112,7 @@ class OptionsZeroGameEnv(gym.Env):
         stop_loss_multiple_of_cost=3.0, # NEW: Added stop loss multiple
         use_stop_loss=True,
         forced_opening_strategy_name=None,
-        disable_opening_curriculum=False,
+        disable_opening_curriculum=True,
         
         # Agent/Framework Config
         ignore_legal_actions=True,
@@ -166,7 +166,7 @@ class OptionsZeroGameEnv(gym.Env):
             # --- NEW MARKET EXPECTATION FEATURE ---
             'EXPECTED_MOVE_NORM': 19, 'PORTFOLIO_PROFIT_FACTOR_NORM': 20,
             # --- Realized and MtM Highest and Lowest Profit/Loss
-            #'HIGHEST_REALIZED_PROFIT_NORM': 21, 'LOWEST_REALIZED_LOSS_NORM': 22, 'MTM_PNL_HIGH_NORM': 23, 'MTM_PNL_LOW_NORM': 24,
+            'MTM_PNL_HIGH_NORM': 21, 'MTM_PNL_LOW_NORM': 22,
         }
         self.POS_IDX = {
             'IS_OCCUPIED': 0, 'TYPE_NORM': 1, 'DIRECTION_NORM': 2, 'STRIKE_DIST_NORM': 3, 'DAYS_HELD_NORM': 4,
@@ -212,6 +212,8 @@ class OptionsZeroGameEnv(gym.Env):
         # We'll use the episode count as a proxy.
         self._episode_count = 0 
         self.volatility_premium_abs = cfg.get('volatility_premium_abs', 0.05)
+        self.min_pop_threshold = cfg.get('min_pop_threshold', 0.25)
+        self.low_pop_penalty = cfg.get('low_pop_opening_penalty', 0.0)
 
     def seed(self, seed: int, dynamic_seed: int = None) -> List[int]:
         self.np_random, seed = seeding.np_random(seed)
@@ -453,7 +455,6 @@ class OptionsZeroGameEnv(gym.Env):
 
         # --- Calculate Reward ---
         equity_after = self.portfolio_manager.get_current_equity(self.price_manager.current_price, self.iv_bin_index)
-        # <<< NEW: Update the MtM water marks every single step >>>
         shaped_reward, raw_reward = self._calculate_shaped_reward(equity_before, equity_after)
         self.final_eval_reward += raw_reward
 
@@ -600,15 +601,10 @@ class OptionsZeroGameEnv(gym.Env):
         vec[self.OBS_IDX['PORTFOLIO_PROFIT_FACTOR_NORM']] = math.tanh(stats['profit_factor'] / 10.0)
 
         # Normalize by initial cash for a stable representation
-        #highest_profit_norm = math.tanh(self.portfolio_manager.highest_realized_profit / self.initial_cash)
-        #lowest_loss_norm = math.tanh(self.portfolio_manager.lowest_real_loss / self.initial_cash)
-        #vec[self.OBS_IDX['HIGHEST_REALIZED_PROFIT_NORM']] = highest_realized_profit
-        #vec[self.OBS_IDX['LOWEST_REALIZED_LOSS_NORM']] = lowest_loss_norm
-        # <<< NEW: Fill the new MtM observation values >>>
-        #high_water_mark_norm = math.tanh(self.portfolio_manager.mtm_pnl_high / self.initial_cash)
-        #max_drawdown_norm = math.tanh(self.portfolio_manager.mtm_pnl_low / self.initial_cash)
-        #vec[self.OBS_IDX['MTM_PNL_HIGH_NORM']] = high_water_mark_norm
-        #vec[self.OBS_IDX['MTM_PNL_LOW_NORM']] = max_drawdown_norm
+        high_water_mark_norm = math.tanh(self.portfolio_manager.mtm_pnl_high / self._cfg.initial_cash)
+        max_drawdown_norm = math.tanh(self.portfolio_manager.mtm_pnl_low / self._cfg.initial_cash)
+        vec[self.OBS_IDX['MTM_PNL_HIGH_NORM']] = high_water_mark_norm
+        vec[self.OBS_IDX['MTM_PNL_LOW_NORM']] = max_drawdown_norm
         
 
         # Per-Position State
@@ -685,6 +681,11 @@ class OptionsZeroGameEnv(gym.Env):
                 for d in ['LONG', 'SHORT']:
                     actions[f'OPEN_{d}_{t}_ATM{offset_str}'] = i; i+=1
 
+        actions['OPEN_BULL_CALL_SPREAD'] = i; i+=1
+        actions['OPEN_BEAR_CALL_SPREAD'] = i; i+=1
+        actions['OPEN_BULL_PUT_SPREAD'] = i; i+=1
+        actions['OPEN_BEAR_PUT_SPREAD'] = i; i+=1
+
         for d in ['LONG', 'SHORT']:
             actions[f'OPEN_{d}_STRADDLE_ATM'] = i; i+=1
 
@@ -696,11 +697,6 @@ class OptionsZeroGameEnv(gym.Env):
         for delta in range(15, 31, 5): # This creates [15, 20, 25, 30]
             actions[f'OPEN_LONG_STRANGLE_DELTA_{delta}'] = i; i+=1
             actions[f'OPEN_SHORT_STRANGLE_DELTA_{delta}'] = i; i+=1
-
-        for w in [1, 2]:
-            for t in ['CALL', 'PUT']:
-                for d in ['LONG', 'SHORT']:
-                    actions[f'OPEN_{d}_VERTICAL_{t}_{w}'] = i; i+=1
 
         for d in ['LONG', 'SHORT']:
             actions[f'OPEN_{d}_IRON_FLY'] = i; i+=1
@@ -904,7 +900,7 @@ class OptionsZeroGameEnv(gym.Env):
             if 'CONDOR' in name or 'FLY' in name:
                 if available_slots >= 4:
                     final_mask[index] = 1
-            elif 'STRADDLE' in name or 'STRANGLE' in name or 'VERTICAL' in name:
+            elif 'STRADDLE' in name or 'STRANGLE' in name or 'SPREAD' in name:
                 if available_slots >= 2:
                     final_mask[index] = 1
             elif 'ATM' in name:
@@ -918,7 +914,7 @@ class OptionsZeroGameEnv(gym.Env):
             "SINGLE_LEG": lambda name: 'ATM' in name and 'STRADDLE' not in name and 'STRANGLE' not in name,
             "STRADDLE": lambda name: 'STRADDLE' in name,
             "STRANGLE": lambda name: 'STRANGLE' in name,
-            "VERTICAL": lambda name: 'VERTICAL' in name,
+            "SPREAD": lambda name: 'SPREAD' in name,
             "IRON_FLY_CONDOR": lambda name: 'IRON' in name,
             "BUTTERFLY": lambda name: 'FLY' in name and 'IRON' not in name,
         }

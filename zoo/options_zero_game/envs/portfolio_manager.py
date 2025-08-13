@@ -66,6 +66,32 @@ class PortfolioManager:
 
     # --- Public Methods (called by the main environment) ---
 
+    def open_best_available_vertical(self, action_name: str, current_price: float, iv_bin_index: int, current_step: int, days_to_expiry: float):
+        """
+        Public method to execute the opening of a vertical spread using the tiered solver.
+        """
+        # e.g., "OPEN_BULL_CALL_SPREAD" -> "BULL_CALL", "SPREAD"
+        parts = action_name.replace('OPEN_', '').split('_')
+        direction_name = '_'.join(parts[0:2]) # e.g., "BULL_CALL"
+        option_type = parts[1].lower()        # e.g., "call"
+
+        found_legs = self._find_best_available_spread(
+            option_type, direction_name, current_price, iv_bin_index, days_to_expiry
+        )
+        
+        if found_legs:
+            # Add entry_step to the found legs
+            for leg in found_legs:
+                leg['entry_step'] = current_step
+
+            # Get the full risk profile and execute the trade
+            pnl_profile = self._calculate_universal_risk_profile(found_legs, self.realized_pnl)
+            pnl_profile['strategy_id'] = self.strategy_name_to_id.get(action_name, -1) # Use the original action name for the ID
+            self._execute_trades(found_legs, pnl_profile)
+
+        # If found_legs is None, the action is effectively illegal for this step, and we do nothing.
+        return
+
     def update_mtm_water_marks(self, current_total_pnl: float):
         """
         Updates the high-water mark and low-water mark (max drawdown) for the
@@ -152,14 +178,14 @@ class PortfolioManager:
         # Route by most complex/specific keywords first to avoid misrouting
         if 'DELTA' in action_name and 'STRANGLE' in action_name:
             self._open_delta_strangle(action_name, current_price, iv_bin_index, current_step, days_to_expiry)
+        elif 'SPREAD' in action_name:
+            self.open_best_available_vertical(action_name, current_price, iv_bin_index, current_step, days_to_expiry)
         elif 'FLY' in action_name and 'IRON' not in action_name:
             self._open_butterfly(action_name, current_price, iv_bin_index, current_step, days_to_expiry)
         elif 'IRON_CONDOR' in action_name:
             self._open_iron_condor(action_name, current_price, iv_bin_index, current_step, days_to_expiry)
         elif 'IRON_FLY' in action_name:
             self._open_iron_fly(action_name, current_price, iv_bin_index, current_step, days_to_expiry)
-        elif 'VERTICAL' in action_name:
-            self._open_vertical_spread(action_name, current_price, iv_bin_index, current_step, days_to_expiry)
         elif 'STRANGLE' in action_name:
             self._open_strangle(action_name, current_price, iv_bin_index, current_step, days_to_expiry)
         elif 'STRADDLE' in action_name:
@@ -1261,40 +1287,90 @@ class PortfolioManager:
         pnl['strategy_id'] = self.strategy_name_to_id.get(canonical_strategy_name, -1)
         self._execute_trades(legs, pnl)
 
-    def _open_vertical_spread(self, action_name: str, current_price: float, iv_bin_index: int, current_step: int, days_to_expiry: float):
-        # --- Defensive Assertion ---
-        assert len(self.portfolio) <= self.max_positions - 2, "Illegal attempt to open a Vertical Spread."
-        """Opens a two-leg vertical spread. (CORRECTED)"""
-        if len(self.portfolio) > self.max_positions - 2: return
-        
-        parts = action_name.split('_')
-        direction, option_type, width_str = parts[1], parts[3].lower(), parts[4]
-        width_in_price = int(width_str) * 2 * self.strike_distance
-        
-        atm_price = self.market_rules_manager.get_atm_price(current_price)
-        strike1 = atm_price
-        strike2 = atm_price + width_in_price if option_type == 'call' else atm_price - width_in_price
+    def _find_best_available_spread(
+        self, option_type: str, direction_name: str,
+        current_price: float, iv_bin_index: int, days_to_expiry: float
+    ) -> List[Dict] or None:
+        """
+        A tiered solver that searches for the best possible vertical spread.
+        It starts by looking for a high R:R (e.g., 1:3) and falls back to lower
+        ratios if the ideal is not available in the market.
 
-        legs = []
-        if direction == 'LONG':
-            legs.append({'type': option_type, 'direction': 'long', 'strike_price': strike1})
-            legs.append({'type': option_type, 'direction': 'short', 'strike_price': strike2})
-        else: # SHORT
-            legs.append({'type': option_type, 'direction': 'short', 'strike_price': strike1})
-            legs.append({'type': option_type, 'direction': 'long', 'strike_price': strike2})
+        Args:
+            option_type (str): 'call' or 'put'.
+            direction_name (str): 'BULL_CALL', 'BEAR_CALL', 'BULL_PUT', or 'BEAR_PUT'.
+            ... (other args)
 
-        for leg in legs:
-            leg['entry_step'] = current_step
-            leg['days_to_expiry'] = days_to_expiry
+        Returns:
+            A list of the two leg dictionaries if a valid spread is found, otherwise None.
+        """
+        # --- 1. Define the prioritized search list and spread characteristics ---
+        target_ratios = [3.0, 2.0, 1.0]  # Try for 1:3, then 1:2, then 1:1
+        tolerance = 0.3                  # Allow R:R to be within 0.3 of the target
         
-        legs = self._price_legs(legs, current_price, iv_bin_index)
+        is_credit_spread = 'BULL_PUT' in direction_name or 'BEAR_CALL' in direction_name
         
-        # --- THE FIX ---
-        canonical_strategy_name = action_name.replace('OPEN_', '')
-        
-        pnl  = self._calculate_universal_risk_profile(legs)
-        pnl['strategy_id'] = self.strategy_name_to_id.get(canonical_strategy_name, -1)
-        self._execute_trades(legs, pnl)
+        # --- 2. Loop through the prioritized targets ---
+        for target_rr in target_ratios:
+            # --- 3. Setup the search for this target ratio ---
+            atm_strike = self.market_rules_manager.get_atm_price(current_price)
+            
+            # Anchor leg is the one at the money
+            anchor_direction = 'short' if is_credit_spread else 'long'
+            anchor_leg = {'type': option_type, 'direction': anchor_direction, 'strike_price': atm_strike}
+
+            # Search outwards from the anchor for the wing leg
+            max_search_strikes = 20  # Widen search to increase chance of finding a match
+            for i in range(1, max_search_strikes + 1):
+                wing_direction = 'long' if is_credit_spread else 'short'
+                strike_offset = i * self.strike_distance
+                
+                # Determine the strike for the wing based on the strategy type
+                if direction_name in ['BULL_CALL', 'BEAR_CALL']: # Call spreads
+                    wing_strike = atm_strike + strike_offset
+                else: # Put spreads
+                    wing_strike = atm_strike - strike_offset
+                
+                if wing_strike <= 0: continue
+
+                wing_leg = {'type': option_type, 'direction': wing_direction, 'strike_price': wing_strike}
+                
+                # --- 4. Price the candidate spread and calculate its R:R ---
+                # Create copies to avoid modifying the originals in the loop
+                candidate_legs_def = [anchor_leg.copy(), wing_leg.copy()]
+                for leg in candidate_legs_def: leg['days_to_expiry'] = days_to_expiry
+
+                # Price the legs to get their entry premiums
+                priced_legs = self._price_legs(candidate_legs_def, current_price, iv_bin_index)
+                
+                # Calculate the net premium received or paid for the spread
+                net_premium = sum(
+                    leg['entry_premium'] * (1 if leg['direction'] == 'long' else -1)
+                    for leg in priced_legs
+                )
+                
+                spread_width = abs(anchor_leg['strike_price'] - wing_leg['strike_price'])
+                
+                # Calculate Max Profit and Max Loss based on spread type
+                if is_credit_spread:
+                    max_profit = abs(net_premium)  # Credit received
+                    max_loss = spread_width - max_profit
+                else:  # Debit Spread
+                    max_loss = abs(net_premium)  # Debit paid
+                    max_profit = spread_width - max_loss
+                    
+                if max_loss < 1e-6: continue  # Avoid division by zero for riskless trades
+                
+                current_rr = max_profit / max_loss
+                
+                # --- 5. Check if we found a match ---
+                if abs(current_rr - target_rr) < tolerance:
+                    # SUCCESS: We found a spread that meets the current tier's R:R target.
+                    # Return the fully priced legs immediately.
+                    return priced_legs
+
+        # FAILURE: If the outer loop completes, no spread was found that matched any of the targets.
+        return None
 
     def _open_butterfly(self, action_name: str, current_price: float, iv_bin_index: int, current_step: int, days_to_expiry: float):
         # --- Defensive Assertion ---

@@ -67,11 +67,6 @@ strategy_name_to_id = {
     'LONG_STRANGLE_1': 6, 'SHORT_STRANGLE_1': 7,
     'LONG_STRANGLE_2': 8, 'SHORT_STRANGLE_2': 9,
 
-    'LONG_VERTICAL_CALL_1': 14, 'SHORT_VERTICAL_CALL_1': 15,
-    'LONG_VERTICAL_CALL_2': 16, 'SHORT_VERTICAL_CALL_2': 17,
-    'LONG_VERTICAL_PUT_1': 18, 'SHORT_VERTICAL_PUT_1': 19,
-    'LONG_VERTICAL_PUT_2': 20, 'SHORT_VERTICAL_PUT_2': 21,
-
     'LONG_CALL_FLY_1': 22, 'SHORT_CALL_FLY_1': 23,
     'LONG_PUT_FLY_1': 24, 'SHORT_PUT_FLY_1': 25,
     'LONG_CALL_FLY_2': 26, 'SHORT_CALL_FLY_2': 27,
@@ -85,6 +80,13 @@ for delta in range(15, 31, 5):
     next_id += 1
     strategy_name_to_id[f'SHORT_STRANGLE_DELTA_{delta}'] = next_id
     next_id += 1
+
+# Note: These names must EXACTLY match the action names from your command line and env.
+# We map the descriptive names to their simpler internal representations.
+strategy_name_to_id['OPEN_BULL_CALL_SPREAD'] = next_id; next_id += 1
+strategy_name_to_id['OPEN_BEAR_CALL_SPREAD'] = next_id; next_id += 1
+strategy_name_to_id['OPEN_BULL_PUT_SPREAD'] = next_id; next_id += 1
+strategy_name_to_id['OPEN_BEAR_PUT_SPREAD'] = next_id; next_id += 1
 
 # ==============================================================
 #                 Curriculum Schedule
@@ -130,12 +132,24 @@ TRAINING_CURRICULUM = {
     int(16e6): 'OPEN_LONG_CALL_ATM+0',
 
     # === Phase 10: Learning to BUY Spreads ===
+    # Goal: Learn to make a risk-defined directional bet by buying a Bull Call Spread.
+    int(18e6): 'OPEN_BULL_CALL_SPREAD',
+
+    # === Phase 11: Learning to BUY Spreads ===
+    # Goal: Learn to make a risk-defined directional bet by buying a Bear Call Spread.
+    int(20e6): 'OPEN_BEAR_CALL_SPREAD',
+
+    # === Phase 12: Learning to BUY Spreads ===
+    # Goal: Learn to make a risk-defined directional bet by buying a Bull Put Spread.
+    int(22e6): 'OPEN_BULL_PUT_SPREAD',
+
+    # === Phase 13: Learning to BUY Spreads ===
     # Goal: Learn to make a risk-defined directional bet by buying a Bear Put Spread.
-    int(18e6): 'OPEN_LONG_VERTICAL_PUT_1',
+    int(22e6): 'OPEN_BEAR_PUT_SPREAD',
 
     # === Final Phase: Integration and Agent Autonomy ===
     # Goal: Allow the agent to use any of its learned strategies to maximize reward.
-    int(20e6): 'ALL'
+    int(24e6): 'ALL'
 }
 
 # This class will "hide" the integer-keyed dictionary from EasyDict.
