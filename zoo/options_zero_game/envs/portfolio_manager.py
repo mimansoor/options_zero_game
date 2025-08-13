@@ -2,7 +2,7 @@
 import pandas as pd
 import numpy as np
 import math
-from typing import Dict, List, Any, Tuple
+from typing import Dict, List, Any, Tuple, Callable
 from .black_scholes_manager import BlackScholesManager, _numba_cdf
 from .market_rules_manager import MarketRulesManager
 
@@ -12,7 +12,9 @@ class PortfolioManager:
     PnL calculations, and constructing the portfolio observation state.
     This class is stateful and is the heart of the trading logic.
     """
-    def __init__(self, cfg: Dict, bs_manager: BlackScholesManager, market_rules_manager: MarketRulesManager):
+    def __init__(self, cfg: Dict, bs_manager: BlackScholesManager, 
+                 market_rules_manager: MarketRulesManager, 
+                 iv_calculator_func: Callable):
         # Config
         self.initial_cash = cfg['initial_cash']
         self.lot_size = cfg['lot_size']
@@ -32,6 +34,8 @@ class PortfolioManager:
         # Managers
         self.bs_manager = bs_manager
         self.market_rules_manager = market_rules_manager
+
+        self.iv_calculator = iv_calculator_func
 
         # State variables
         self.portfolio = pd.DataFrame()
@@ -102,7 +106,7 @@ class PortfolioManager:
             direction_multiplier = 1 if pos['direction'] == 'long' else -1
             is_call = pos['type'] == 'call'
             offset = round((pos['strike_price'] - atm_price) / self.strike_distance)
-            vol = self.market_rules_manager.get_implied_volatility(offset, pos['type'], iv_bin_index)
+            vol = self.iv_calculator(offset, pos['type'])
             leg_greeks = self.bs_manager.get_all_greeks_and_price(current_price, pos['strike_price'], pos['days_to_expiry'], vol, is_call)
 
             total_delta += leg_greeks['delta'] * self.lot_size * direction_multiplier
@@ -176,7 +180,7 @@ class PortfolioManager:
             direction_multiplier = 1.0 if pos['direction'] == 'long' else -1.0
             
             offset = round((pos['strike_price'] - atm_price) / self.strike_distance)
-            vol = self.market_rules_manager.get_implied_volatility(offset, pos['type'], iv_bin_index)
+            vol = self.iv_calculator(offset, pos['type'])
             greeks = self.bs_manager.get_all_greeks_and_price(current_price, pos['strike_price'], pos['days_to_expiry'], vol, is_call)
             
             current_pos_idx = start_idx + i * state_size
@@ -210,7 +214,7 @@ class PortfolioManager:
             is_call = row['type'] == 'call'
             atm_price = self.market_rules_manager.get_atm_price(current_price)
             offset = round((row['strike_price'] - atm_price) / self.strike_distance)
-            vol = self.market_rules_manager.get_implied_volatility(offset, row['type'], iv_bin_index)
+            vol = self.iv_calculator(offset, row['type'])
             greeks = self.bs_manager.get_all_greeks_and_price(current_price, row['strike_price'], row['days_to_expiry'], vol, is_call)
             
             current_premium = self.bs_manager.get_price_with_spread(greeks['price'], row['direction'] == 'short', self.bid_ask_spread_pct)
@@ -261,7 +265,7 @@ class PortfolioManager:
         is_call = pos_to_close['type'] == 'call'
         atm_price = self.market_rules_manager.get_atm_price(current_price)
         offset = round((pos_to_close['strike_price'] - atm_price) / self.strike_distance)
-        vol = self.market_rules_manager.get_implied_volatility(offset, pos_to_close['type'], iv_bin_index)
+        vol = self.iv_calculator(offset, pos_to_close['type'])
         greeks = self.bs_manager.get_all_greeks_and_price(current_price, pos_to_close['strike_price'], pos_to_close['days_to_expiry'], vol, is_call)
         
         is_short = pos_to_close['direction'] == 'short'
@@ -368,7 +372,7 @@ class PortfolioManager:
                 is_call = pos['type'] == 'call'
                 atm_price = self.market_rules_manager.get_atm_price(price)
                 offset = round((pos['strike_price'] - atm_price) / self.strike_distance)
-                vol = self.market_rules_manager.get_implied_volatility(offset, pos['type'], iv_bin_index)
+                vol = self.iv_calculator(offset, pos['type'])
                 
                 # We use the current DTE for the T+0 line
                 greeks = self.bs_manager.get_all_greeks_and_price(price, pos['strike_price'], current_dte, vol, is_call)
@@ -418,7 +422,7 @@ class PortfolioManager:
             is_call = pos['type'] == 'call'
             atm_price = self.market_rules_manager.get_atm_price(current_price)
             offset = round((pos['strike_price'] - atm_price) / self.strike_distance)
-            vol = self.market_rules_manager.get_implied_volatility(offset, pos['type'], iv_bin_index)
+            vol = self.iv_calculator(offset, pos['type'])
             greeks = self.bs_manager.get_all_greeks_and_price(current_price, pos['strike_price'], pos['days_to_expiry'], vol, is_call)
             
             # The "ask" price is what we would pay to buy it back to close
@@ -589,7 +593,7 @@ class PortfolioManager:
         is_call = position_row['type'] == 'call'
         atm_price = self.market_rules_manager.get_atm_price(current_price)
         offset = round((position_row['strike_price'] - atm_price) / self.strike_distance)
-        vol = self.market_rules_manager.get_implied_volatility(offset, position_row['type'], iv_bin_index)
+        vol = self.iv_calculator(offset, position_row['type'])
         greeks = self.bs_manager.get_all_greeks_and_price(current_price, position_row['strike_price'], position_row['days_to_expiry'], vol, is_call)
         
         current_premium = self.bs_manager.get_price_with_spread(greeks['price'], is_buy=(position_row['direction'] == 'short'), bid_ask_spread_pct=self.bid_ask_spread_pct)
@@ -697,7 +701,7 @@ class PortfolioManager:
         rr_ratio = abs(max_profit / max_loss) if max_loss != 0 and max_profit is not None and max_loss is not None else float('inf')
         
         days_to_expiry = self.portfolio.iloc[0]['days_to_expiry']
-        vol = self.market_rules_manager.get_implied_volatility(0, 'call', iv_bin_index)
+        vol = self.iv_calculator(0, 'call')
         
         # --- 3. Calculate POP based on the found breakevens ---
         total_pop = 0.0
@@ -834,7 +838,7 @@ class PortfolioManager:
             # --- THE FIX IS HERE ---
             # 1. We must first calculate sigma (implied volatility) for the leg.
             offset = round((pos['strike_price'] - atm_price) / self.strike_distance)
-            vol = self.market_rules_manager.get_implied_volatility(offset, pos['type'], iv_bin_index)
+            vol = self.iv_calculator(offset, pos['type'])
             
             # 2. Now we can call get_all_greeks_and_price with all 5 required arguments.
             greeks = self.bs_manager.get_all_greeks_and_price(
@@ -915,7 +919,7 @@ class PortfolioManager:
         atm_price = self.market_rules_manager.get_atm_price(current_price)
         for leg in legs:
             offset = round((leg['strike_price'] - atm_price) / self.strike_distance)
-            vol = self.market_rules_manager.get_implied_volatility(offset, leg['type'], iv_bin_index)
+            vol = self.iv_calculator(offset, leg['type'])
             greeks = self.bs_manager.get_all_greeks_and_price(current_price, leg['strike_price'], leg['days_to_expiry'], vol, leg['type'] == 'call')
             leg['entry_premium'] = self.bs_manager.get_price_with_spread(greeks['price'], is_buy=(leg['direction'] == 'long'), bid_ask_spread_pct=self.bid_ask_spread_pct)
         return legs
@@ -1086,7 +1090,7 @@ class PortfolioManager:
             strike_price = atm_price + (offset * self.strike_distance)
             if strike_price <= 0: continue
 
-            vol = self.market_rules_manager.get_implied_volatility(offset, option_type, iv_bin_index)
+            vol = self.iv_calculator(offset, option_type)
             greeks = self.bs_manager.get_all_greeks_and_price(current_price, strike_price, days_to_expiry, vol, is_call)
             
             current_delta = greeks['delta']

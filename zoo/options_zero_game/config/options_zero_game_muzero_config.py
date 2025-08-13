@@ -192,6 +192,10 @@ options_zero_game_muzero_config = dict(
         strategy_name_to_id=strategy_name_to_id,
         illegal_action_penalty=-1.0,
         rolling_vol_window=5,
+        # The absolute IV percentage points to add to the expert's prediction.
+        # This represents the market's inherent "volatility risk premium".
+        # A value of 0.05 means we add 5% to the predicted IV.
+        volatility_premium_abs=0.05,
     ),
     policy=dict(
         model=dict(

@@ -146,7 +146,12 @@ class OptionsZeroGameEnv(gym.Env):
         self.market_rules_manager = MarketRulesManager(self._cfg)
         
         # The PortfolioManager needs references to the other managers
-        self.portfolio_manager = PortfolioManager(self._cfg, self.bs_manager, self.market_rules_manager)
+        self.portfolio_manager = PortfolioManager(
+            cfg=self._cfg,
+            bs_manager=self.bs_manager,
+            market_rules_manager=self.market_rules_manager,
+            iv_calculator_func=self._get_dynamic_iv # Pass the method itself
+        )
         
         self.actions_to_indices = self._build_action_space()
         self.indices_to_actions = {v: k for k, v in self.actions_to_indices.items()}
@@ -206,6 +211,7 @@ class OptionsZeroGameEnv(gym.Env):
         # We need a way to track the approximate training step.
         # We'll use the episode count as a proxy.
         self._episode_count = 0 
+        self.volatility_premium_abs = cfg.get('volatility_premium_abs', 0.05)
 
     def seed(self, seed: int, dynamic_seed: int = None) -> List[int]:
         self.np_random, seed = seeding.np_random(seed)
@@ -292,6 +298,35 @@ class OptionsZeroGameEnv(gym.Env):
         
         # 3. Advance the market and get the final outcome.
         return self._advance_market_and_get_outcome(equity_before)
+
+    def _get_dynamic_iv(self, offset: int, option_type: str) -> float:
+        """
+        Calculates the dynamic IV using the pre-trained Volatility Expert's
+        forward-looking prediction. This is a more realistic and sophisticated
+        approach to modeling implied volatility.
+        """
+        # 1. Get the floor IV from the static skew table.
+        # This preserves the "volatility smile" and provides a safe minimum.
+        iv_from_table = self.market_rules_manager.get_implied_volatility(
+            offset, option_type, self.iv_bin_index
+        )
+        
+        # 2. Get the expert's forward-looking volatility prediction.
+        # This value is already calculated and stored in the PriceActionManager every step.
+        predicted_vol = self.price_manager.expert_vol_pred
+        
+        # We need to ensure the predicted vol is a sensible number (e.g., between 5% and 300%)
+        # and has a default value for the initial steps before the expert has enough data.
+        if predicted_vol is None or not (0.05 < predicted_vol < 3.0):
+            # Fallback to a simple default if the expert isn't ready
+            predicted_vol = 0.20 
+
+        # 3. Calculate the dynamic base IV by adding the market's risk premium.
+        base_iv = predicted_vol + self.volatility_premium_abs
+        
+        # 4. Return the greater of the dynamic base and the static floor from the table.
+        # This elegantly combines the forward-looking ATM prediction with the static skew.
+        return max(base_iv, iv_from_table)
 
     def _take_action_on_state(self, action: int):
         """
