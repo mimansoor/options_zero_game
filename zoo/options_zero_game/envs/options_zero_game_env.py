@@ -477,7 +477,13 @@ class OptionsZeroGameEnv(gym.Env):
         # Override Rule 2: Liquidation Period
         is_liquidation_period = self.current_day_index >= (self.episode_time_to_expiry - 2)
         if is_liquidation_period and not self.portfolio_manager.portfolio.empty:
-            return self.actions_to_indices['CLOSE_ALL'], True
+            # Let us HOLD if POP > 90% and PF > 1.0
+            # We need to get the current POP and Profit Factor
+            summary = self.portfolio_manager.get_portfolio_summary(
+                self.price_manager.current_price, self.iv_bin_index
+            )
+            if not (summary['prob_profit'] > 0.9 and summary.get('profit_factor', 0) > 1.0):
+                return self.actions_to_indices['CLOSE_ALL'], True
 
         # Override Rule 3: Step 0 (Training or Evaluation)
         # If the agent attempts an illegal move on step 0, it MUST open a position.
@@ -723,17 +729,12 @@ class OptionsZeroGameEnv(gym.Env):
 
     def _apply_liquidation_period_rules(self, action_mask: np.ndarray) -> bool:
         """Handles Rule 1: Liquidation period logic."""
+
         is_liquidation_period = self.current_day_index >= (self.episode_time_to_expiry - 2)
 
-        if is_liquidation_period:
-            if self.portfolio_manager.portfolio.empty:
-                action_mask[self.actions_to_indices['HOLD']] = 1
-            else:
-                action_mask[self.actions_to_indices['CLOSE_ALL']] = 1
-                for i in range(len(self.portfolio_manager.portfolio)):
-                    close_action = f'CLOSE_POSITION_{i}'
-                    if close_action in self.actions_to_indices:
-                        action_mask[self.actions_to_indices[close_action]] = 1
+        # Check if the user's condition is met
+        if is_liquidation_period and  not self.portfolio_manager.portfolio.empty:
+            action_mask[self.actions_to_indices['CLOSE_ALL']] = 1
             return True # Handled the state
 
         return False # Did not handle the state
