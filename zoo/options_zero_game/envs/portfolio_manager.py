@@ -425,29 +425,60 @@ class PortfolioManager:
 
     def open_best_available_vertical(self, action_name: str, current_price: float, iv_bin_index: int, current_step: int, days_to_expiry: float):
         """
-        Public method to execute the opening of a vertical spread using the tiered solver.
+        Public method to execute the opening of a vertical spread.
+        It first tries to find an ideal spread using the tiered R:R solver.
+        If that fails, it falls back to creating a robust, fixed-width spread.
         """
-        # e.g., "OPEN_BULL_CALL_SPREAD" -> "BULL_CALL", "SPREAD"
+        # --- 1. Parse Action Intent ---
         parts = action_name.replace('OPEN_', '').split('_')
-        direction_name = '_'.join(parts[0:2]) # e.g., "BULL_CALL"
-        option_type = parts[1].lower()        # e.g., "call"
+        direction_name = '_'.join(parts[0:2])
+        option_type = parts[1].lower()
 
+        # --- 2. Attempt to Find the Ideal Spread ---
         found_legs = self._find_best_available_spread(
             option_type, direction_name, current_price, iv_bin_index, days_to_expiry
         )
-        
+
+        # --- 3. THE FIX: Implement a Robust Fallback ---
+        if not found_legs:
+            print(f"DEBUG: Tiered R:R solver failed for {action_name}. Using fixed-width fallback.")
+            
+            atm_strike = self.market_rules_manager.get_atm_price(current_price)
+            # Use a sensible, medium width for the fallback (e.g., 2 strikes)
+            wing_offset = self.strike_distance * 2 
+
+            # Determine the strikes based on the strategy
+            if direction_name in ['BULL_CALL', 'BEAR_PUT']:
+                anchor_strike = atm_strike
+                wing_strike = atm_strike + wing_offset if option_type == 'call' else atm_strike - wing_offset
+            else: # BEAR_CALL or BULL_PUT
+                anchor_strike = atm_strike
+                wing_strike = atm_strike - wing_offset if option_type == 'put' else atm_strike + wing_offset
+
+            # Determine the directions of the legs
+            is_credit_spread = 'BULL_PUT' in direction_name or 'BEAR_CALL' in direction_name
+            anchor_direction = 'short' if is_credit_spread else 'long'
+            wing_direction = 'long' if is_credit_spread else 'short'
+
+            fallback_legs_def = [
+                {'type': option_type, 'direction': anchor_direction, 'strike_price': anchor_strike, 'days_to_expiry': days_to_expiry},
+                {'type': option_type, 'direction': wing_direction, 'strike_price': wing_strike, 'days_to_expiry': days_to_expiry}
+            ]
+            
+            # Price the fallback legs
+            found_legs = self._price_legs(fallback_legs_def, current_price, iv_bin_index)
+
+        # --- 4. Finalize and Execute the Trade ---
+        # This block now runs for BOTH the ideal spread OR the fallback spread.
         if found_legs:
-            # Add entry_step to the found legs
             for leg in found_legs:
                 leg['entry_step'] = current_step
 
-            # Get the full risk profile and execute the trade
+            # Use the original action name for the ID to give the agent credit
+            canonical_strategy_name = action_name.replace('OPEN_', '')
             pnl_profile = self._calculate_universal_risk_profile(found_legs, self.realized_pnl)
-            pnl_profile['strategy_id'] = self.strategy_name_to_id.get(action_name, -1) # Use the original action name for the ID
+            pnl_profile['strategy_id'] = self.strategy_name_to_id.get(canonical_strategy_name, -1)
             self._execute_trades(found_legs, pnl_profile)
-
-        # If found_legs is None, the action is effectively illegal for this step, and we do nothing.
-        return
 
     def update_mtm_water_marks(self, current_total_pnl: float):
         """
