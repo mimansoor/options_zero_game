@@ -114,6 +114,10 @@ strategy_name_to_id = {
     'LONG_PUT_FLY_1': 24, 'SHORT_PUT_FLY_1': 25,
     'LONG_CALL_FLY_2': 26, 'SHORT_CALL_FLY_2': 27,
     'LONG_PUT_FLY_2': 28, 'SHORT_PUT_FLY_2': 29,
+
+    # <<< NOTE: This also includes internal names for re-profiling after adjustments >>>
+    'BULL_CALL_SPREAD': 14, 'BEAR_CALL_SPREAD': 15,
+    'BULL_PUT_SPREAD': 18, 'BEAR_PUT_SPREAD': 19,
 }
 
 # Dynamically add the new delta-based strangle strategy IDs
@@ -124,13 +128,10 @@ for delta in range(15, 31, 5):
     strategy_name_to_id[f'SHORT_STRANGLE_DELTA_{delta}'] = next_id
     next_id += 1
 
-# Note: These names must EXACTLY match the action names from your command line and env.
-# We map the descriptive names to their simpler internal representations.
-strategy_name_to_id['OPEN_BULL_CALL_SPREAD'] = next_id; next_id += 1
-strategy_name_to_id['OPEN_BEAR_CALL_SPREAD'] = next_id; next_id += 1
-strategy_name_to_id['OPEN_BULL_PUT_SPREAD'] = next_id; next_id += 1
-strategy_name_to_id['OPEN_BEAR_PUT_SPREAD'] = next_id; next_id += 1
-
+strategy_name_to_id['OPEN_BULL_CALL_SPREAD'] = strategy_name_to_id['BULL_CALL_SPREAD']
+strategy_name_to_id['OPEN_BEAR_CALL_SPREAD'] = strategy_name_to_id['BEAR_CALL_SPREAD']
+strategy_name_to_id['OPEN_BULL_PUT_SPREAD'] = strategy_name_to_id['BULL_PUT_SPREAD']
+strategy_name_to_id['OPEN_BEAR_PUT_SPREAD'] = strategy_name_to_id['BEAR_PUT_SPREAD']
 # ==============================================================
 #                 Curriculum Schedule
 # ==============================================================
