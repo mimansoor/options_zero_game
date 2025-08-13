@@ -35,7 +35,6 @@ class PortfolioManager:
 
         # State variables
         self.portfolio = pd.DataFrame()
-        self.post_action_portfolio: pd.DataFrame = pd.DataFrame()
         self.realized_pnl: float = 0.0
         self.high_water_mark: float = 0.0
         self.next_creation_id: int = 0
@@ -50,7 +49,6 @@ class PortfolioManager:
     def reset(self):
         """Resets the portfolio to an empty state for a new episode."""
         self.portfolio = pd.DataFrame(columns=self.portfolio_columns).astype(self.portfolio_dtypes)
-        self.post_action_portfolio = self.portfolio.copy()
         self.realized_pnl = 0.0
         self.high_water_mark = self.initial_cash
         self.next_creation_id = 0
@@ -142,10 +140,6 @@ class PortfolioManager:
     def get_portfolio(self) -> pd.DataFrame:
         """Public API to get the portfolio state."""
         return self.portfolio
-
-    def get_post_action_portfolio(self) -> pd.DataFrame:
-        """Public API to get the portfolio state immediately after an action."""
-        return self.post_action_portfolio
 
     def open_strategy(self, action_name: str, current_price: float, iv_bin_index: int, current_step: int, days_to_expiry: float):
         """Routes any 'OPEN_' action to the correct specialized private method."""
@@ -325,13 +319,6 @@ class PortfolioManager:
 
         # 1. Always update the hedge status after a change.
         self._update_hedge_status()
-
-        # --- THE DEBUG PRINT YOU REQUESTED ---
-        # This will print the full portfolio DataFrame after every change,
-        # showing the final, correct hedge status for each leg.
-        #print(f"\n--- Portfolio State After Hedge Status Update --- E:{pos_to_close['days_to_expiry']}")
-        #print(self.post_action_portfolio.to_string())
-        #print("-------------------------------------------------\n")
 
     def close_all_positions(self, current_price: float, iv_bin_index: int):
         while not self.portfolio.empty:
@@ -871,22 +858,6 @@ class PortfolioManager:
             'vega_norm': math.tanh(total_vega / self.initial_cash)
         }
 
-    def get_human_readable_portfolio_snapshot(self) -> pd.DataFrame:
-        """
-        Returns a copy of the post-action portfolio, sorted in a way that is
-        intuitive for human analysis in logs and visualizers.
-        THIS METHOD SHOULD ONLY BE CALLED BY THE LOGGER.
-        """
-        #if self.post_action_portfolio.empty:
-        #    return self.post_action_portfolio
-
-        # The more complex, human-friendly sort key
-        #human_readable_sort_key = ['strike_price', 'type', 'direction', 'creation_id']
-        
-        # Return a sorted COPY, leaving the original portfolio untouched.
-        #return self.post_action_portfolio.sort_values(by=human_readable_sort_key).reset_index(drop=True)
-        return self.post_action_portfolio
-
     def sort_portfolio(self):
         """
         Sorts the portfolio. Uses a simple, chronological sort for training and a
@@ -939,7 +910,6 @@ class PortfolioManager:
         # This ensures that after any modification (add, close, shift),
         # the hedge status and the post-action snapshot are correctly updated.
         self._update_hedge_status()
-        self.post_action_portfolio = self.portfolio.copy()
 
     def _price_legs(self, legs: List[Dict], current_price: float, iv_bin_index: int) -> List[Dict]:
         atm_price = self.market_rules_manager.get_atm_price(current_price)

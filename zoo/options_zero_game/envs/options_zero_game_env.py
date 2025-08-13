@@ -295,7 +295,7 @@ class OptionsZeroGameEnv(gym.Env):
     def _take_action_on_state(self, action: int):
         """
         PART 1 of the step process. It takes the agent's action, enforces all rules,
-        updates the portfolio, and takes the post-action snapshot.
+        updates the portfolio,
         It does NOT advance time or the market price.
         """
         # 1. Determine the final action and if the agent's attempt was illegal.
@@ -333,8 +333,8 @@ class OptionsZeroGameEnv(gym.Env):
         termination conditions and rewards, and returns the final timestep.
         """
         # --- Advance Time and Market ---
-        time_decay_days = self._calculate_time_decay()
         self.current_step += 1
+        time_decay_days = self._calculate_time_decay()
         self.price_manager.step(self.current_step)
         self._update_realized_vol()
         self.portfolio_manager.update_positions_after_time_step(time_decay_days, self.price_manager.current_price, self.iv_bin_index)
@@ -609,7 +609,7 @@ class OptionsZeroGameEnv(gym.Env):
         time_decay = self.decay_per_step_trading
 
         # We only add overnight/weekend decay at the end of a trading day.
-        is_end_of_day = (self.current_step + 1) % self._cfg.steps_per_day == 0
+        is_end_of_day = (self.current_step) % self._cfg.steps_per_day == 0
         if not is_end_of_day:
             return time_decay # Return only the intra-day decay
 
@@ -617,10 +617,10 @@ class OptionsZeroGameEnv(gym.Env):
         # Add the standard overnight decay for every day
         time_decay += self.decay_overnight
 
-        # Determine the day of the week to check for a weekend
-        day_of_week = self.current_day_index % self.TRADING_DAYS_IN_WEEK
-
-        is_friday = (day_of_week == 4)
+        # Check if the day that JUST ENDED was a Friday.
+        # We use (self.current_day_index - 1) to get the index of the completed day.
+        day_of_week_that_ended = (self.current_day_index - 1) % self.TRADING_DAYS_IN_WEEK
+        is_friday = (day_of_week_that_ended == 4)
 
         # If it's Friday, add the additional 2 full days for the weekend
         if is_friday:

@@ -68,7 +68,6 @@ class LogReplayEnv(gym.Wrapper):
             action_info=self.env.last_action_info, final_timestep=timestep
         )
 
-        # --- THE DEFINITIVE FIX IS HERE ---
         if timestep.done:
             # Add the special final entry to the log.
             self._log_settlement_state(timestep)
@@ -82,13 +81,13 @@ class LogReplayEnv(gym.Wrapper):
         
         if is_post_action:
             log_step, log_day = step_num, day_num
-            portfolio_to_log = self.env.portfolio_manager.get_human_readable_portfolio_snapshot()
+            portfolio_to_log = self.env.portfolio_manager.get_portfolio()
             info['executed_action_name'] = action_info['final_action_name']
             reward, done = None, False
             obs_for_bias = self.env._get_observation()
         else: # End-of-Day
             log_step, log_day = step_num, day_num
-            portfolio_to_log = self.env.portfolio_manager.get_post_action_portfolio()
+            portfolio_to_log = self.env.portfolio_manager.get_portfolio()
             info['executed_action_name'] = "MARKET MOVE / EOD"
             reward, done = final_timestep.reward, final_timestep.done
             obs_for_bias = final_timestep.obs['observation']
