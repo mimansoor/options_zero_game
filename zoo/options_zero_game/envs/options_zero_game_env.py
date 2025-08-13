@@ -61,6 +61,7 @@ class OptionsZeroGameEnv(gym.Env):
         max_strike_offset=20,
         bid_ask_spread_pct=0.002,
         brokerage_per_leg=20.0,
+        days_before_liquidation=1,
         
         # Black-Scholes Manager Config
         risk_free_rate=0.10,
@@ -475,7 +476,7 @@ class OptionsZeroGameEnv(gym.Env):
             return self.actions_to_indices.get(forced_strategy), True
 
         # Override Rule 2: Liquidation Period
-        is_liquidation_period = self.current_day_index >= (self.episode_time_to_expiry - 2)
+        is_liquidation_period = self.current_day_index >= (self.episode_time_to_expiry - self._cfg.days_before_liquidation)
         if is_liquidation_period and not self.portfolio_manager.portfolio.empty:
             # Let us HOLD if POP > 90% and PF > 1.0
             # We need to get the current POP and Profit Factor
@@ -730,7 +731,7 @@ class OptionsZeroGameEnv(gym.Env):
     def _apply_liquidation_period_rules(self, action_mask: np.ndarray) -> bool:
         """Handles Rule 1: Liquidation period logic."""
 
-        is_liquidation_period = self.current_day_index >= (self.episode_time_to_expiry - 2)
+        is_liquidation_period = self.current_day_index >= (self.episode_time_to_expiry - self._cfg.days_before_liquidation)
 
         # Check if the user's condition is met
         if is_liquidation_period:
