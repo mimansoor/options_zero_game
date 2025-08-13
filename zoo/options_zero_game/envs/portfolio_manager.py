@@ -14,7 +14,8 @@ class PortfolioManager:
     """
     def __init__(self, cfg: Dict, bs_manager: BlackScholesManager, 
                  market_rules_manager: MarketRulesManager, 
-                 iv_calculator_func: Callable):
+                 iv_calculator_func: Callable,
+                 strategy_name_to_id: Dict):
         # Config
         self.initial_cash = cfg['initial_cash']
         self.lot_size = cfg['lot_size']
@@ -23,13 +24,15 @@ class PortfolioManager:
         self.start_price = cfg['start_price']
         self.strike_distance = cfg['strike_distance']
         self.undefined_risk_cap = self.initial_cash
-        self.strategy_name_to_id = cfg.get('strategy_name_to_id', {})
+        self.strategy_name_to_id = strategy_name_to_id
         self.close_short_leg_on_profit_threshold = cfg.get('close_short_leg_on_profit_threshold', 0.0)
         self.is_eval_mode = cfg.get('is_eval_mode', False)
         self.brokerage_per_leg = cfg.get('brokerage_per_leg', 0.0)
         self.max_strike_offset = cfg['max_strike_offset']
         self.receipts_for_current_step: List[dict] = []
         self.steps_per_day = cfg.get('steps_per_day', 1)
+        self.butterfly_target_cost_pct = cfg.get('butterfly_target_cost_pct', 0.01)
+        self.id_to_strategy_name = {v: k for k, v in self.strategy_name_to_id.items()}
         
         # Managers
         self.bs_manager = bs_manager
@@ -65,6 +68,235 @@ class PortfolioManager:
         self.lowest_realized_loss = 0.0
 
     # --- Public Methods (called by the main environment) ---
+    def convert_to_iron_fly(self, current_price: float, iv_bin_index: int, current_step: int):
+        """
+        Adds long wings to a short straddle to define its risk using the
+        robust atomic transformation pattern.
+        """
+        if len(self.portfolio) != 2 or len(self.portfolio) > self.max_positions - 2: return
+
+        original_legs = self.portfolio.to_dict(orient='records')
+        original_creation_id = original_legs[0]['creation_id']
+        days_to_expiry = original_legs[0]['days_to_expiry']
+        atm_strike = original_legs[0]['strike_price']
+        
+        # 1. Dynamically determine wing width based on current credit
+        current_straddle_credit = 0.0
+        for leg in original_legs:
+            vol = self.iv_calculator(0, leg['type'])
+            greeks = self.bs_manager.get_all_greeks_and_price(current_price, leg['strike_price'], days_to_expiry, vol, leg['type'] == 'call')
+            current_straddle_credit += self.bs_manager.get_price_with_spread(greeks['price'], is_buy=True, bid_ask_spread_pct=self.bid_ask_spread_pct)
+        
+        wing_width = self.market_rules_manager.get_atm_price(current_straddle_credit)
+        wing_width = max(wing_width, self.strike_distance * 2) # Safety net
+
+        # 2. Define and price the new legs
+        new_wing_legs_def = [
+            {'type': 'put', 'direction': 'long', 'strike_price': strike_long_put, 'days_to_expiry': days_to_expiry, 'entry_step': current_step},
+            {'type': 'call', 'direction': 'long', 'strike_price': strike_long_call, 'days_to_expiry': days_to_expiry, 'entry_step': current_step}
+        ]
+        priced_wings = self._price_legs(new_wing_legs_def, current_price, iv_bin_index)
+           
+        # 3. Create the final, complete list of legs for the new strategy
+        final_fly_legs = original_legs + priced_wings
+        
+        # 4. Calculate the single, unified risk profile for the final state
+        pnl_profile = self._calculate_universal_risk_profile(final_fly_legs, self.realized_pnl)
+        pnl_profile['strategy_id'] = self.strategy_name_to_id.get('SHORT_IRON_FLY')
+        
+        # 5. Atomically update the portfolio state
+        self.portfolio = self.portfolio[self.portfolio['creation_id'] != original_creation_id].reset_index(drop=True)
+        self._execute_trades(final_fly_legs, pnl_profile)
+
+    def convert_to_iron_condor(self, current_price: float, iv_bin_index: int, current_step: int):
+        """
+        Adds long wings to a short strangle to define its risk using the
+        robust atomic transformation pattern.
+        """
+        if len(self.portfolio) != 2 or len(self.portfolio) > self.max_positions - 2: return
+
+        original_legs = self.portfolio.to_dict(orient='records')
+        original_creation_id = original_legs[0]['creation_id']
+        days_to_expiry = original_legs[0]['days_to_expiry']
+        
+        strike_long_put = self._find_strike_for_delta(-0.05, 'put', current_price, iv_bin_index, days_to_expiry)
+        strike_long_call = self._find_strike_for_delta(0.05, 'call', current_price, iv_bin_index, days_to_expiry)
+        if strike_long_put is None or strike_long_call is None: return
+
+        # 2. Define and price the new legs
+        new_wing_legs_def = [
+            {'type': 'put', 'direction': 'long', 'strike_price': strike_long_put, 'days_to_expiry': days_to_expiry, 'entry_step': current_step}, # <<< ADD entry_step
+            {'type': 'call', 'direction': 'long', 'strike_price': strike_long_call, 'days_to_expiry': days_to_expiry, 'entry_step': current_step} # <<< ADD entry_step
+        ]
+        priced_wings = self._price_legs(new_wing_legs_def, current_price, iv_bin_index)
+           
+        final_condor_legs = original_legs + priced_wings
+        
+        pnl_profile = self._calculate_universal_risk_profile(final_condor_legs, self.realized_pnl)
+        pnl_profile['strategy_id'] = self.strategy_name_to_id.get('SHORT_IRON_CONDOR')
+        
+        self.portfolio = self.portfolio[self.portfolio['creation_id'] != original_creation_id].reset_index(drop=True)
+        self._execute_trades(final_condor_legs, pnl_profile)
+
+    def add_hedge(self, action_name: str, current_price: float, iv_bin_index: int, current_step: int):
+        """
+        Adds a protective leg to a naked position using the robust atomic
+        transformation pattern. The hedge strike is placed dynamically based on
+        whether the naked leg is in-the-money or out-of-the-money.
+        """
+        try:
+            # --- 1. Failsafe Checks and Setup ---
+            position_index = int(action_name.split('_')[-1])
+
+            # A hedge can only be added to a single, naked position.
+            if not (0 <= position_index < len(self.portfolio)) or len(self.portfolio) != 1:
+                return
+
+            naked_leg_dict = self.portfolio.iloc[position_index].to_dict()
+            if naked_leg_dict['is_hedged']:
+                return # Can't hedge an already-hedged position
+
+            original_creation_id = naked_leg_dict['creation_id']
+            days_to_expiry = naked_leg_dict['days_to_expiry']
+            hedge_type = naked_leg_dict['type']
+            naked_strike = naked_leg_dict['strike_price']
+            atm_strike = self.market_rules_manager.get_atm_price(current_price)
+
+            # --- 2. Dynamic Hedge Strike Placement Logic ---
+            is_itm = (hedge_type == 'call' and current_price > naked_strike) or \
+                     (hedge_type == 'put' and current_price < naked_strike)
+
+            hedge_strike = 0.0
+            if is_itm:
+                # ITM Rule: The position is a loser. Place hedge defensively near the current price.
+                hedge_strike = atm_strike + self.strike_distance if hedge_type == 'call' else atm_strike - self.strike_distance
+            else:
+                # OTM Rule: The position is a winner/neutral. Place hedge at the breakeven point.
+                entry_premium = naked_leg_dict['entry_premium']
+                breakeven_price = naked_strike + entry_premium if hedge_type == 'call' else naked_strike - entry_premium
+                
+                closest_valid_strike = self.market_rules_manager.get_atm_price(breakeven_price)
+                
+                # Safety fallback: ensure hedge is at least one strike away.
+                if closest_valid_strike == naked_strike:
+                    hedge_strike = (naked_strike + self.strike_distance if hedge_type == 'call' 
+                                    else naked_strike - self.strike_distance)
+                else:
+                    hedge_strike = closest_valid_strike
+
+            # --- 3. Define, Price, and Assemble the Final Strategy ---
+            # Define the new long leg, ensuring it has all necessary keys.
+            hedge_leg_def = [{
+                'type': hedge_type,
+                'direction': 'long',
+                'strike_price': hedge_strike,
+                'days_to_expiry': days_to_expiry,
+                'entry_step': current_step  # Prevents the IntCastingNaNError
+            }]
+            priced_hedge_leg = self._price_legs(hedge_leg_def, current_price, iv_bin_index)
+            
+            # The final state is the original naked leg plus the new hedge leg.
+            final_spread_legs = [naked_leg_dict] + priced_hedge_leg
+            
+            # --- 4. Calculate the Unified Risk Profile for the New Spread ---
+            new_strategy_name = f"BULL_{hedge_type.upper()}_SPREAD" if hedge_type == 'put' else f"BEAR_{hedge_type.upper()}_SPREAD"
+            pnl_profile = self._calculate_universal_risk_profile(final_spread_legs, self.realized_pnl)
+            pnl_profile['strategy_id'] = self.strategy_name_to_id.get(new_strategy_name, -2) # -2 for "Custom Hedged"
+            
+            # --- 5. Atomically Replace the Old Position with the New One ---
+            self.portfolio = self.portfolio[self.portfolio['creation_id'] != original_creation_id].reset_index(drop=True)
+            self._execute_trades(final_spread_legs, pnl_profile)
+
+        except (ValueError, IndexError) as e:
+            print(f"Warning: Could not parse HEDGE action '{action_name}'. Error: {e}")
+            return
+
+    def convert_to_strangle(self, current_price: float, iv_bin_index: int, current_step: int):
+        """
+        Removes the long wings from an Iron Condor to become a strangle.
+        This method uses the robust "controlled removal" pattern by calling
+        the main close_position method.
+        """
+        # --- 1. Failsafe Checks ---
+        current_id = self.portfolio.iloc[0]['strategy_id']
+        current_name = self.id_to_strategy_name.get(current_id, '')
+        if len(self.portfolio) != 4 or current_name != 'SHORT_IRON_CONDOR':
+            print(f"Warning: convert_to_strangle called on an invalid strategy: '{current_name}'. Aborting.")
+            return
+
+        # --- 2. Identify and Close the Wings ---
+        # Identify the indices of the long legs (the wings).
+        indices_to_close = self.portfolio[self.portfolio['direction'] == 'long'].index
+
+        # Loop through the indices in reverse order to avoid index shifting errors
+        # as we modify the portfolio.
+        for index in sorted(indices_to_close, reverse=True):
+            self.close_position(index, current_price, iv_bin_index)
+
+        # --- 3. Final State Update ---
+        # After closing, the portfolio contains the two remaining short legs.
+        # The `close_position` method will have assigned them a "CUSTOM" strategy profile.
+        # We now override this with the correct, final strategy ID.
+        if not self.portfolio.empty:
+            # We need a generic strangle ID. Using the 20-delta one as a default is a good choice.
+            new_strangle_id = self.strategy_name_to_id.get('SHORT_STRANGLE_DELTA_20') 
+            self.portfolio['strategy_id'] = new_strangle_id
+
+    def convert_to_straddle(self, current_price: float, iv_bin_index: int, current_step: int):
+        """Removes the long wings from an Iron Fly to become a straddle."""
+        # --- 1. Failsafe Checks ---
+        current_id = self.portfolio.iloc[0]['strategy_id']
+        current_name = self.id_to_strategy_name.get(current_id, '')
+        if len(self.portfolio) != 4 or current_name != 'SHORT_IRON_FLY':
+            print(f"Warning: convert_to_straddle called on an invalid strategy: '{current_name}'. Aborting.")
+            return
+            
+        # --- 2. Identify and Close the Wings (Identical logic to the strangle conversion) ---
+        indices_to_close = self.portfolio[self.portfolio['direction'] == 'long'].index
+
+        for index in sorted(indices_to_close, reverse=True):
+            self.close_position(index, current_price, iv_bin_index)
+        
+        # --- 3. Final State Update ---
+        if not self.portfolio.empty:
+            new_straddle_id = self.strategy_name_to_id.get('SHORT_STRADDLE')
+            self.portfolio['strategy_id'] = new_straddle_id
+
+    # ==============================================================================
+    #                      DYNAMIC DELTA-NEUTRAL ADJUSTMENT
+    # ==============================================================================
+
+    def adjust_to_delta_neutral(self, current_price: float, iv_bin_index: int, current_step: int):
+        """
+        Executes the delta-neutral adjustment. It finds the optimal new strikes,
+        closes all current positions, and opens the new, optimized ones as a
+        single atomic transaction.
+        """
+        # 1. Find the best new strikes using the solver
+        new_legs_definition = self._find_delta_neutral_strikes(current_price, iv_bin_index)
+
+        if not new_legs_definition:
+            # This can happen if the current position is already the most neutral one.
+            return
+
+        # 2. Get metadata from the old position to preserve it
+        original_strategy_id = self.portfolio.iloc[0]['strategy_id']
+        days_to_expiry = self.portfolio.iloc[0]['days_to_expiry']
+        
+        # 3. Atomically replace the old position with the new one
+        self.close_all_positions(current_price, iv_bin_index)
+        
+        for leg in new_legs_definition:
+            leg['entry_step'] = current_step
+            leg['days_to_expiry'] = days_to_expiry
+        
+        priced_new_legs = self._price_legs(new_legs_definition, current_price, iv_bin_index)
+        
+        # We must use the updated realized_pnl from the close_all operation
+        pnl_profile = self._calculate_universal_risk_profile(priced_new_legs, self.realized_pnl)
+        pnl_profile['strategy_id'] = original_strategy_id
+        
+        self._execute_trades(priced_new_legs, pnl_profile)
 
     def open_best_available_vertical(self, action_name: str, current_price: float, iv_bin_index: int, current_step: int, days_to_expiry: float):
         """
@@ -126,7 +358,6 @@ class PortfolioManager:
         total_delta, total_gamma, total_theta, total_vega = 0.0, 0.0, 0.0, 0.0
         current_net_premium = 0.0
         
-        # <<< YOUR SUGGESTION APPLIED: Redundant 'if' is removed >>>
         atm_price = self.market_rules_manager.get_atm_price(current_price)
         for _, pos in self.portfolio.iterrows():
             direction_multiplier = 1 if pos['direction'] == 'long' else -1
@@ -176,9 +407,7 @@ class PortfolioManager:
         if len(self.portfolio) >= self.max_positions: return
 
         # Route by most complex/specific keywords first to avoid misrouting
-        if 'DELTA' in action_name and 'STRANGLE' in action_name:
-            self._open_delta_strangle(action_name, current_price, iv_bin_index, current_step, days_to_expiry)
-        elif 'SPREAD' in action_name:
+        if 'SPREAD' in action_name:
             self.open_best_available_vertical(action_name, current_price, iv_bin_index, current_step, days_to_expiry)
         elif 'FLY' in action_name and 'IRON' not in action_name:
             self._open_butterfly(action_name, current_price, iv_bin_index, current_step, days_to_expiry)
@@ -429,6 +658,101 @@ class PortfolioManager:
         }
 
     # --- Private Methods ---
+    def _get_unrealized_pnl_for_leg(self, position_row: pd.Series, current_price: float, iv_bin_index: int) -> float:
+        """Calculates the current unrealized PnL for a single leg of the portfolio."""
+        is_call = position_row['type'] == 'call'
+        atm_price = self.market_rules_manager.get_atm_price(current_price)
+        offset = round((position_row['strike_price'] - atm_price) / self.strike_distance)
+        vol = self.iv_calculator(offset, position_row['type'])
+        greeks = self.bs_manager.get_all_greeks_and_price(current_price, position_row['strike_price'], position_row['days_to_expiry'], vol, is_call)
+        
+        current_premium = self.bs_manager.get_price_with_spread(greeks['price'], is_buy=(position_row['direction'] == 'short'), bid_ask_spread_pct=self.bid_ask_spread_pct)
+        
+        pnl_multiplier = 1 if position_row['direction'] == 'long' else -1
+        pnl = (current_premium - position_row['entry_premium']) * pnl_multiplier * self.lot_size
+        return pnl
+
+    def _find_delta_neutral_strikes(self, current_price: float, iv_bin_index: int) -> List[Dict] or None:
+        """
+        A solver that finds the optimal strike adjustments to make a strategy delta-neutral.
+        It "slides" the entire structure up and down the strike chain and returns the
+        leg definitions for the position with the lowest absolute delta.
+        """
+        if self.portfolio.empty:
+            return None
+
+        original_legs = self.portfolio.to_dict(orient='records')
+        
+        # 1. Calculate the current delta to serve as our baseline to beat
+        current_greeks = self.get_portfolio_greeks(current_price, iv_bin_index)
+        best_delta_abs = abs(current_greeks['delta_norm'])
+        best_new_legs = None
+        
+        # 2. Define the search space for the adjustment (e.g., 10 strikes up/down)
+        max_shift_offset = 10 
+        
+        for shift_offset in range(-max_shift_offset, max_shift_offset + 1):
+            if shift_offset == 0:
+                continue
+
+            # 3. Create a "candidate" strategy with the shifted strikes
+            candidate_legs = []
+            for leg in original_legs:
+                new_leg = leg.copy()
+                new_leg['strike_price'] += shift_offset * self.strike_distance
+                if new_leg['strike_price'] <= 0: # Ensure strikes are valid
+                    break 
+                candidate_legs.append(new_leg)
+            
+            if len(candidate_legs) != len(original_legs): continue # Skip if any strike became invalid
+
+            # 4. Calculate the delta of the candidate strategy using the helper
+            candidate_greeks = self._calculate_greeks_for_legs(candidate_legs, current_price, iv_bin_index)
+            candidate_delta_abs = abs(candidate_greeks['delta_norm'])
+            
+            # 5. Check if this is the best delta we've found so far
+            if candidate_delta_abs < best_delta_abs:
+                best_delta_abs = candidate_delta_abs
+                best_new_legs = candidate_legs
+        
+        return best_new_legs
+
+    def _calculate_greeks_for_legs(self, legs: List[Dict], current_price: float, iv_bin_index: int) -> Dict:
+        """
+        Helper method to calculate portfolio greeks for a hypothetical set of legs.
+        This is a near-copy of get_portfolio_greeks, but on an arbitrary list.
+        """
+        total_delta, total_gamma, total_theta, total_vega = 0.0, 0.0, 0.0, 0.0
+        if not legs:
+            return {'delta_norm': 0.0, 'gamma_norm': 0.0, 'theta_norm': 0.0, 'vega_norm': 0.0}
+
+        atm_price = self.market_rules_manager.get_atm_price(current_price)
+
+        for pos in legs:
+            direction_multiplier = 1 if pos['direction'] == 'long' else -1
+            is_call = pos['type'] == 'call'
+            offset = round((pos['strike_price'] - atm_price) / self.strike_distance)
+            
+            # Use the injected IV calculator for consistency
+            vol = self.iv_calculator(offset, pos['type'])
+            
+            greeks = self.bs_manager.get_all_greeks_and_price(
+                current_price, pos['strike_price'], pos['days_to_expiry'], vol, is_call
+            )
+            
+            total_delta += greeks['delta'] * self.lot_size * direction_multiplier
+            total_gamma += greeks['gamma'] * (self.lot_size**2 * current_price**2 / 100) * direction_multiplier
+            total_theta += greeks['theta'] * self.lot_size * direction_multiplier
+            total_vega += greeks['vega'] * self.lot_size * direction_multiplier
+
+        max_delta_exposure = self.max_positions * self.lot_size
+        return {
+            'delta_norm': np.clip(total_delta / max_delta_exposure, -1.0, 1.0) if max_delta_exposure > 0 else 0.0,
+            'gamma_norm': math.tanh(total_gamma / self.initial_cash),
+            'theta_norm': math.tanh(total_theta / self.initial_cash),
+            'vega_norm': math.tanh(total_vega / self.initial_cash)
+        }
+
     def _close_worthless_short_legs(self, current_price: float, iv_bin_index: int):
         """
         Automatically closes any short leg that is profitable and whose current
@@ -505,128 +829,6 @@ class PortfolioManager:
         # Any leg whose index remains in any of the lists is, by definition,
         # un-paired and Naked. Since we defaulted 'is_hedged' to False,
         # no further action is needed.
-
-    def add_hedge(self, action_name: str, current_price: float, iv_bin_index: int, current_step: int):
-        """
-        Adds a protective leg to a naked position using advanced, context-aware logic.
-        - If the naked leg is In-The-Money (ITM), it places the hedge one strike
-          away from the current ATM strike for a defensive adjustment.
-        - If the naked leg is Out-of-the-Money (OTM), it places the hedge one strike
-          away from the naked leg's strike to create a standard spread.
-        This version is strategy-aware and correctly uses the MarketRulesManager.
-        """
-        try:
-            position_index = int(action_name.split('_')[-1])
-            if not (0 <= position_index < len(self.portfolio)): return
-
-            naked_leg_to_hedge = self.portfolio.iloc[position_index].copy()
-            
-            if naked_leg_to_hedge['is_hedged'] or len(self.portfolio) >= self.max_positions:
-                return
-            
-            original_creation_id = naked_leg_to_hedge['creation_id']
-
-            # --- 1. Determine Hedge Direction and Type ---
-            hedge_type = naked_leg_to_hedge['type']
-            is_naked_leg_short = naked_leg_to_hedge['direction'] == 'short'
-            hedge_direction = 'long' if is_naked_leg_short else 'short'
-            
-            # --- 2. DYNAMIC HEDGE PLACEMENT LOGIC ---
-            naked_strike = naked_leg_to_hedge['strike_price']
-            
-            # Get the ATM strike from the single source of truth: the MarketRulesManager
-            atm_strike = self.market_rules_manager.get_atm_price(current_price)
-            
-            # Determine if the naked leg is ITM
-            is_itm = False
-            if hedge_type == 'call' and current_price > naked_strike: is_itm = True
-            if hedge_type == 'put' and current_price < naked_strike: is_itm = True
-
-            if is_itm:
-                # --- ITM Rule (Your brilliant correction) ---
-                # The position is already a loser. Place the hedge defensively
-                # one strike away from the CURRENT market price (ATM).
-                if hedge_type == 'call':
-                    hedge_strike = atm_strike + self.strike_distance
-                else: # Put
-                    hedge_strike = atm_strike - self.strike_distance
-            else:
-                # --- OTM Rule (Your New Dynamic Hedging Logic) ---
-                # The position is not yet a loser. Create a risk-defined spread
-                # by placing the hedge at the breakeven point.
-
-                # <<< 1. Get the entry premium of the naked leg >>>
-                entry_premium = naked_leg_to_hedge['entry_premium']
-                
-                # <<< 2. Calculate the theoretical breakeven price >>>
-                if hedge_type == 'call':
-                    # For a short call, BE = Strike + Credit Received
-                    breakeven_price = naked_strike + entry_premium
-                else: # Put
-                    # For a short put, BE = Strike - Credit Received
-                    breakeven_price = naked_strike - entry_premium
-                    
-                # <<< 3. Find the closest valid market strike to the breakeven price >>>
-                # We can reuse the get_atm_price helper for this rounding logic.
-                closest_valid_strike = self.market_rules_manager.get_atm_price(breakeven_price)
-                
-                # <<< 4. Set the hedge strike, with a safety fallback >>>
-                # Edge Case: If breakeven is very close to the naked strike,
-                # ensure the hedge is at least one strike away.
-                if closest_valid_strike == naked_strike:
-                    hedge_strike = (naked_strike + self.strike_distance if hedge_type == 'call' 
-                                    else naked_strike - self.strike_distance)
-                else:
-                    hedge_strike = closest_valid_strike
-
-            # --- 3. Create, Price, and Assemble the Full Strategy ---
-            hedge_leg_definition = {
-                'type': hedge_type, 'direction': hedge_direction, 'strike_price': hedge_strike,
-                'entry_step': current_step, 'days_to_expiry': naked_leg_to_hedge['days_to_expiry']
-            }
-            
-            # Price ONLY the new hedge leg to avoid double-charging spreads
-            priced_hedge_leg = self._price_legs([hedge_leg_definition], current_price, iv_bin_index)[0]
-
-            original_strategy_legs = [row.to_dict() for _, row in self.portfolio.iterrows() if row['creation_id'] == original_creation_id]
-            transformed_strategy_legs = original_strategy_legs + [priced_hedge_leg]
-            
-            # --- 4. Determine New Strategy Name and PnL ---
-            num_legs = len(transformed_strategy_legs)
-            new_strategy_name = "CUSTOM_HEDGED"
-            if num_legs == 2:
-                net_premium = sum(leg['entry_premium'] * (1 if leg['direction'] == 'long' else -1) for leg in transformed_strategy_legs)
-                spread_direction = "LONG" if net_premium > 0 else "SHORT"
-                new_strategy_name = f"{spread_direction}_VERTICAL_{hedge_type.upper()}_1"
-            elif num_legs == 4:
-                new_strategy_name = "SHORT_IRON_FLY"
-            
-            pnl  = self._calculate_universal_risk_profile(transformed_strategy_legs)
-            pnl['strategy_id'] = self.strategy_name_to_id.get(new_strategy_name, -1)
-            
-            # --- 5. Update Portfolio Atomically ---
-            self.portfolio = self.portfolio[self.portfolio['creation_id'] != original_creation_id].reset_index(drop=True)
-            for leg in transformed_strategy_legs:
-                leg['creation_id'] = original_creation_id
-            self._execute_trades(transformed_strategy_legs, pnl)
-            
-        except (ValueError, IndexError) as e:
-            print(f"Warning: Could not parse HEDGE action '{action_name}'. Error: {e}")
-            return
-
-    def _get_unrealized_pnl_for_leg(self, position_row: pd.Series, current_price: float, iv_bin_index: int) -> float:
-        """Calculates the current unrealized PnL for a single leg of the portfolio."""
-        is_call = position_row['type'] == 'call'
-        atm_price = self.market_rules_manager.get_atm_price(current_price)
-        offset = round((position_row['strike_price'] - atm_price) / self.strike_distance)
-        vol = self.iv_calculator(offset, position_row['type'])
-        greeks = self.bs_manager.get_all_greeks_and_price(current_price, position_row['strike_price'], position_row['days_to_expiry'], vol, is_call)
-        
-        current_premium = self.bs_manager.get_price_with_spread(greeks['price'], is_buy=(position_row['direction'] == 'short'), bid_ask_spread_pct=self.bid_ask_spread_pct)
-        
-        pnl_multiplier = 1 if position_row['direction'] == 'long' else -1
-        pnl = (current_premium - position_row['entry_premium']) * pnl_multiplier * self.lot_size
-        return pnl
 
     def shift_position(self, action_name: str, current_price: float, iv_bin_index: int, current_step: int):
         """
@@ -724,7 +926,7 @@ class PortfolioManager:
         max_profit = risk_profile['max_profit']
         max_loss = risk_profile['max_loss']
         breakevens = risk_profile['breakevens']
-        rr_ratio = abs(max_profit / max_loss) if max_loss != 0 and max_profit is not None and max_loss is not None else float('inf')
+        rr_ratio = abs(max_profit / max_loss) if max_loss != 0 and max_profit is not None and max_loss is not None else 999.0
         
         days_to_expiry = self.portfolio.iloc[0]['days_to_expiry']
         vol = self.iv_calculator(0, 'call')
@@ -1055,30 +1257,62 @@ class PortfolioManager:
         self._execute_trades(legs, pnl)
 
     def _open_strangle(self, action_name: str, current_price: float, iv_bin_index: int, current_step: int, days_to_expiry: float):
-        # --- Defensive Assertion ---
-        assert len(self.portfolio) <= self.max_positions - 2, "Illegal attempt to open a strangle when there are less than two positions available."
-        """Opens a two-leg strangle. (CORRECTED)"""
+        """
+        Opens a two-leg strangle. This is a smart dispatcher that can handle
+        both modern delta-based strangles and legacy fixed-width strangles.
+        """
         if len(self.portfolio) > self.max_positions - 2: return
-
+        
         parts = action_name.split('_')
-        direction, width_str = parts[1], parts[4]
-        strike_offset = int(width_str) * 2 * self.strike_distance
+        direction = parts[1].lower()
+        legs = []
 
-        atm_price = self.market_rules_manager.get_atm_price(current_price)
+        # --- Dispatcher Logic ---
+        if 'DELTA' in action_name:
+            # --- INTELLIGENT, DELTA-BASED LOGIC ---
+            try:
+                target_delta_int = int(parts[4])
+            except (ValueError, IndexError): return # Invalid format
+
+            all_deltas = [15, 20, 25, 30]
+            start_index = all_deltas.index(target_delta_int) if target_delta_int in all_deltas else 0
+            delta_search_list = [d / 100.0 for d in all_deltas[start_index:]]
+
+            strike_call = self._find_strike_from_delta_list(delta_search_list, 'call', current_price, iv_bin_index, days_to_expiry)
+            strike_put = self._find_strike_from_delta_list([-d for d in delta_search_list], 'put', current_price, iv_bin_index, days_to_expiry)
+            
+            if strike_call and strike_put and strike_put < strike_call:
+                legs = [{'type': 'call', 'direction': direction, 'strike_price': strike_call},
+                        {'type': 'put', 'direction': direction, 'strike_price': strike_put}]
+            else:
+                return # Fallback if no valid delta strikes are found
+        else:
+            # --- LEGACY, FIXED-WIDTH LOGIC ---
+            try:
+                width_str = parts[4]
+                strike_offset = int(width_str) * 2 * self.strike_distance
+            except (ValueError, IndexError): return # Invalid format
+
+            atm_price = self.market_rules_manager.get_atm_price(current_price)
+            legs = [{'type': 'call', 'direction': direction, 'strike_price': atm_price + strike_offset},
+                    {'type': 'put', 'direction': direction, 'strike_price': atm_price - strike_offset}]
         
-        legs = [
-            {'type': 'call', 'direction': direction.lower(), 'strike_price': atm_price + strike_offset, 'entry_step': current_step, 'days_to_expiry': days_to_expiry},
-            {'type': 'put', 'direction': direction.lower(), 'strike_price': atm_price - strike_offset, 'entry_step': current_step, 'days_to_expiry': days_to_expiry}
-        ]
+        # --- Finalize the Trade (common to both logic paths) ---
+        for leg in legs:
+            leg['entry_step'] = current_step
+            leg['days_to_expiry'] = days_to_expiry
         
-        legs = self._price_legs(legs, current_price, iv_bin_index)
+        priced_legs = self._price_legs(legs, current_price, iv_bin_index)
         
-        # --- THE FIX ---
+        # For 'OPEN_SHORT_STRANGLE_ATM_1', this becomes 'SHORT_STRANGLE_1'
+        # For 'OPEN_SHORT_STRANGLE_DELTA_15', this becomes 'SHORT_STRANGLE_DELTA_15'
         canonical_strategy_name = action_name.replace('OPEN_', '').replace('_ATM', '')
         
-        pnl  = self._calculate_universal_risk_profile(legs)
-        pnl['strategy_id'] = self.strategy_name_to_id.get(canonical_strategy_name, -1)
-        self._execute_trades(legs, pnl)
+        # <<< FIX #2: Pass realized_pnl for a consistent risk profile >>>
+        pnl_profile = self._calculate_universal_risk_profile(priced_legs, self.realized_pnl)
+        
+        pnl_profile['strategy_id'] = self.strategy_name_to_id.get(canonical_strategy_name, -1)
+        self._execute_trades(priced_legs, pnl_profile)
 
     def _find_strike_from_delta_list(
         self, target_deltas: List[float], option_type: str,
@@ -1373,96 +1607,75 @@ class PortfolioManager:
         return None
 
     def _open_butterfly(self, action_name: str, current_price: float, iv_bin_index: int, current_step: int, days_to_expiry: float):
-        # --- Defensive Assertion ---
-        assert len(self.portfolio) <= self.max_positions - 4, "Illegal attempt to open a ButterFly."
-        """Opens a three-strike butterfly spread. (CORRECTED)"""
+        """
+        Opens a three-strike butterfly with a dynamic width. It searches for the
+        wing width that results in a net debit (cost) closest to a predefined
+        target cost.
+        """
         if len(self.portfolio) > self.max_positions - 4:
             return
 
         parts = action_name.split('_')
-        # e.g., from 'OPEN_LONG_CALL_FLY_1'
-        direction, option_type, width_str = parts[1], parts[2].lower(), parts[4]
-        width_in_price = int(width_str) * 2 * self.strike_distance
+        direction, option_type = parts[1], parts[2].lower()
 
+        # --- 1. Setup the Search ---
         atm_price = self.market_rules_manager.get_atm_price(current_price)
-        strike_lower = atm_price - width_in_price
-        strike_middle = atm_price
-        strike_upper = atm_price + width_in_price
+        # The target cost in dollars
+        target_cost = atm_price * self.butterfly_target_cost_pct
 
         wing_direction = 'long' if direction == 'LONG' else 'short'
         body_direction = 'short' if direction == 'LONG' else 'long'
 
-        legs = [
-            {'type': option_type, 'direction': wing_direction, 'strike_price': strike_lower},
-            {'type': option_type, 'direction': body_direction, 'strike_price': strike_middle},
-            {'type': option_type, 'direction': body_direction, 'strike_price': strike_middle},
-            {'type': option_type, 'direction': wing_direction, 'strike_price': strike_upper},
+        # The body of the butterfly is always at the money
+        body_legs_def = [
+            {'type': option_type, 'direction': body_direction, 'strike_price': atm_price, 'days_to_expiry': days_to_expiry},
+            {'type': option_type, 'direction': body_direction, 'strike_price': atm_price, 'days_to_expiry': days_to_expiry}
         ]
 
-        for leg in legs:
-            leg['entry_step'] = current_step
-            leg['days_to_expiry'] = days_to_expiry
+        best_legs_found = None
+        smallest_cost_diff = float('inf')
 
-        legs = self._price_legs(legs, current_price, iv_bin_index)
+        # --- 2. Search Loop: Widen the wings until we find the best fit ---
+        max_search_width = 20 # Search up to 20 strikes away for the wings
+        for i in range(1, max_search_width + 1):
+            wing_width = i * self.strike_distance
+            strike_lower = atm_price - wing_width
+            strike_upper = atm_price + wing_width
 
-        # --- THE FIX ---
-        # Derive the canonical name directly from the action name.
-        # This turns 'OPEN_LONG_CALL_FLY_1' into 'LONG_CALL_FLY_1'
-        canonical_strategy_name = action_name.replace('OPEN_', '')
+            if strike_lower <= 0: continue
 
-        pnl  = self._calculate_universal_risk_profile(legs)
-        # Look up the correct, derived key.
-        pnl['strategy_id'] = self.strategy_name_to_id.get(canonical_strategy_name, -1)
-        self._execute_trades(legs, pnl)
-
-    def _open_delta_strangle(self, action_name: str, current_price: float, iv_bin_index: int, current_step: int, days_to_expiry: float):
-        if len(self.portfolio) > self.max_positions - 2: return
-
-        try:
-            parts = action_name.split('_')
-            direction = parts[1].lower()
-            target_delta_int = int(parts[4])
-        except (ValueError, IndexError): return
-
-        legs = []
-        
-        # --- THE NEW TIERED LOGIC ---
-        # 1. Create a prioritized list of deltas to search, starting with the agent's choice.
-        all_deltas = [15, 20, 25, 30]
-        start_index = all_deltas.index(target_delta_int)
-        delta_search_list = [d / 100.0 for d in all_deltas[start_index:]] # e.g., [0.20, 0.25, 0.30]
-
-        # 2. Use our new helper to find the best available strikes.
-        strike_call = self._find_strike_from_delta_list(delta_search_list, 'call', current_price, iv_bin_index, days_to_expiry)
-        strike_put = self._find_strike_from_delta_list([-d for d in delta_search_list], 'put', current_price, iv_bin_index, days_to_expiry)
-        
-        # 3. The guard rail remains the same, checking if the search was successful.
-        if strike_call is not None and strike_put is not None and strike_put < strike_call:
-            legs = [
-                {'type': 'call', 'direction': direction, 'strike_price': strike_call, 'days_to_expiry': days_to_expiry},
-                {'type': 'put', 'direction': direction, 'strike_price': strike_put, 'days_to_expiry': days_to_expiry}
-            ]
-        else:
-            print(f"Warning: Could not find any valid delta strikes for {action_name}. Falling back to fixed-width.")
-
-        # --- Fallback Logic ---
-        # If the `legs` list is still empty, it means the dynamic search failed.
-        if not legs:
-            # Fall back to a safe, fixed-width strangle (width = 2)
-            atm_price = self.market_rules_manager.get_atm_price(current_price)
-            strike_offset = 2 * self.strike_distance
-            legs = [
-                {'type': 'call', 'direction': direction, 'strike_price': atm_price + strike_offset, 'days_to_expiry': days_to_expiry},
-                {'type': 'put', 'direction': direction, 'strike_price': atm_price - strike_offset, 'days_to_expiry': days_to_expiry}
+            # Define the candidate wings
+            wing_legs_def = [
+                {'type': option_type, 'direction': wing_direction, 'strike_price': strike_lower, 'days_to_expiry': days_to_expiry},
+                {'type': option_type, 'direction': wing_direction, 'strike_price': strike_upper, 'days_to_expiry': days_to_expiry}
             ]
 
-        # --- Finalize the Trade ---
-        for leg in legs: leg['entry_step'] = current_step
-        legs = self._price_legs(legs, current_price, iv_bin_index)
-        
-        # Use the original action name for the ID to give the agent proper credit
-        canonical_strategy_name = action_name.replace('OPEN_', '')
-        pnl  = self._calculate_universal_risk_profile(legs)
-        pnl['strategy_id'] = self.strategy_name_to_id.get(canonical_strategy_name, -1)
-        self._execute_trades(legs, pnl)
+            candidate_legs = body_legs_def + wing_legs_def
+            priced_legs = self._price_legs(candidate_legs, current_price, iv_bin_index)
+
+            # Calculate the net debit (cost) of this candidate butterfly
+            net_debit = sum(
+                leg['entry_premium'] * (1 if leg['direction'] == 'long' else -1)
+                for leg in priced_legs
+            )
+
+            # We only care about debit trades (this is a long butterfly)
+            if net_debit <= 0: continue
+
+            # Check if this width is a better fit than our previous best
+            cost_diff = abs(net_debit - target_cost)
+            if cost_diff < smallest_cost_diff:
+                smallest_cost_diff = cost_diff
+                best_legs_found = priced_legs
+
+        # --- 3. Finalize the Trade ---
+        if best_legs_found:
+            for leg in best_legs_found:
+                leg['entry_step'] = current_step
+
+            canonical_strategy_name = action_name.replace('OPEN_', '')
+            pnl_profile = self._calculate_universal_risk_profile(best_legs_found, self.realized_pnl)
+            pnl_profile['strategy_id'] = self.strategy_name_to_id.get(canonical_strategy_name, -1)
+            self._execute_trades(best_legs_found, pnl_profile)
+        # If no suitable legs were found, do nothing.
 

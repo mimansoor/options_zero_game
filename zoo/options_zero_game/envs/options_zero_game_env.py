@@ -141,6 +141,10 @@ class OptionsZeroGameEnv(gym.Env):
 
         self.np_random, _ = seeding.np_random(None)
 
+        # This dictionary is passed in the config and is needed by both the
+        # environment (for the action mask) and the portfolio manager.
+        self.strategy_name_to_id = cfg.get('strategy_name_to_id', {})
+
         self.bs_manager = BlackScholesManager(self._cfg)
         self.price_manager = PriceActionManager(self._cfg, self.np_random)
         self.market_rules_manager = MarketRulesManager(self._cfg)
@@ -150,7 +154,9 @@ class OptionsZeroGameEnv(gym.Env):
             cfg=self._cfg,
             bs_manager=self.bs_manager,
             market_rules_manager=self.market_rules_manager,
-            iv_calculator_func=self._get_dynamic_iv # Pass the method itself
+            iv_calculator_func=self._get_dynamic_iv,
+            # The portfolio manager still gets the dictionary as well.
+            strategy_name_to_id=self.strategy_name_to_id
         )
         
         self.actions_to_indices = self._build_action_space()
@@ -208,12 +214,19 @@ class OptionsZeroGameEnv(gym.Env):
         curriculum_holder = cfg.get('training_curriculum', None)
         self.training_curriculum = curriculum_holder.schedule if curriculum_holder else None
         self.is_training_mode = not cfg.get('is_eval_mode', False)
+        #only ignore legal actions if in training mode
+        if self.is_training_mode:
+            self._cfg.ignore_legal_actions = True
+        else:
+            self._cfg.ignore_legal_actions = False
+
         # We need a way to track the approximate training step.
         # We'll use the episode count as a proxy.
         self._episode_count = 0 
         self.volatility_premium_abs = cfg.get('volatility_premium_abs', 0.05)
         self.min_pop_threshold = cfg.get('min_pop_threshold', 0.25)
         self.low_pop_penalty = cfg.get('low_pop_opening_penalty', 0.0)
+        self.delta_neutral_threshold = cfg.get('delta_neutral_threshold', 0.1)
 
     def seed(self, seed: int, dynamic_seed: int = None) -> List[int]:
         self.np_random, seed = seeding.np_random(seed)
@@ -361,6 +374,66 @@ class OptionsZeroGameEnv(gym.Env):
         elif final_action_name.startswith('SHIFT_'):
             if 'ATM' in final_action_name: self.portfolio_manager.shift_to_atm(final_action_name, self.price_manager.current_price, self.iv_bin_index, self.current_step)
             else: self.portfolio_manager.shift_position(final_action_name, self.price_manager.current_price, self.iv_bin_index, self.current_step)
+        elif final_action_name == 'ADJUST_TO_DELTA_NEUTRAL':
+            self.portfolio_manager.adjust_to_delta_neutral(
+                self.price_manager.current_price, self.iv_bin_index, self.current_step
+            )
+        elif final_action_name == 'CONVERT_TO_IRON_CONDOR':
+            self.portfolio_manager.convert_to_iron_condor(
+                self.price_manager.current_price, self.iv_bin_index, self.current_step
+            )
+        elif final_action_name == 'CONVERT_TO_IRON_FLY':
+            self.portfolio_manager.convert_to_iron_condor(
+                self.price_manager.current_price, self.iv_bin_index, self.current_step
+            )
+        elif final_action_name == 'CONVERT_TO_STRANGLE':
+            self.portfolio_manager.convert_to_strangle(
+                self.price_manager.current_price, self.iv_bin_index, self.current_step
+            )
+        elif final_action_name == 'CONVERT_TO_STRADDLE':
+            self.portfolio_manager.convert_to_straddle(
+                self.price_manager.current_price, self.iv_bin_index, self.current_step
+            )
+
+        # 4. Sort the portfolio and take the crucial snapshot.
+        self.portfolio_manager.sort_portfolio()
+
+    def _advance_market_and_get_outcome(self, equity_before: float) -> BaseEnvTimestep:
+        """
+        PART 2 of the step process. It advances time and the market, calculates
+        termination conditions and rewards, and returns the final timestep.
+        """
+        # --- Advance Time and Market ---
+        self.current_step += 1
+        time_decay_days = self._calculate_time_decay()
+        self.price_manager.step(self.current_step)
+        self._update_realized_vol()
+        self.portfolio_manager.update_positions_after_time_step(time_decay_days, self.price_manager.current_price, self.iv_bin_index)
+
+        # --- FINAL, THREE-TIERED TERMINATION LOGIC ---
+        terminated_by_rule = False
+        final_shaped_reward_override = None
+        termination_reason = "RUNNING" # Default state
+
+        current_pnl = self.portfolio_manager.get_total_pnl(self.price_manager.current_price, self.iv_bin_index)
+
+        # 1. Stop-Loss Rule (Highest Priority)
+        if self._cfg.use_stop_loss and not self.portfolio_manager.portfolio.empty:
+            initial_cost = abs(self.portfolio_manager.initial_net_premium * self.portfolio_manager.lot_size)
+            stop_loss_level = initial_cost * self._cfg.stop_loss_multiple_of_cost
+            if current_pnl <= -stop_loss_level:
+                terminated_by_rule = True
+                final_shaped_reward_override = -1.0
+                termination_reason = "STOP_LOSS"
+
+        # 2. Take-Profit Rules (Only check if not already stopped out)
+        if not terminated_by_rule and not self.portfolio_manager.portfolio.empty:
+
+            # Rule 2a: Fixed Portfolio-Level "Home Run" Target
+            fixed_target_pct = self._cfg.profit_target_pct
+            if fixed_target_pct > 0:
+                pnl_pct = (current_pnl / self.portfolio_manager.initial_cash) * 100
+
 
         # 4. Sort the portfolio and take the crucial snapshot.
         self.portfolio_manager.sort_portfolio()
@@ -686,6 +759,14 @@ class OptionsZeroGameEnv(gym.Env):
         actions['OPEN_BULL_PUT_SPREAD'] = i; i+=1
         actions['OPEN_BEAR_PUT_SPREAD'] = i; i+=1
 
+        # --- NEW: Strategy Morphing Actions ---
+        actions['CONVERT_TO_IRON_CONDOR'] = i; i+=1
+        actions['CONVERT_TO_IRON_FLY'] = i; i+=1
+        actions['CONVERT_TO_STRANGLE'] = i; i+=1
+        actions['CONVERT_TO_STRADDLE'] = i; i+=1
+
+        actions['ADJUST_TO_DELTA_NEUTRAL'] = i; i+=1
+
         for d in ['LONG', 'SHORT']:
             actions[f'OPEN_{d}_STRADDLE_ATM'] = i; i+=1
 
@@ -777,30 +858,54 @@ class OptionsZeroGameEnv(gym.Env):
         """Handles Rule 2: Logic for when the portfolio is not empty."""
         action_mask = np.zeros(self.action_space_size, dtype=np.int8)
         portfolio_df = self.portfolio_manager.portfolio
-        atm_price = self.market_rules_manager.get_atm_price(self.price_manager.current_price)
-
-        # Basic actions always allowed
+        
+        # --- Basic actions (unchanged) ---
         action_mask[self.actions_to_indices['HOLD']] = 1
         action_mask[self.actions_to_indices['CLOSE_ALL']] = 1
 
+        # --- Management Actions (unchanged) ---
+        atm_price = self.market_rules_manager.get_atm_price(self.price_manager.current_price)
         for i, original_pos in portfolio_df.iterrows():
-            # Closing position always allowed
             self._set_if_exists(action_mask, f'CLOSE_POSITION_{i}')
-
-            # A hedge is only possible for a position that is currently un-hedged (naked).
             if not original_pos['is_hedged']:
                 self._set_if_exists(action_mask, f'HEDGE_NAKED_POS_{i}')
-
-            # SHIFT_UP
             self._set_shift_if_no_conflict(action_mask, i, original_pos, direction="UP")
-
-            # SHIFT_DOWN
             self._set_shift_if_no_conflict(action_mask, i, original_pos, direction="DOWN")
-
-            # SHIFT_TO_ATM
             if original_pos['strike_price'] != atm_price:
                 self._set_shift_to_atm_if_no_conflict(action_mask, i, original_pos, atm_price)
 
+        if not portfolio_df.empty:
+            current_strategy_id = portfolio_df.iloc[0]['strategy_id']
+            
+            # Use self.strategy_name_to_id for all lookups to ensure consistency.
+            s_map = self.strategy_name_to_id 
+
+            strangle_ids = {
+                s_map.get('SHORT_STRANGLE_DELTA_15'), s_map.get('SHORT_STRANGLE_DELTA_20'),
+                s_map.get('SHORT_STRANGLE_DELTA_25'), s_map.get('SHORT_STRANGLE_DELTA_30'),
+            }
+            straddle_id = s_map.get('SHORT_STRADDLE')
+            condor_id = s_map.get('SHORT_IRON_CONDOR')
+            fly_id = s_map.get('SHORT_IRON_FLY')
+
+            # Rule: Strangle -> Iron Condor
+            if current_strategy_id in strangle_ids:
+                if len(portfolio_df) <= self.portfolio_manager.max_positions - 2:
+                    self._set_if_exists(action_mask, 'CONVERT_TO_IRON_CONDOR')
+
+            # Rule: Straddle -> Iron Fly
+            if current_strategy_id == straddle_id:
+                if len(portfolio_df) <= self.portfolio_manager.max_positions - 2:
+                    self._set_if_exists(action_mask, 'CONVERT_TO_IRON_FLY')
+
+            # Rule: Iron Condor -> Strangle
+            if current_strategy_id == condor_id:
+                self._set_if_exists(action_mask, 'CONVERT_TO_STRANGLE')
+
+            # Rule: Iron Fly -> Straddle
+            if current_strategy_id == fly_id:
+                self._set_if_exists(action_mask, 'CONVERT_TO_STRADDLE')
+        
         return action_mask
 
     def _set_shift_if_no_conflict(self, action_mask, i, original_pos, direction):
