@@ -730,6 +730,7 @@ class OptionsZeroGameEnv(gym.Env):
     def _apply_liquidation_period_rules(self, action_mask: np.ndarray) -> bool:
         """Handles Rule 1: Liquidation period logic."""
 
+        action_mask[self.actions_to_indices['HOLD']] = 1
         is_liquidation_period = self.current_day_index >= (self.episode_time_to_expiry - 2)
 
         # Check if the user's condition is met
