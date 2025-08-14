@@ -1,5 +1,6 @@
 # zoo/options_zero_game/experts/transformer_expert_trainer.py
 
+import random
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset
@@ -114,184 +115,175 @@ class TransformerExpert(nn.Module):
 # ==============================================================================
 #                         DATA PREPARATION PIPELINE
 # ==============================================================================
-def create_sequences(df: pd.DataFrame, config: dict, vol_expert_model: TransformerExpert = None):
+def create_sequences(df: pd.DataFrame, config: dict, device: torch.device, vol_expert_model: TransformerExpert = None):
     """
-    Creates sequences and targets for training.
-    If `vol_expert_model` is provided, it performs hierarchical feature fusion.
+    Creates sequences and targets for training. This is a robust, multi-pass version.
     """
-    sequences = []
-    
-    # 1. Calculate base features
+    # --- Pass 1: Calculate all base features and targets on the full DataFrame ---
     df['log_return'] = np.log(df['Close'] / df['Close'].shift(1))
     df['volatility'] = df['log_return'].rolling(window=config['volatility_period']).std()
-    df.dropna(inplace=True)
-    
-    base_features = ['log_return', 'volatility']
-    feature_data = df[base_features].values
-    
-    # 2. HIERARCHICAL FEATURE FUSION (for Directional model)
-    if vol_expert_model:
-        print("Performing hierarchical feature fusion with Volatility Expert...")
-        vol_expert_model.eval()
-        
-        # Temporarily create sequences of just the base features to get embeddings
-        temp_sequences = []
-        for i in range(len(feature_data) - config['sequence_length']):
-            temp_sequences.append(feature_data[i:i + config['sequence_length']])
-            
-        with torch.no_grad():
-            temp_tensor = torch.FloatTensor(np.array(temp_sequences))
-            vol_embeddings = vol_expert_model.encode(temp_tensor).numpy()
 
-        # Now, create the final fused features
-        fused_feature_data = []
-        # The first `sequence_length` points don't have embeddings, so we align.
-        for i in range(len(vol_embeddings)):
-            # For each step in the original sequence, append the *single* embedding for that *entire* sequence
-            fused_sequence = np.hstack([
-                feature_data[i: i + config['sequence_length']],
-                np.tile(vol_embeddings[i], (config['sequence_length'], 1))
-            ])
-            fused_feature_data.append(fused_sequence)
-        
-        # Update feature_data to the new fused data
-        feature_data = np.array(fused_feature_data)
-        # We now have one less sequence because of the fusion alignment
-        df = df.iloc[config['sequence_length']-1:].reset_index(drop=True)
-    
-    # 3. Create targets
-    # a) Volatility Target (for Volatility Analyst)
     df['volatility_target'] = df['volatility'].shift(-config['prediction_horizon'])
-    
-    # b) Directional Target (for Directional Strategist)
+
     future_return = np.log(df['Close'].shift(-config['prediction_horizon']) / df['Close'])
-    conditions = [
-        future_return > config['directional_threshold'],
-        future_return < -config['directional_threshold']
-    ]
+    conditions = [future_return > config['directional_threshold'], future_return < -config['directional_threshold']]
     choices = [2, 0] # 2=UP, 0=DOWN
     df['direction_target'] = np.select(conditions, choices, default=1) # 1=NEUTRAL
-    
-    df.dropna(inplace=True)
-    
-    # 4. Final sequence creation
-    for i in range(len(df) - config['sequence_length'] - config['prediction_horizon']):
-        seq = feature_data[i : i + config['sequence_length']]
-        
-        vol_target = df['volatility_target'].iloc[i + config['sequence_length'] -1]
-        dir_target = df['direction_target'].iloc[i + config['sequence_length'] -1]
-        
-        sequences.append((seq, vol_target, dir_target))
-        
-    return sequences
 
+    df.dropna(inplace=True)
+    df.reset_index(drop=True, inplace=True)
+
+    if len(df) < config['sequence_length']:
+        return [], [], []
+
+    # --- Pass 2: Create the raw numpy arrays for sequences and targets ---
+    base_features = ['log_return', 'volatility']
+    feature_data = df[base_features].values
+    vol_targets = df['volatility_target'].values
+    dir_targets = df['direction_target'].values
+
+    X_raw, y_vol, y_dir = [], [], []
+    for i in range(len(df) - config['sequence_length']):
+        X_raw.append(feature_data[i : i + config['sequence_length']])
+        y_vol.append(vol_targets[i + config['sequence_length'] - 1])
+        y_dir.append(dir_targets[i + config['sequence_length'] - 1])
+
+    X_raw = np.array(X_raw)
+
+    # --- Pass 3: If in directional mode, perform hierarchical fusion ---
+    if vol_expert_model:
+        # print("Performing hierarchical feature fusion...") # You can uncomment for debugging
+        vol_expert_model.eval()
+        
+        with torch.no_grad():
+            # <<< THE FIX: Create the tensor and immediately move it to the correct device >>>
+            X_raw_tensor = torch.FloatTensor(X_raw).to(device)
+            
+            vol_embeddings = vol_expert_model.encode(X_raw_tensor).cpu().numpy() # Move back to CPU for numpy
+        
+        vol_embeddings_tiled = np.expand_dims(vol_embeddings, axis=1)
+        vol_embeddings_tiled = np.tile(vol_embeddings_tiled, (1, config['sequence_length'], 1))
+
+        X_fused = np.concatenate([X_raw, vol_embeddings_tiled], axis=2)
+        return X_fused, np.array(y_vol), np.array(y_dir)
+    else:
+        return X_raw, np.array(y_vol), np.array(y_dir)
 
 # ==============================================================================
 #                              MAIN TRAINING SCRIPT
 # ==============================================================================
 def main(model_type: str):
-    """Main function to orchestrate the training process."""
-    
+    """
+    Main function to orchestrate the training process. This version is memory-efficient
+    and processes files in a streaming fashion to handle large datasets.
+    """
     # --- 1. Setup ---
     print(f"--- Starting Training for: {model_type.upper()} EXPERT ---")
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
-    
-    # --- 2. Data Loading and Processing ---
-    all_files = glob.glob(os.path.join(CONFIG['data_path'], "*.csv"))
-    all_sequences = []
-    
-    vol_expert_for_fusion = None
-    if model_type == 'directional':
-        # <<< MODIFICATION: Use the specific params to load the vol expert >>>
-        vol_params = CONFIG['volatility_expert_params']
-        try:
-            vol_expert_for_fusion = TransformerExpert(
-                input_dim=vol_params['input_dim'],
-                model_dim=CONFIG['embedding_dim'],
-                num_heads=CONFIG['num_heads'],
-                num_layers=vol_params['num_layers'], # Use the vol expert's layer count
-                output_dim=vol_params['output_dim']
-            )
-            vol_expert_for_fusion.load_state_dict(torch.load(os.path.join(CONFIG['model_save_path'], 'volatility_expert.pth')))
-            print("Successfully loaded pre-trained Volatility Expert for feature generation.")
-        except FileNotFoundError:
-            print("ERROR: Could not find 'volatility_expert.pth'. Please train the volatility model first.")
-            return
 
-    # ... (the data processing loop is unchanged) ...
-
-    # --- 3. Model and Training Specifics ---
+    # --- 2. Define Model and Optimizer (once, before the loops) ---
     if model_type == 'volatility':
-        X = np.array([s[0] for s in all_sequences])
-        y = np.array([s[1] for s in all_sequences])
-        
-        # <<< MODIFICATION: Get params from the specific config block >>>
         params = CONFIG['volatility_expert_params']
         model = TransformerExpert(
-            input_dim=params['input_dim'],
-            model_dim=CONFIG['embedding_dim'],
-            num_heads=CONFIG['num_heads'],
-            num_layers=params['num_layers'], # Use 3 layers
-            output_dim=params['output_dim'],
-            dropout=CONFIG['dropout']
+            input_dim=params['input_dim'], model_dim=CONFIG['embedding_dim'],
+            num_heads=CONFIG['num_heads'], num_layers=params['num_layers'],
+            output_dim=params['output_dim'], dropout=CONFIG['dropout']
         ).to(device)
         criterion = nn.MSELoss()
-        y_tensor = torch.FloatTensor(y).view(-1, 1)
-        
     elif model_type == 'directional':
-        X = np.array([s[0] for s in all_sequences])
-        y = np.array([s[2] for s in all_sequences])
-        
-        # <<< MODIFICATION: Get params from the specific config block >>>
         params = CONFIG['directional_expert_params']
         model = TransformerExpert(
-            input_dim=params['input_dim'],
-            model_dim=CONFIG['embedding_dim'],
-            num_heads=CONFIG['num_heads'],
-            num_layers=params['num_layers'], # Use 4 layers
-            output_dim=params['output_dim'],
-            dropout=CONFIG['dropout']
+            input_dim=params['input_dim'], model_dim=CONFIG['embedding_dim'],
+            num_heads=CONFIG['num_heads'], num_layers=params['num_layers'],
+            output_dim=params['output_dim'], dropout=CONFIG['dropout']
         ).to(device)
         criterion = nn.CrossEntropyLoss()
-        y_tensor = torch.LongTensor(y)
-        
     else:
         raise ValueError("Invalid model_type specified.")
-
-    # --- 4. Create DataLoader & Training Loop (Unchanged) ---
-    X_tensor = torch.FloatTensor(X)
-    dataset = TensorDataset(X_tensor, y_tensor)
-    data_loader = DataLoader(dataset, batch_size=CONFIG['batch_size'], shuffle=True)
+        
     optimizer = torch.optim.Adam(model.parameters(), lr=CONFIG['lr'])
-
-    # --- 5. Training Loop ---
-    print(f"\nStarting training on {len(dataset)} sequences...")
     model.train()
+
+    # --- 3. Training Loop with Streaming Data Processing ---
+    print(f"\nStarting training for {CONFIG['epochs']} epochs...")
+    all_files = glob.glob(os.path.join(CONFIG['data_path'], "*.csv"))
+    
+    vol_expert_for_fusion = None # Will be loaded if needed
+
     for epoch in range(CONFIG['epochs']):
-        total_loss = 0
-        for inputs, targets in tqdm(data_loader, desc=f"Epoch {epoch+1}/{CONFIG['epochs']}"):
-            inputs, targets = inputs.to(device), targets.to(device)
-            
-            optimizer.zero_grad()
-            outputs = model(inputs)
-            
-            # For CrossEntropyLoss, target should not be one-hot and shape (batch_size)
-            if isinstance(criterion, nn.CrossEntropyLoss):
-                targets = targets.squeeze()
+        epoch_loss = 0.0
+        num_batches = 0
+        
+        # Shuffle files each epoch for better training stability
+        random.shuffle(all_files)
+        
+        # Load the vol expert once per epoch if needed
+        if model_type == 'directional' and vol_expert_for_fusion is None:
+            vol_params = CONFIG['volatility_expert_params']
+            try:
+                vol_expert_for_fusion = TransformerExpert(
+                    input_dim=vol_params['input_dim'], model_dim=CONFIG['embedding_dim'],
+                    num_heads=CONFIG['num_heads'], num_layers=vol_params['num_layers'],
+                    output_dim=vol_params['output_dim']
+                ).to(device)
+                vol_expert_for_fusion.load_state_dict(torch.load(os.path.join(CONFIG['model_save_path'], 'volatility_expert.pth')))
+                print("Successfully loaded pre-trained Volatility Expert for feature generation.")
+            except FileNotFoundError:
+                print("ERROR: Could not find 'volatility_expert.pth'. Please train the volatility model first.")
+                return
 
-            loss = criterion(outputs, targets)
-            loss.backward()
-            optimizer.step()
-            total_loss += loss.item()
+        file_iterator = tqdm(all_files, desc=f"Epoch {epoch+1}/{CONFIG['epochs']}")
+        for f in file_iterator:
+            df = pd.read_csv(f)
+            # ... (Robust data cleaning) ...
+            close_col_name = df.columns[1] if 'Date' in df.columns else df.columns[0]
+            df.rename(columns={close_col_name: 'Close'}, inplace=True)
+            df['Close'] = pd.to_numeric(df['Close'], errors='coerce')
+            df.dropna(subset=['Close'], inplace=True)
+            df = df[df['Close'] > 0]
+            df.reset_index(drop=True, inplace=True)
             
-        avg_loss = total_loss / len(data_loader)
-        print(f"Epoch {epoch+1}/{CONFIG['epochs']}, Average Loss: {avg_loss:.6f}")
+            if len(df) <= CONFIG['sequence_length'] + CONFIG['prediction_horizon']:
+                continue
 
-    # --- 6. Save Model ---
+            # Process ONE file at a time
+            X, y_vol, y_dir = create_sequences(df.copy(), CONFIG, device, vol_expert_for_fusion)
+            
+            if len(X) == 0:
+                continue
+
+            # Select the correct target for this training run
+            y = y_dir if model_type == 'directional' else y_vol
+            y_tensor = torch.LongTensor(y) if model_type == 'directional' else torch.FloatTensor(y).view(-1, 1)
+
+            # Create a DataLoader for just this file's data
+            X_tensor = torch.FloatTensor(X)
+            dataset = TensorDataset(X_tensor, y_tensor)
+            data_loader = DataLoader(dataset, batch_size=CONFIG['batch_size'], shuffle=True)
+            
+            # Train on the batches from this single file
+            for inputs, targets in data_loader:
+                inputs, targets = inputs.to(device), targets.to(device)
+                optimizer.zero_grad()
+                outputs = model(inputs)
+                loss = criterion(outputs, targets)
+                loss.backward()
+                optimizer.step()
+                epoch_loss += loss.item()
+                num_batches += 1
+        
+        # --- 4. Log Epoch Results ---
+        if num_batches > 0:
+            avg_epoch_loss = epoch_loss / num_batches
+            print(f"Epoch {epoch+1}/{CONFIG['epochs']} complete. Average Loss: {avg_epoch_loss:.6f}")
+        else:
+            print(f"Epoch {epoch+1}/{CONFIG['epochs']} complete. No valid data processed.")
+
+    # --- 5. Save Final Model ---
     save_path = os.path.join(CONFIG['model_save_path'], f'{model_type}_expert.pth')
     torch.save(model.state_dict(), save_path)
-    print(f"\nTraining complete. Model saved to '{save_path}'")
+    print(f"\nTraining complete. Final model saved to '{save_path}'")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train Transformer Expert Models for Options-Zero-Game.")
