@@ -213,9 +213,21 @@ class CurriculumHolder:
 # The environment will randomly pick one of these for each episode.
 IV_REGIMES = [
     {
-        'name': 'Normal Market',
+        'name': 'Normal Market (s1)',
         'atm_iv': 25.0,
         'far_otm_put_iv': 50.0,
+        'far_otm_call_iv': 20.0,
+    },
+    {
+        'name': 'Normal Market (s2)',
+        'atm_iv': 20.0,
+        'far_otm_put_iv': 35.0,
+        'far_otm_call_iv': 18.0,
+    },
+    {
+        'name': 'Normal Market (s3)',
+        'atm_iv': 22.0,
+        'far_otm_put_iv': 40.0,
         'far_otm_call_iv': 20.0,
     },
     {

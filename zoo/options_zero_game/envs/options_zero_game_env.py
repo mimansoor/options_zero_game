@@ -123,6 +123,17 @@ class OptionsZeroGameEnv(gym.Env):
 
         self.iv_regimes = self._cfg.get('iv_regimes', [])
         self.current_iv_regime_name = "N/A" # For logging
+        self.current_iv_regime_index = 0 # Start with a default
+        
+        # <<< NEW: Load the Markov Chain model >>>
+        try:
+            self.iv_transition_matrix = np.load("zoo/options_zero_game/experts/iv_transition_matrix.npy")
+            self.iv_stationary_dist = np.load("zoo/options_zero_game/experts/iv_stationary_distribution.npy")
+            print("Successfully loaded IV Regime Markov Chain model.")
+        except FileNotFoundError:
+            print("WARNING: IV Regime model not found. Run iv_regime_analyzer.py. Falling back to random choice.")
+            self.iv_transition_matrix = None
+            self.iv_stationary_dist = None
 
         self.bs_manager = BlackScholesManager(self._cfg)
         self.price_manager = PriceActionManager(self._cfg, self.np_random)
@@ -208,80 +219,51 @@ class OptionsZeroGameEnv(gym.Env):
 
     def reset(self, seed: int = None, **kwargs) -> Dict:
         """
-        The definitive, correct reset method. It correctly prioritizes the episode
-        length calculation to ensure all components are synchronized.
+        The definitive, correct reset method. It correctly prioritizes and
+        sequences all initialization logic for a new episode.
         """
+        # --- 1. Seeding and Basic State Reset ---
         if seed is not None: self.seed(seed)
-        else:
-            self.seed(int(time.time()))
-
-        # --- NEW: Curriculum Learning Logic ---
-        if self.is_training_mode and self.training_curriculum:
-            self._episode_count += 1
-            # Approximate the current training step
-            approx_current_step = self._episode_count * self.total_steps
-
-            # Find the current phase in the curriculum schedule
-            active_strategy = 'ALL' # Default to free choice
-            sorted_phases = sorted(self.training_curriculum.keys())
-            for start_step in sorted_phases:
-                if approx_current_step >= start_step:
-                    active_strategy = self.training_curriculum[start_step]
-                else:
-                    break # We've gone past the current phase
-            
-            # Set the forced strategy for this episode
-            if active_strategy != 'ALL':
-                self.forced_opening_strategy_name = active_strategy
-            else:
-                self.forced_opening_strategy_name = None # Allow agent choice
-        else:
-            #Evaluation mode
-            self.forced_opening_strategy_name = self._cfg.get('forced_opening_strategy_name') 
-
-        # 1. First, determine the definitive number of trading days for this episode.
-        forced_length = self._cfg.get('forced_episode_length', 0)
-        if forced_length > 0:
-            # Priority 1: Use a forced length if provided (for evaluation).
-            self.episode_time_to_expiry = forced_length
-        else:
-            # Priority 2: Use a random length for training.
-            self.episode_time_to_expiry = random.randint(
-                self._cfg.min_time_to_expiry_days,
-                self._cfg.time_to_expiry_days
-            )
-
-        # 2. THEN, calculate the total steps based on this definitive length.
-        self.total_steps = self.episode_time_to_expiry * self._cfg.steps_per_day
-        
-        # 3. NOW, reset all managers and state variables using the correct total_steps.
-        self.price_manager.reset(self.total_steps)
+        else: self.seed(int(time.time()))
         
         self.current_step = 0
         self.final_eval_reward = 0.0
         self.illegal_action_count = 0
-        self.realized_vol_series = np.zeros(self.total_steps + 1, dtype=np.float32)
 
-        # <<< NEW: DYNAMIC IV REGIME SELECTION >>>
-        # 1. Randomly select a regime for this episode.
-        chosen_regime = random.choice(self.iv_regimes)
-        self.current_iv_regime_name = chosen_regime['name']
-        
-        # 2. Generate the skew table for this specific regime.
-        episode_skew_table = generate_dynamic_iv_skew_table(
-            max_offset=self._cfg.max_strike_offset,
-            atm_iv=chosen_regime['atm_iv'],
-            far_otm_put_iv=chosen_regime['far_otm_put_iv'],
-            far_otm_call_iv=chosen_regime['far_otm_call_iv']
-        )
-        
-        # 3. Create a new MarketRulesManager for this episode with the new skew.
-        # We need to temporarily add the skew table to the config for initialization.
-        temp_cfg = self._cfg.copy()
-        temp_cfg['iv_skew_table'] = episode_skew_table
-        self.market_rules_manager = MarketRulesManager(temp_cfg)
+        # --- 2. Determine Forced Opening Strategy (from Curriculum or Config) ---
+        if self.is_training_mode and self.training_curriculum:
+            self._episode_count += 1
+            approx_current_step = self._episode_count * self.total_steps
+            active_strategy = 'ALL'
+            sorted_phases = sorted(self.training_curriculum.keys())
+            for start_step in sorted_phases:
+                if approx_current_step >= start_step:
+                    active_strategy = self.training_curriculum[start_step]
+                else: break
+            self.forced_opening_strategy_name = active_strategy if active_strategy != 'ALL' else None
+        else:
+            self.forced_opening_strategy_name = self._cfg.get('forced_opening_strategy_name')
 
-        # 4. Now that we have a valid MarketRulesManager, create the PortfolioManager.
+        # --- 3. Determine Episode Length ---
+        forced_length = self._cfg.get('forced_episode_length', 0)
+        if forced_length > 0:
+            self.episode_time_to_expiry = forced_length
+        else:
+            self.episode_time_to_expiry = random.randint(self._cfg.min_time_to_expiry_days, self._cfg.time_to_expiry_days)
+        self.total_steps = self.episode_time_to_expiry * self._cfg.steps_per_day
+
+        # --- 4. Select IV Regime and Initialize Market Managers ---
+        # Select the starting IV regime for this episode
+        if self.iv_stationary_dist is not None:
+            self.current_iv_regime_index = np.random.choice(len(self.iv_regimes), p=self.iv_stationary_dist)
+        else:
+            self.current_iv_regime_index = random.randint(0, len(self.iv_regimes) - 1)
+        
+        # This single helper now correctly creates the MarketRulesManager.
+        self._update_market_rules_for_regime()
+
+        # --- 5. Initialize the Portfolio Manager ---
+        # This must happen AFTER the MarketRulesManager is created.
         self.portfolio_manager = PortfolioManager(
             cfg=self._cfg,
             bs_manager=self.bs_manager,
@@ -289,15 +271,49 @@ class OptionsZeroGameEnv(gym.Env):
             iv_calculator_func=self._get_dynamic_iv,
             strategy_name_to_id=self.strategy_name_to_id
         )
-        self.portfolio_manager.reset() # Reset its internal state
-
+        # Note: We do NOT call self.portfolio_manager.reset() because it's a new object.
+        
+        # --- 6. Reset Remaining State and Get Initial Observation ---
+        self.price_manager.reset(self.total_steps)
+        self.high_water_mark = self._cfg.initial_cash
         self.iv_bin_index = random.randint(0, len(self.market_rules_manager.iv_bins['call']['0']) - 1)
+        self.realized_vol_series = np.zeros(self.total_steps + 1, dtype=np.float32)
 
-        # 4. Get the initial observation.
         obs = self._get_observation()
         action_mask = self._get_true_action_mask() if not self._cfg.ignore_legal_actions else np.ones(self.action_space_size, dtype=np.int8)
 
         return {'observation': obs, 'action_mask': action_mask, 'to_play': -1}
+
+    # <<< NEW: Add a helper to handle day changes >>>
+    def _handle_day_change(self):
+        """Called when a day passes. Evolves the IV regime using the Markov chain."""
+        if self.iv_transition_matrix is not None:
+            # Get the probability distribution for the next state
+            transition_probs = self.iv_transition_matrix[self.current_iv_regime_index]
+            # Choose the next regime based on these probabilities
+            self.current_iv_regime_index = np.random.choice(len(self.iv_regimes), p=transition_probs)
+            
+            # Now that the regime has changed, we must rebuild the market rules
+            self._update_market_rules_for_regime()
+            # We also must re-initialize the PortfolioManager's IV calculator
+            self.portfolio_manager.iv_calculator = self._get_dynamic_iv
+
+    # <<< NEW: Create a helper to generate the skew table on the fly >>>
+    def _update_market_rules_for_regime(self):
+        """Generates and applies the skew table for the current IV regime."""
+        chosen_regime = self.iv_regimes[self.current_iv_regime_index]
+        self.current_iv_regime_name = chosen_regime['name']
+        
+        episode_skew_table = generate_dynamic_iv_skew_table(
+            max_offset=self._cfg.max_strike_offset,
+            atm_iv=chosen_regime['atm_iv'],
+            far_otm_put_iv=chosen_regime['far_otm_put_iv'],
+            far_otm_call_iv=chosen_regime['far_otm_call_iv']
+        )
+        
+        temp_cfg = self._cfg.copy()
+        temp_cfg['iv_skew_table'] = episode_skew_table
+        self.market_rules_manager = MarketRulesManager(temp_cfg)
 
     def step(self, action: int) -> BaseEnvTimestep:
         """
@@ -404,47 +420,10 @@ class OptionsZeroGameEnv(gym.Env):
         termination conditions and rewards, and returns the final timestep.
         """
         # --- Advance Time and Market ---
+        previous_day_index = self.current_day_index
         self.current_step += 1
-        time_decay_days = self._calculate_time_decay()
-        self.price_manager.step(self.current_step)
-        self._update_realized_vol()
-        self.portfolio_manager.update_positions_after_time_step(time_decay_days, self.price_manager.current_price, self.iv_bin_index)
-
-        # --- FINAL, THREE-TIERED TERMINATION LOGIC ---
-        terminated_by_rule = False
-        final_shaped_reward_override = None
-        termination_reason = "RUNNING" # Default state
-
-        current_pnl = self.portfolio_manager.get_total_pnl(self.price_manager.current_price, self.iv_bin_index)
-
-        # 1. Stop-Loss Rule (Highest Priority)
-        if self._cfg.use_stop_loss and not self.portfolio_manager.portfolio.empty:
-            initial_cost = abs(self.portfolio_manager.initial_net_premium * self.portfolio_manager.lot_size)
-            stop_loss_level = initial_cost * self._cfg.stop_loss_multiple_of_cost
-            if current_pnl <= -stop_loss_level:
-                terminated_by_rule = True
-                final_shaped_reward_override = -1.0
-                termination_reason = "STOP_LOSS"
-
-        # 2. Take-Profit Rules (Only check if not already stopped out)
-        if not terminated_by_rule and not self.portfolio_manager.portfolio.empty:
-
-            # Rule 2a: Fixed Portfolio-Level "Home Run" Target
-            fixed_target_pct = self._cfg.profit_target_pct
-            if fixed_target_pct > 0:
-                pnl_pct = (current_pnl / self.portfolio_manager.initial_cash) * 100
-
-
-        # 4. Sort the portfolio and take the crucial snapshot.
-        self.portfolio_manager.sort_portfolio()
-
-    def _advance_market_and_get_outcome(self, equity_before: float) -> BaseEnvTimestep:
-        """
-        PART 2 of the step process. It advances time and the market, calculates
-        termination conditions and rewards, and returns the final timestep.
-        """
-        # --- Advance Time and Market ---
-        self.current_step += 1
+        if self.current_day_index > previous_day_index:
+            self._handle_day_change()
         time_decay_days = self._calculate_time_decay()
         self.price_manager.step(self.current_step)
         self._update_realized_vol()

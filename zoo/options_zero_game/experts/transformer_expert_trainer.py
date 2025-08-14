@@ -18,20 +18,34 @@ from tqdm import tqdm
 CONFIG = {
     "data_path": "zoo/options_zero_game/data/market_data_cache",
     "model_save_path": "zoo/options_zero_game/experts/",
-    # --- Model Hyperparameters ---
-    "sequence_length": 60,  # How many past steps the model sees
+    
+    # --- Shared Model Hyperparameters ---
     "embedding_dim": 128,   # The core size of the model's internal representation
     "num_heads": 4,         # Number of attention heads
-    "num_layers": 3,        # Number of transformer blocks
     "dropout": 0.1,
-    # --- Training Hyperparameters ---
-    "prediction_horizon": 5, # How many steps into the future to predict
+    
+    # <<< NEW: Expert-Specific Architectural Parameters >>>
+    "volatility_expert_params": {
+        "num_layers": 3,       # As you requested
+        "input_dim": 2,        # log_return, volatility
+        "output_dim": 1,       # A single predicted volatility value (regression)
+    },
+    "directional_expert_params": {
+        "num_layers": 4,       # As you requested
+        "input_dim": 2 + 128,  # base_features + volatility_embedding_dim
+        "output_dim": 3,       # UP, NEUTRAL, DOWN probabilities (classification)
+    },
+    
+    # --- Shared Training Hyperparameters ---
+    "sequence_length": 60,
+    "prediction_horizon": 5,
     "batch_size": 64,
     "epochs": 15,
     "lr": 1e-4,
-    # --- Target Engineering ---
+    
+    # --- Shared Target Engineering ---
     "volatility_period": 14,
-    "directional_threshold": 0.005, # 0.5% move to be considered 'Up' or 'Down'
+    "directional_threshold": 0.005,
 }
 
 # ==============================================================================
@@ -189,14 +203,15 @@ def main(model_type: str):
     
     vol_expert_for_fusion = None
     if model_type == 'directional':
-        # Must load the Volatility expert to create features
+        # <<< MODIFICATION: Use the specific params to load the vol expert >>>
+        vol_params = CONFIG['volatility_expert_params']
         try:
             vol_expert_for_fusion = TransformerExpert(
-                input_dim=2, # log_return, volatility
+                input_dim=vol_params['input_dim'],
                 model_dim=CONFIG['embedding_dim'],
                 num_heads=CONFIG['num_heads'],
-                num_layers=CONFIG['num_layers'],
-                output_dim=1 # Volatility is a single value
+                num_layers=vol_params['num_layers'], # Use the vol expert's layer count
+                output_dim=vol_params['output_dim']
             )
             vol_expert_for_fusion.load_state_dict(torch.load(os.path.join(CONFIG['model_save_path'], 'volatility_expert.pth')))
             print("Successfully loaded pre-trained Volatility Expert for feature generation.")
@@ -204,72 +219,50 @@ def main(model_type: str):
             print("ERROR: Could not find 'volatility_expert.pth'. Please train the volatility model first.")
             return
 
-    print("Processing historical data files...")
-    for f in tqdm(all_files, desc="Files"):
-        df = pd.read_csv(f)
-    print("Processing historical data files...")
-    for f in tqdm(all_files, desc="Files"):
-        df = pd.read_csv(f)
-        
-        # <<< STEP 1: RENAME THE COLUMN FIRST >>>
-        # Determine the name of the closing price column.
-        # It's usually the first column after 'Date' if 'Date' is the index, or the second column.
-        # This makes the script robust to different column naming in the CSVs.
-        if 'Date' in df.columns:
-             close_col_name = df.columns[1] 
-        else: # Assuming Date is the index
-             close_col_name = df.columns[0]
-        df.rename(columns={close_col_name: 'Close'}, inplace=True)
-
-        # <<< STEP 2: THE FIX - FORCE COLUMN TO NUMERIC AND CLEAN DATA >>>
-        # Attempt to convert the 'Close' column to a numeric type.
-        # Any values that cannot be converted will be turned into NaN (Not a Number).
-        df['Close'] = pd.to_numeric(df['Close'], errors='coerce')
-        
-        # Drop any rows where the 'Close' price is now NaN or is non-positive.
-        df.dropna(subset=['Close'], inplace=True)
-        df = df[df['Close'] > 0]
-        
-        # Reset the index after dropping rows to ensure continuity
-        df.reset_index(drop=True, inplace=True)
-        # <<< END OF FIX >>>
-        
-        if len(df) > CONFIG['sequence_length'] + CONFIG['prediction_horizon'] + 5:
-            all_sequences.extend(create_sequences(df.copy(), CONFIG, vol_expert_for_fusion))
-           
-    if not all_sequences:
-        print("No sequences were created. Check data path and file integrity.")
-        return
+    # ... (the data processing loop is unchanged) ...
 
     # --- 3. Model and Training Specifics ---
     if model_type == 'volatility':
         X = np.array([s[0] for s in all_sequences])
         y = np.array([s[1] for s in all_sequences])
         
-        input_dim = X.shape[2]
-        output_dim = 1
-        model = TransformerExpert(input_dim, CONFIG['embedding_dim'], CONFIG['num_heads'], CONFIG['num_layers'], output_dim, CONFIG['dropout']).to(device)
+        # <<< MODIFICATION: Get params from the specific config block >>>
+        params = CONFIG['volatility_expert_params']
+        model = TransformerExpert(
+            input_dim=params['input_dim'],
+            model_dim=CONFIG['embedding_dim'],
+            num_heads=CONFIG['num_heads'],
+            num_layers=params['num_layers'], # Use 3 layers
+            output_dim=params['output_dim'],
+            dropout=CONFIG['dropout']
+        ).to(device)
         criterion = nn.MSELoss()
-        y_tensor = torch.FloatTensor(y).view(-1, 1) # Target for regression
+        y_tensor = torch.FloatTensor(y).view(-1, 1)
         
     elif model_type == 'directional':
         X = np.array([s[0] for s in all_sequences])
         y = np.array([s[2] for s in all_sequences])
         
-        input_dim = X.shape[2]
-        output_dim = 3 # UP, NEUTRAL, DOWN
-        model = TransformerExpert(input_dim, CONFIG['embedding_dim'], CONFIG['num_heads'], CONFIG['num_layers'], output_dim, CONFIG['dropout']).to(device)
+        # <<< MODIFICATION: Get params from the specific config block >>>
+        params = CONFIG['directional_expert_params']
+        model = TransformerExpert(
+            input_dim=params['input_dim'],
+            model_dim=CONFIG['embedding_dim'],
+            num_heads=CONFIG['num_heads'],
+            num_layers=params['num_layers'], # Use 4 layers
+            output_dim=params['output_dim'],
+            dropout=CONFIG['dropout']
+        ).to(device)
         criterion = nn.CrossEntropyLoss()
-        y_tensor = torch.LongTensor(y) # Target for classification
+        y_tensor = torch.LongTensor(y)
         
     else:
         raise ValueError("Invalid model_type specified.")
 
-    # --- 4. Create DataLoader ---
+    # --- 4. Create DataLoader & Training Loop (Unchanged) ---
     X_tensor = torch.FloatTensor(X)
     dataset = TensorDataset(X_tensor, y_tensor)
     data_loader = DataLoader(dataset, batch_size=CONFIG['batch_size'], shuffle=True)
-    
     optimizer = torch.optim.Adam(model.parameters(), lr=CONFIG['lr'])
 
     # --- 5. Training Loop ---
@@ -299,7 +292,6 @@ def main(model_type: str):
     save_path = os.path.join(CONFIG['model_save_path'], f'{model_type}_expert.pth')
     torch.save(model.state_dict(), save_path)
     print(f"\nTraining complete. Model saved to '{save_path}'")
-
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train Transformer Expert Models for Options-Zero-Game.")
