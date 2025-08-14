@@ -111,11 +111,14 @@ class PortfolioManager:
     def add_hedge(self, action_name: str, current_price: float, iv_bin_index: int, current_step: int):
         """
         Adds a protective leg to ANY specified un-hedged leg in the portfolio.
-        This definitive version uses the robust "Add and Unify" pattern.
+        This robust version works on multi-leg portfolios and correctly determines
+        the hedge direction (long vs. short). It uses the "Add and Unify" pattern.
         """
         try:
             # --- 1. Identify Target Leg and Perform Failsafe Checks ---
             position_index = int(action_name.split('_')[-1])
+            
+            # <<< THE FIX: Remove the len(self.portfolio) != 1 check >>>
             if not (0 <= position_index < len(self.portfolio)): return
             if len(self.portfolio) >= self.max_positions: return
 
@@ -127,7 +130,7 @@ class PortfolioManager:
             days_to_expiry = naked_leg_to_hedge['days_to_expiry']
             hedge_direction = 'short' if naked_leg_to_hedge['direction'] == 'long' else 'long'
             
-            # --- 3. Dynamic Hedge Strike Placement ---
+            # --- 3. Dynamic Hedge Strike Placement (This logic is robust and correct) ---
             naked_strike = naked_leg_to_hedge['strike_price']
             is_itm = (hedge_type == 'call' and current_price > naked_strike) or (hedge_type == 'put' and current_price < naked_strike)
             if is_itm:
@@ -142,12 +145,11 @@ class PortfolioManager:
             hedge_leg_def = [{'type': hedge_type, 'direction': hedge_direction, 'strike_price': hedge_strike, 'days_to_expiry': days_to_expiry, 'entry_step': current_step}]
             priced_hedge_leg = self._price_legs(hedge_leg_def, current_price, iv_bin_index)
             
-            # This is a much cleaner way to add the leg without a problematic intermediate call to _execute_trades
             new_leg_df = pd.DataFrame(priced_hedge_leg)
             self.portfolio = pd.concat([self.portfolio, new_leg_df], ignore_index=True)
             
             # --- 5. Unify the Entire Portfolio into a Single New Strategy ---
-            # Now that the portfolio has all its legs, we unify them.
+            # The portfolio is now a complex, non-standard position.
             new_strategy_name = f"CUSTOM_{len(self.portfolio)}_LEGS"
             self._unify_and_reprofile_portfolio(new_strategy_name)
 
@@ -157,7 +159,6 @@ class PortfolioManager:
         except (ValueError, IndexError) as e:
             print(f"Warning: Could not parse HEDGE action '{action_name}'. Error: {e}")
             return
-
 
     # ==============================================================================
     #                      DYNAMIC DELTA-NEUTRAL ADJUSTMENT
