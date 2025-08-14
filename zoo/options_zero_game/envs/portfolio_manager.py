@@ -168,58 +168,48 @@ class PortfolioManager:
     def add_hedge(self, action_name: str, current_price: float, iv_bin_index: int, current_step: int):
         """
         Adds a protective leg to ANY specified un-hedged leg in the portfolio.
-        This robust version works on multi-leg portfolios and correctly determines
-        the hedge direction (long vs. short).
+        This definitive version uses the robust "Add and Unify" pattern.
         """
         try:
             # --- 1. Identify Target Leg and Perform Failsafe Checks ---
             position_index = int(action_name.split('_')[-1])
-            
             if not (0 <= position_index < len(self.portfolio)): return
             if len(self.portfolio) >= self.max_positions: return
 
             naked_leg_to_hedge = self.portfolio.iloc[position_index]
             if naked_leg_to_hedge['is_hedged']: return
-            
+
             # --- 2. Correctly Determine Hedge Characteristics ---
             hedge_type = naked_leg_to_hedge['type']
             days_to_expiry = naked_leg_to_hedge['days_to_expiry']
-            
             hedge_direction = 'short' if naked_leg_to_hedge['direction'] == 'long' else 'long'
             
-            # --- 3. Dynamic Hedge Strike Placement (This logic is correct) ---
+            # --- 3. Dynamic Hedge Strike Placement ---
             naked_strike = naked_leg_to_hedge['strike_price']
-            atm_strike = self.market_rules_manager.get_atm_price(current_price)
-            # ... [Same dynamic logic as before to calculate hedge_strike] ...
-            is_itm = (hedge_type == 'call' and current_price > naked_strike) or \
-                     (hedge_type == 'put' and current_price < naked_strike)
+            is_itm = (hedge_type == 'call' and current_price > naked_strike) or (hedge_type == 'put' and current_price < naked_strike)
             if is_itm:
-                hedge_strike = atm_strike + self.strike_distance if hedge_type == 'call' else atm_strike - self.strike_distance
+                hedge_strike = self.market_rules_manager.get_atm_price(current_price) + (self.strike_distance if hedge_type == 'call' else -self.strike_distance)
             else:
                 entry_premium = naked_leg_to_hedge['entry_premium']
                 breakeven_price = naked_strike + entry_premium if hedge_type == 'call' else naked_strike - entry_premium
                 closest_valid_strike = self.market_rules_manager.get_atm_price(breakeven_price)
-                hedge_strike = closest_valid_strike if closest_valid_strike != naked_strike else \
-                               (naked_strike + self.strike_distance if hedge_type == 'call' else naked_strike - self.strike_distance)
+                hedge_strike = closest_valid_strike if closest_valid_strike != naked_strike else (naked_strike + self.strike_distance if hedge_type == 'call' else naked_strike - self.strike_distance)
 
-            # --- 4. Define, Price, and Assemble the Final Strategy ---
-            hedge_leg_def = [{
-                'type': hedge_type, 'direction': hedge_direction, 'strike_price': hedge_strike,
-                'days_to_expiry': days_to_expiry, 'entry_step': current_step
-            }]
+            # --- 4. Define, Price, and ADD the New Hedge Leg ---
+            hedge_leg_def = [{'type': hedge_type, 'direction': hedge_direction, 'strike_price': hedge_strike, 'days_to_expiry': days_to_expiry, 'entry_step': current_step}]
             priced_hedge_leg = self._price_legs(hedge_leg_def, current_price, iv_bin_index)
             
-            original_legs = self.portfolio.to_dict(orient='records')
-            final_strategy_legs = original_legs + priced_hedge_leg
+            # This is a much cleaner way to add the leg without a problematic intermediate call to _execute_trades
+            new_leg_df = pd.DataFrame(priced_hedge_leg)
+            self.portfolio = pd.concat([self.portfolio, new_leg_df], ignore_index=True)
             
-            # --- 5. Atomically Replace the Old Position with the New, Unified One ---
-            original_creation_id = original_legs[0]['creation_id']
-            pnl_profile = self._calculate_universal_risk_profile(final_strategy_legs, self.realized_pnl)
-            # Give it a generic "custom" ID, as it's now a complex, non-standard position
-            pnl_profile['strategy_id'] = self.strategy_name_to_id.get("CUSTOM_HEDGED", -2)
-            
-            self.portfolio = self.portfolio[self.portfolio['creation_id'] != original_creation_id].reset_index(drop=True)
-            self._execute_trades(final_strategy_legs, pnl_profile)
+            # --- 5. Unify the Entire Portfolio into a Single New Strategy ---
+            # Now that the portfolio has all its legs, we unify them.
+            new_strategy_name = f"CUSTOM_{len(self.portfolio)}_LEGS"
+            self._unify_and_reprofile_portfolio(new_strategy_name)
+
+            # --- 6. Finalize Snapshot for Logger ---
+            self.post_action_portfolio = self.portfolio.copy()
 
         except (ValueError, IndexError) as e:
             print(f"Warning: Could not parse HEDGE action '{action_name}'. Error: {e}")
@@ -814,6 +804,34 @@ class PortfolioManager:
         }
 
     # --- Private Methods ---
+    def _unify_and_reprofile_portfolio(self, new_strategy_name: str):
+        """
+        Unifies all legs in the current portfolio under a single creation_id
+        and a new, combined risk profile. This is called after an action like
+        'add_hedge' transforms the nature of the open strategy.
+        """
+        if self.portfolio.empty: return
+
+        # 1. Get a new, shared creation_id for the unified strategy
+        unified_creation_id = self.next_creation_id
+        self.next_creation_id += 1
+        
+        # 2. Convert portfolio to a list of dicts for the risk engine
+        current_legs = self.portfolio.to_dict(orient='records')
+        
+        # 3. Calculate the new, combined risk profile, including realized P&L
+        pnl_profile = self._calculate_universal_risk_profile(current_legs, self.realized_pnl)
+        new_strategy_id = self.strategy_name_to_id.get(new_strategy_name, -2) # -2 for Custom Hedged
+
+        # 4. Update every leg in the portfolio with the new, unified profile
+        self.portfolio['creation_id'] = unified_creation_id
+        self.portfolio['strategy_id'] = new_strategy_id
+        self.portfolio['strategy_max_profit'] = pnl_profile['max_profit']
+        self.portfolio['strategy_max_loss'] = pnl_profile['max_loss']
+        
+        # 5. The portfolio is now unified. The hedge status needs re-evaluation.
+        self._update_hedge_status()
+
     def _get_unrealized_pnl_for_leg(self, position_row: pd.Series, current_price: float, iv_bin_index: int) -> float:
         """Calculates the current unrealized PnL for a single leg of the portfolio."""
         is_call = position_row['type'] == 'call'
@@ -1056,17 +1074,18 @@ class PortfolioManager:
         """
         The definitive and universal summary calculator. It uses the universal risk engine
         to get breakeven points and then calculates POP for ANY strategy shape.
+        This version includes an ultra-robust calculation for rr_ratio to prevent
+        non-finite values from poisoning the observation vector.
         """
         # --- 1. Handle Empty Portfolio ---
         if self.portfolio.empty:
-            # When portfolio is empty, the only P&L is what's been realized.
             is_profitable = self.realized_pnl > 0
             return {
                 'max_profit': self.realized_pnl, 'max_loss': self.realized_pnl,
                 'rr_ratio': 0.0, 'prob_profit': 1.0 if is_profitable else 0.0
             }
 
-        # <<< THE FIX: The local helper now requires realized_pnl >>>
+        # Local helper for P&L calculation (now includes realized_pnl)
         def _get_total_pnl_at_price(price, trade_legs, realized_pnl):
             unrealized_pnl = 0.0
             for _, leg in trade_legs.iterrows():
@@ -1082,10 +1101,19 @@ class PortfolioManager:
         max_profit = risk_profile['max_profit']
         max_loss = risk_profile['max_loss']
         breakevens = risk_profile['breakevens']
-        rr_ratio = abs(max_profit / max_loss) if max_loss != 0 and max_profit is not None and max_loss is not None else 999.0
+        
+        rr_ratio = 999.0  # Default to a high, safe value
+        try:
+            if max_profit is not None and max_loss is not None and max_profit > 0:
+                if abs(max_loss) > 1e-6:
+                    calculated_rr = abs(max_profit / max_loss)
+                    if np.isfinite(calculated_rr):
+                        rr_ratio = calculated_rr
+        except (TypeError, ZeroDivisionError):
+            rr_ratio = 999.0 # Fallback to the safe value on any error
         
         days_to_expiry = self.portfolio.iloc[0]['days_to_expiry']
-        vol = self.iv_calculator(0, 'call')
+        vol = self.iv_calculator(0, 'call') # Use injected iv_calculator
         
         # --- 3. Calculate POP based on the found breakevens ---
         total_pop = 0.0
@@ -1098,7 +1126,6 @@ class PortfolioManager:
             be = breakevens[0]
             test_price = be + (self.strike_distance * 0.1) 
             
-            # <<< THE FIX: Pass self.realized_pnl to the helper >>>
             if _get_total_pnl_at_price(test_price, self.portfolio, self.realized_pnl) > 0:
                 greeks = self.bs_manager.get_all_greeks_and_price(current_price, be, days_to_expiry, vol, is_call=True)
                 total_pop = _numba_cdf(greeks['d2'])
@@ -1115,7 +1142,6 @@ class PortfolioManager:
                 test_price = (lower_b + upper_b) / 2 if -np.inf < lower_b and np.inf > upper_b else \
                              (upper_b - self.strike_distance if lower_b == -np.inf else lower_b + self.strike_distance)
                 
-                # <<< THE FIX: Pass self.realized_pnl to the helper >>>
                 if _get_total_pnl_at_price(test_price, self.portfolio, self.realized_pnl) > 0:
                     greeks_upper = self.bs_manager.get_all_greeks_and_price(current_price, upper_b, days_to_expiry, vol, False) if upper_b != np.inf else None
                     prob_below_upper = _numba_cdf(-greeks_upper['d2']) if greeks_upper else 1.0
