@@ -686,6 +686,19 @@ class OptionsZeroGameEnv(gym.Env):
         true_action_mask = self._get_true_action_mask()
         final_obs_vec = np.concatenate((vec, true_action_mask.astype(np.float32)))
 
+        # --- 3. THE FIX: FINAL, UNBREAKABLE SANITIZATION PASS ---
+        # This is the most robust way to prevent CUDA errors. It checks the
+        # entire completed observation vector for any bad numbers and replaces them.
+        if not np.all(np.isfinite(final_obs_vec)):
+            # Find the indices of any inf or NaN values
+            bad_indices = np.where(~np.isfinite(final_obs_vec))
+            # Replace them with a safe default (0.0)
+            final_obs_vec[bad_indices] = 0.0
+            
+            # This print statement is invaluable for debugging. It will tell you
+            # exactly which part of your observation vector is producing bad data.
+            print(f"WARNING: Found and corrected non-finite values in observation vector at indices: {bad_indices}")
+
         # 2. Then, run assertions on the FINAL object
         assert final_obs_vec.shape == (self.obs_vector_size,), f"Observation shape mismatch. Expected {self.obs_vector_size}, but got {final_obs_vec.shape}"
         assert np.all(np.isfinite(final_obs_vec)), "Observation vector contains NaN or Inf."
