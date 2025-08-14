@@ -339,9 +339,8 @@ class OptionsZeroGameEnv(gym.Env):
         equity_before = self.portfolio_manager.get_current_equity(self.price_manager.current_price, self.iv_bin_index)
 
         # --- Symmetrical Augmentation on Step 0 ---
+        action_name = self.indices_to_actions[action]
         if self.current_step == 0 and self.is_mirrored_episode:
-            action_name = self.indices_to_actions[action]
-            
             # Look up the mirrored action
             mirrored_action_name = self.portfolio_manager.SYMMETRIC_ACTION_MAP.get(action_name)
             
@@ -355,7 +354,7 @@ class OptionsZeroGameEnv(gym.Env):
         self._take_action_on_state(action)
         
         # 3. Advance the market and get the final outcome.
-        return self._advance_market_and_get_outcome(equity_before, final_action_name)
+        return self._advance_market_and_get_outcome(equity_before, action_name)
 
     def _get_dynamic_iv(self, offset: int, option_type: str) -> float:
         """
