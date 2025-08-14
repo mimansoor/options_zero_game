@@ -338,7 +338,7 @@ class OptionsZeroGameEnv(gym.Env):
             mirrored_action_name = self.portfolio_manager.SYMMETRIC_ACTION_MAP.get(action_name)
             
             if mirrored_action_name:
-                print(f"DEBUG: Mirrored Augmentation: '{action_name}' -> '{mirrored_action_name}'")
+                #print(f"DEBUG: Mirrored Augmentation: '{action_name}' -> '{mirrored_action_name}'")
                 # Get the index of the new, mirrored action
                 mirrored_action_index = self.actions_to_indices.get(mirrored_action_name, action)
                 action = mirrored_action_index # Override the agent's choice
