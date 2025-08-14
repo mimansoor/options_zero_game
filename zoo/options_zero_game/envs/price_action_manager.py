@@ -1,9 +1,11 @@
 # zoo/options_zero_game/envs/price_action_manager.py
+import torch # Make sure torch is imported
 import os, random, math, joblib
 import numpy as np
 import pandas as pd
 import pandas_ta as ta
 from typing import Dict, List, Any
+from zoo.options_zero_game.experts.transformer_expert_trainer import TransformerExpert, CONFIG as ExpertConfig
 
 class PriceActionManager:
     """
@@ -19,6 +21,7 @@ class PriceActionManager:
         self.total_steps = cfg['time_to_expiry_days'] * cfg['steps_per_day']
         self.steps_per_day = cfg['steps_per_day']
         self.momentum_window_steps = cfg['momentum_window_steps']
+        self.expert_sequence_length = cfg.get('expert_sequence_length', 60)
 
         # --- NEW: Load the expert models ---
         self.trend_expert = None
@@ -35,6 +38,45 @@ class PriceActionManager:
             print("Successfully loaded Holy Trinity expert models.")
         except FileNotFoundError:
             print("Warning: Holy Trinity models not found. Running without experts. Run holy_trinity_trainer.py.")
+
+        # --- Load the Transformer Experts (The Correct Way) ---
+        self.volatility_expert = None
+        self.directional_expert = None
+        self.volatility_embedding = None 
+        self.directional_prediction = None
+        device = 'cpu' # Always use CPU for inference in the environment
+
+        try:
+            # 1. Re-create the model architecture
+            vol_params = ExpertConfig['volatility_expert_params']
+            self.volatility_expert = TransformerExpert(
+                input_dim=vol_params['input_dim'], model_dim=ExpertConfig['embedding_dim'],
+                num_heads=ExpertConfig['num_heads'], num_layers=vol_params['num_layers'],
+                output_dim=vol_params['output_dim'], dropout=ExpertConfig['dropout']
+            ).to(device)
+            # 2. Load the saved weights (state_dict) into the model
+            state_dict = torch.load('zoo/options_zero_game/experts/volatility_expert.pth', map_location=device)
+            self.volatility_expert.load_state_dict(state_dict)
+            self.volatility_expert.eval() # 3. Set to evaluation mode
+            print("Successfully loaded Volatility Transformer expert.")
+        except FileNotFoundError:
+            print("Warning: Volatility Transformer expert not found. Run trainer first.")
+
+        try:
+            # 1. Re-create the model architecture
+            dir_params = ExpertConfig['directional_expert_params']
+            self.directional_expert = TransformerExpert(
+                input_dim=dir_params['input_dim'], model_dim=ExpertConfig['embedding_dim'],
+                num_heads=ExpertConfig['num_heads'], num_layers=dir_params['num_layers'],
+                output_dim=dir_params['output_dim'], dropout=ExpertConfig['dropout']
+            ).to(device)
+            # 2. Load the saved weights (state_dict) into the model
+            state_dict = torch.load('zoo/options_zero_game/experts/directional_expert.pth', map_location=device)
+            self.directional_expert.load_state_dict(state_dict)
+            self.directional_expert.eval() # 3. Set to evaluation mode
+            print("Successfully loaded Directional Transformer expert.")
+        except FileNotFoundError:
+            print("Warning: Directional Transformer expert not found. Run trainer first.")
 
         self.np_random = np_random
         self._available_tickers = self._load_tickers()
@@ -128,6 +170,28 @@ class PriceActionManager:
                 self.expert_ema_pred = self.ema_expert.predict(features)[0]
                 self.expert_rsi_pred = self.rsi_expert.predict_proba(features)[0]
                 self.expert_vol_pred = self.volatility_expert.predict(features)[0]    
+
+        # Hierarchical Transformer Expert Pipeline
+        # Ensure we have enough historical data to form a sequence
+        if self.volatility_expert and self.directional_expert and current_step >= self.expert_sequence_length:
+            
+            # 1. Get raw history as a tensor
+            raw_history = self._get_raw_history_for_transformer(current_step)
+
+            with torch.no_grad():
+                # 2. Run Volatility Expert to get the context embedding
+                vol_embedding = self.volatility_expert.encode(raw_history.unsqueeze(0)) # Add batch dim
+                self.volatility_embedding = vol_embedding.cpu().numpy().flatten()
+
+                # 3. Fuse features for the Directional Expert
+                # Tile the embedding to match the sequence length and concatenate
+                vol_embedding_tiled = vol_embedding.repeat(raw_history.shape[0], 1)
+                directional_input = torch.cat([raw_history, vol_embedding_tiled], dim=1)
+
+                # 4. Run Directional Expert on the fused input
+                dir_prediction_logits = self.directional_expert(directional_input.unsqueeze(0)) # Add batch dim
+                dir_prediction_probs = torch.nn.functional.softmax(dir_prediction_logits, dim=-1)
+                self.directional_prediction = dir_prediction_probs.cpu().numpy().flatten()
 
     def _get_features_for_experts(self, current_step: int) -> np.ndarray:
         """Prepares the feature vector for the Holy Trinity experts."""

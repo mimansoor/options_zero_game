@@ -146,6 +146,10 @@ class OptionsZeroGameEnv(gym.Env):
         self.indices_to_actions = {v: k for k, v in self.actions_to_indices.items()}
         self.action_space_size = len(self.actions_to_indices)
 
+        # <<< UPDATE YOUR OBS_IDX AND SIZES >>>
+        self.vol_embedding_size = 128 # Must match your model's embedding_dim
+        self.dir_prediction_size = 3   # UP, NEUTRAL, DOWN probabilities
+
         self.OBS_IDX = {
             'PRICE_NORM': 0, 'TIME_NORM': 1, 'PNL_NORM': 2, 'VOL_MISMATCH_NORM': 3, 'LOG_RETURN': 4,
             'MOMENTUM_NORM': 5, 'PORTFOLIO_DELTA': 6, 'PORTFOLIO_GAMMA': 7, 'PORTFOLIO_THETA': 8, 'PORTFOLIO_VEGA': 9,
@@ -156,7 +160,11 @@ class OptionsZeroGameEnv(gym.Env):
             'EXPECTED_MOVE_NORM': 19, 'PORTFOLIO_PROFIT_FACTOR_NORM': 20,
             # --- Realized and MtM Highest and Lowest Profit/Loss
             'MTM_PNL_HIGH_NORM': 21, 'MTM_PNL_LOW_NORM': 22,
+            # --- NEW EXPERT FEATURES ---
+            'VOL_EMBEDDING_START': 23, # A marker for the start
+            'DIR_PREDICTION_START': 23 + self.vol_embedding_size, # e.g., 151
         }
+        self.summary_state_size = 23 + self.vol_embedding_size + self.dir_prediction_size
         self.POS_IDX = {
             'IS_OCCUPIED': 0, 'TYPE_NORM': 1, 'DIRECTION_NORM': 2, 'STRIKE_DIST_NORM': 3, 'DAYS_HELD_NORM': 4,
             'PROB_OF_PROFIT': 5, 'MAX_PROFIT_NORM': 6, 'MAX_LOSS_NORM': 7, 'DELTA': 8, 'GAMMA': 9, 'THETA': 10, 'VEGA': 11,
@@ -677,7 +685,18 @@ class OptionsZeroGameEnv(gym.Env):
         max_drawdown_norm = math.tanh(self.portfolio_manager.mtm_pnl_low / self._cfg.initial_cash)
         vec[self.OBS_IDX['MTM_PNL_HIGH_NORM']] = high_water_mark_norm
         vec[self.OBS_IDX['MTM_PNL_LOW_NORM']] = max_drawdown_norm
-        
+
+        # Add Volatility Embedding
+        if self.price_manager.volatility_embedding is not None:
+            start_idx = self.OBS_IDX['VOL_EMBEDDING_START']
+            end_idx = start_idx + self.vol_embedding_size
+            obs[start_idx:end_idx] = self.price_manager.volatility_embedding
+            
+        # Add Directional Prediction
+        if self.price_manager.directional_prediction is not None:
+            start_idx = self.OBS_IDX['DIR_PREDICTION_START']
+            end_idx = start_idx + self.dir_prediction_size
+            obs[start_idx:end_idx] = self.price_manager.directional_prediction
 
         # Per-Position State
         self.portfolio_manager.get_positions_state(vec, self.PORTFOLIO_START_IDX, self.PORTFOLIO_STATE_SIZE_PER_POS, self.POS_IDX, self.price_manager.current_price, self.iv_bin_index, self.current_step, self.total_steps)

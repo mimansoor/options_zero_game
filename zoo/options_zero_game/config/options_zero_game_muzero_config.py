@@ -327,6 +327,9 @@ options_zero_game_muzero_config = dict(
         # <<< NEW: Add a parameter specifically for the agent's naked opening actions >>>
         # The agent can only OPEN naked positions within this narrower range.
         agent_max_open_offset=10,
+
+        # This MUST match the 'sequence_length' used in the expert trainer CONFIG.
+        expert_sequence_length=60,
     ),
     policy=dict(
         model=dict(
