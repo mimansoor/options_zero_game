@@ -426,7 +426,7 @@ class OptionsZeroGameEnv(gym.Env):
                 self.price_manager.current_price, self.iv_bin_index, self.current_step
             )
         elif final_action_name == 'CONVERT_TO_IRON_FLY':
-            self.portfolio_manager.convert_to_iron_condor(
+            self.portfolio_manager.convert_to_iron_fly(
                 self.price_manager.current_price, self.iv_bin_index, self.current_step
             )
         elif final_action_name == 'CONVERT_TO_STRANGLE':
@@ -471,6 +471,14 @@ class OptionsZeroGameEnv(gym.Env):
         self.price_manager.step(self.current_step)
         self._update_realized_vol()
         self.portfolio_manager.update_positions_after_time_step(time_decay_days, self.price_manager.current_price, self.iv_bin_index)
+
+        # <<< NEW: Call the debug print method here >>>
+        # This will only print if the env is in eval_mode.
+        self.portfolio_manager.debug_print_portfolio(
+            current_price=self.price_manager.current_price,
+            step=self.current_step,
+            day=self.current_day_index
+        )
 
         # --- FINAL, THREE-TIERED TERMINATION LOGIC ---
         terminated_by_rule = False

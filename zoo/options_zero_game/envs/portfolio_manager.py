@@ -120,7 +120,9 @@ class PortfolioManager:
             if len(self.portfolio) >= self.max_positions: return
 
             naked_leg_to_hedge = self.portfolio.iloc[position_index]
-            if naked_leg_to_hedge['is_hedged']: return
+            if naked_leg_to_hedge['is_hedged']:
+                print(f"DEBUG: leg is not naked can't add hedge.")
+                return
             
             # --- 2. Correctly Determine Hedge Characteristics ---
             original_legs = self.portfolio.to_dict(orient='records')
@@ -1668,28 +1670,47 @@ class PortfolioManager:
         self._execute_trades(final_condor_legs, pnl_profile)
 
     def convert_to_iron_fly(self, current_price: float, iv_bin_index: int, current_step: int):
-        """Adds long wings to a short straddle using the atomic transformation pattern."""
+        """
+        Adds long wings to a short straddle to define its risk.
+        This definitive version includes robust failsafes and debug printing.
+        """
+        # --- 1. Failsafe Checks and Setup ---
         current_id = self.portfolio.iloc[0]['strategy_id']
         current_name = self.id_to_strategy_name.get(current_id, '')
-        if len(self.portfolio) != 2 or current_name != 'SHORT_STRADDLE': return
-        if len(self.portfolio) > self.max_positions - 2: return
-        
+        if len(self.portfolio) != 2 or current_name != 'SHORT_STRADDLE':
+            # This is not a bug, just the agent choosing an illegal action. No print needed.
+            return
+        if len(self.portfolio) > self.max_positions - 2:
+            print("DEBUG: convert_to_iron_fly aborted. Not enough available positions.")
+            return
+
         original_legs = self.portfolio.to_dict(orient='records')
         original_creation_id = original_legs[0]['creation_id']
         days_to_expiry = original_legs[0]['days_to_expiry']
         atm_strike = original_legs[0]['strike_price']
-
+        
+        # --- 2. Dynamically Determine Wing Width ---
         current_straddle_credit = sum(self.bs_manager.get_price_with_spread(self.bs_manager.get_all_greeks_and_price(current_price, leg['strike_price'], days_to_expiry, self.iv_calculator(0, leg['type']), leg['type'] == 'call')['price'], is_buy=True, bid_ask_spread_pct=self.bid_ask_spread_pct) for leg in original_legs)
         wing_width = self.market_rules_manager._round_to_strike_increment(current_straddle_credit)
-        wing_width = max(wing_width, self.strike_distance * 2)
+        
+        # --- 3. THE FIX: Add Robust Safety Checks and Debug Prints ---
+        strike_long_put = atm_strike - wing_width
+        
+        if strike_long_put <= self.strike_distance: # Ensure strike is positive and not too close
+            print(f"DEBUG: convert_to_iron_fly aborted. Calculated wing width ({wing_width}) is too large for the current ATM strike ({atm_strike}), resulting in an invalid put strike ({strike_long_put}).")
+            return # Abort the action
+        
+        strike_long_call = atm_strike + wing_width
 
+        # --- 4. Define, Price, and Assemble the Final Strategy ---
         new_wing_legs_def = [
-            {'type': 'put', 'direction': 'long', 'strike_price': atm_strike - wing_width, 'entry_step': current_step, 'days_to_expiry': days_to_expiry},
-            {'type': 'call', 'direction': 'long', 'strike_price': atm_strike + wing_width, 'entry_step': current_step, 'days_to_expiry': days_to_expiry}
+            {'type': 'put', 'direction': 'long', 'strike_price': strike_long_put, 'entry_step': current_step, 'days_to_expiry': days_to_expiry},
+            {'type': 'call', 'direction': 'long', 'strike_price': strike_long_call, 'entry_step': current_step, 'days_to_expiry': days_to_expiry}
         ]
         priced_wings = self._price_legs(new_wing_legs_def, current_price, iv_bin_index)
         final_fly_legs = original_legs + priced_wings
         
+        # --- 5. Calculate Unified Profile and Atomically Update Portfolio ---
         pnl_profile = self._calculate_universal_risk_profile(final_fly_legs, self.realized_pnl)
         pnl_profile['strategy_id'] = self.strategy_name_to_id.get('SHORT_IRON_FLY')
         
@@ -1778,3 +1799,71 @@ class PortfolioManager:
         self.portfolio = self.portfolio[self.portfolio['creation_id'] != original_creation_id].reset_index(drop=True)
         self._execute_trades(legs_to_keep, pnl_profile)
 
+    def debug_print_portfolio(self, current_price: float, step: int, day: int):
+        """
+        Prints a detailed, human-readable snapshot of the current portfolio state,
+        including all stored data and live calculated values for each leg.
+        This method is only active when is_eval_mode is True.
+        """
+        # --- 1. Guard Clause: Only run in evaluation mode ---
+        if not self.is_eval_mode:
+            return
+
+        print("\n" + "="*120)
+        print(f"--- Portfolio Debug Snapshot (End of Step: {step}, Day: {day}) ---")
+
+        # --- 2. Handle Empty Portfolio ---
+        if self.portfolio.empty:
+            print("Portfolio is empty.")
+            print("="*120 + "\n")
+            return
+
+        # --- 3. Prepare to Collect Detailed Data ---
+        debug_data = []
+        atm_price = self.market_rules_manager.get_atm_price(current_price)
+
+        # --- 4. Loop Through Portfolio and Calculate Live Data ---
+        for _, leg in self.portfolio.iterrows():
+            is_call = leg['type'] == 'call'
+
+            # Get live Greeks and premium
+            offset = round((leg['strike_price'] - atm_price) / self.strike_distance)
+            vol = self.iv_calculator(offset, leg['type'])
+            greeks = self.bs_manager.get_all_greeks_and_price(
+                current_price, leg['strike_price'], leg['days_to_expiry'], vol, is_call
+            )
+            current_premium = self.bs_manager.get_price_with_spread(
+                greeks['price'], is_buy=(leg['direction'] == 'short'), bid_ask_spread_pct=self.bid_ask_spread_pct
+            )
+
+            # Calculate live P&L for this leg
+            direction_multiplier = 1 if leg['direction'] == 'long' else -1
+            pnl_per_share = current_premium - leg['entry_premium']
+            live_pnl = pnl_per_share * direction_multiplier * self.lot_size
+
+            # --- 5. Assemble Data for this Leg ---
+            leg_details = {
+                "ID": leg['creation_id'],
+                "Strat_ID": leg['strategy_id'],
+                "Type": f"{leg['direction'].upper()} {leg['type'].upper()}",
+                "Strike": leg['strike_price'],
+                "Entry Prem": leg['entry_premium'],
+                "Current Prem": current_premium,
+                "Live PnL": live_pnl,
+                "DTE": leg['days_to_expiry'],
+                "Hedged": leg['is_hedged'],
+                "Delta": greeks['delta'] * self.lot_size * direction_multiplier,
+                "Gamma": greeks['gamma'] * (self.lot_size**2 * current_price**2 / 100) * direction_multiplier,
+                "Theta": greeks['theta'] * self.lot_size * direction_multiplier,
+                "Vega": greeks['vega'] * self.lot_size * direction_multiplier,
+            }
+            debug_data.append(leg_details)
+
+        # --- 6. Format and Print the DataFrame ---
+        debug_df = pd.DataFrame(debug_data)
+
+        # Set formatting for better readability
+        pd.options.display.float_format = '{:,.2f}'.format
+
+        print(debug_df.to_string())
+        print("="*120 + "\n")
