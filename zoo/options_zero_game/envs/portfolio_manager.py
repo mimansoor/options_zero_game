@@ -1799,7 +1799,7 @@ class PortfolioManager:
         self.portfolio = self.portfolio[self.portfolio['creation_id'] != original_creation_id].reset_index(drop=True)
         self._execute_trades(legs_to_keep, pnl_profile)
 
-    def debug_print_portfolio(self, current_price: float, step: int, day: int):
+    def debug_print_portfolio(self, current_price: float, step: int, day: int, action_taken: str):
         """
         Prints a detailed, human-readable snapshot of the current portfolio state,
         including all stored data and live calculated values for each leg.
@@ -1810,7 +1810,7 @@ class PortfolioManager:
             return
 
         print("\n" + "="*120)
-        print(f"--- Portfolio Debug Snapshot (End of Step: {step}, Day: {day}) ---")
+        print(f"--- Portfolio Debug Snapshot (After Action: '{action_taken}' at Step: {step}, Day: {day}) ---")
 
         # --- 2. Handle Empty Portfolio ---
         if self.portfolio.empty:

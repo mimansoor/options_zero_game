@@ -62,7 +62,7 @@ class LogReplayEnv(gym.Wrapper):
             price_for_log=pre_action_price, action_info=self.env.last_action_info
         )
 
-        timestep = self.env._advance_market_and_get_outcome(equity_before)
+        timestep = self.env._advance_market_and_get_outcome(equity_before, self.env.last_action_info['final_action_name'])
         
         self._log_state_snapshot(
             step_num=step_at_action, day_num=day_at_action, is_post_action=False,
@@ -78,7 +78,6 @@ class LogReplayEnv(gym.Wrapper):
             
         return timestep
 
-    # <<< ADD THIS NEW, CORRECTED METHOD >>>
     def _get_live_pnl(self, portfolio_df: pd.DataFrame, current_price: float, iv_bin_index: int) -> list:
         """
         Calculates the live, un-realized P&L for each individual leg in the

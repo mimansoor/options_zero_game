@@ -355,7 +355,7 @@ class OptionsZeroGameEnv(gym.Env):
         self._take_action_on_state(action)
         
         # 3. Advance the market and get the final outcome.
-        return self._advance_market_and_get_outcome(equity_before)
+        return self._advance_market_and_get_outcome(equity_before, final_action_name)
 
     def _get_dynamic_iv(self, offset: int, option_type: str) -> float:
         """
@@ -457,7 +457,7 @@ class OptionsZeroGameEnv(gym.Env):
         # 4. Sort the portfolio and take the crucial snapshot.
         self.portfolio_manager.sort_portfolio()
 
-    def _advance_market_and_get_outcome(self, equity_before: float) -> BaseEnvTimestep:
+    def _advance_market_and_get_outcome(self, equity_before: float, action_taken: str) -> BaseEnvTimestep:
         """
         PART 2 of the step process. It advances time and the market, calculates
         termination conditions and rewards, and returns the final timestep.
@@ -477,7 +477,8 @@ class OptionsZeroGameEnv(gym.Env):
         self.portfolio_manager.debug_print_portfolio(
             current_price=self.price_manager.current_price,
             step=self.current_step,
-            day=self.current_day_index
+            day=self.current_day_index,
+            action_taken=action_taken # Pass the action name here
         )
 
         # --- FINAL, THREE-TIERED TERMINATION LOGIC ---
