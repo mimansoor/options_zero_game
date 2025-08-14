@@ -437,6 +437,22 @@ class OptionsZeroGameEnv(gym.Env):
             self.portfolio_manager.convert_to_straddle(
                 self.price_manager.current_price, self.iv_bin_index, self.current_step
             )
+        elif final_action_name == 'CONVERT_TO_BULL_PUT_SPREAD':
+            self.portfolio_manager.convert_to_bull_put_spread(
+                self.price_manager.current_price, self.iv_bin_index, self.current_step
+            )
+        elif final_action_name == 'CONVERT_TO_BEAR_CALL_SPREAD':
+            self.portfolio_manager.convert_to_bear_call_spread(
+                self.price_manager.current_price, self.iv_bin_index, self.current_step
+            )
+        elif final_action_name == 'CONVERT_TO_BULL_CALL_SPREAD':
+            self.portfolio_manager.convert_to_bull_call_spread(
+                self.price_manager.current_price, self.iv_bin_index, self.current_step
+            )
+        elif final_action_name == 'CONVERT_TO_BEAR_PUT_SPREAD':
+            self.portfolio_manager.convert_to_bear_put_spread(
+                self.price_manager.current_price, self.iv_bin_index, self.current_step
+            )
 
         # 4. Sort the portfolio and take the crucial snapshot.
         self.portfolio_manager.sort_portfolio()
