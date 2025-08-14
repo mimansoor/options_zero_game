@@ -211,6 +211,8 @@ class OptionsZeroGameEnv(gym.Env):
         self.low_pop_penalty = cfg.get('low_pop_opening_penalty', 0.0)
         self.delta_neutral_threshold = cfg.get('delta_neutral_threshold', 0.1)
 
+        self.is_mirrored_episode = False
+
     def seed(self, seed: int, dynamic_seed: int = None) -> List[int]:
         self.np_random, seed = seeding.np_random(seed)
         random.seed(seed)
@@ -262,6 +264,11 @@ class OptionsZeroGameEnv(gym.Env):
         # This single helper now correctly creates the MarketRulesManager.
         self._update_market_rules_for_regime()
 
+        # <<< NEW: Decide if this will be a mirrored episode >>>
+        self.is_mirrored_episode = False
+        if self.is_training_mode and random.random() < 0.5:
+            self.is_mirrored_episode = True
+
         # --- 5. Initialize the Portfolio Manager ---
         # This must happen AFTER the MarketRulesManager is created.
         self.portfolio_manager = PortfolioManager(
@@ -284,7 +291,6 @@ class OptionsZeroGameEnv(gym.Env):
 
         return {'observation': obs, 'action_mask': action_mask, 'to_play': -1}
 
-    # <<< NEW: Add a helper to handle day changes >>>
     def _handle_day_change(self):
         """Called when a day passes. Evolves the IV regime using the Markov chain."""
         if self.iv_transition_matrix is not None:
@@ -323,6 +329,19 @@ class OptionsZeroGameEnv(gym.Env):
 
         # 1. Get the state before any changes.
         equity_before = self.portfolio_manager.get_current_equity(self.price_manager.current_price, self.iv_bin_index)
+
+        # --- Symmetrical Augmentation on Step 0 ---
+        if self.current_step == 0 and self.is_mirrored_episode:
+            action_name = self.indices_to_actions[action]
+            
+            # Look up the mirrored action
+            mirrored_action_name = self.portfolio_manager.SYMMETRIC_ACTION_MAP.get(action_name)
+            
+            if mirrored_action_name:
+                print(f"DEBUG: Mirrored Augmentation: '{action_name}' -> '{mirrored_action_name}'")
+                # Get the index of the new, mirrored action
+                mirrored_action_index = self.actions_to_indices.get(mirrored_action_name, action)
+                action = mirrored_action_index # Override the agent's choice
         
         # 2. Execute the agent's action on the current state.
         self._take_action_on_state(action)

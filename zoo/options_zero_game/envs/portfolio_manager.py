@@ -53,6 +53,46 @@ class PortfolioManager:
         self.mtm_pnl_high = 0.0  # Tracks the highest MtM P&L seen
         self.mtm_pnl_low = 0.0   # Tracks the lowest MtM P&L seen (max drawdown)
     
+        # This guarantees a perfect, two-way symmetrical mapping for all actions.
+        
+        self.SYMMETRIC_ACTION_MAP = {}
+        
+        # --- Define the pairs of opposites ---
+        action_pairs = [
+            # Spreads
+            ('OPEN_BULL_CALL_SPREAD', 'OPEN_BEAR_CALL_SPREAD'),
+            ('OPEN_BULL_PUT_SPREAD', 'OPEN_BEAR_PUT_SPREAD'),
+            # Volatility Strategies
+            ('OPEN_LONG_STRADDLE', 'OPEN_SHORT_STRADDLE'),
+            ('OPEN_LONG_IRON_CONDOR', 'OPEN_SHORT_IRON_CONDOR'),
+            ('OPEN_LONG_IRON_FLY', 'OPEN_SHORT_IRON_FLY'),
+        ]
+        
+        # --- Dynamically add pairs for strangles, butterflies, and naked legs ---
+        # Delta Strangles
+        for delta in [15, 20, 25, 30]:
+            action_pairs.append(
+                (f'OPEN_LONG_STRANGLE_DELTA_{delta}', f'OPEN_SHORT_STRANGLE_DELTA_{delta}')
+            )
+        # Fixed-Width Butterflies
+        for width in [1, 2]:
+            for opt_type in ['CALL', 'PUT']:
+                action_pairs.append(
+                    (f'OPEN_LONG_{opt_type}_FLY_{width}', f'OPEN_SHORT_{opt_type}_FLY_{width}')
+                )
+        # Naked Legs (from -10 to +10)
+        for offset in range(-10, 11):
+            strike_str = f"ATM{offset:+d}"
+            for opt_type in ['CALL', 'PUT']:
+                action_pairs.append(
+                    (f'OPEN_LONG_{opt_type}_{strike_str}', f'OPEN_SHORT_{opt_type}_{strike_str}')
+                )
+
+        # --- Populate the final map with perfect two-way symmetry ---
+        for action1, action2 in action_pairs:
+            self.SYMMETRIC_ACTION_MAP[action1] = action2
+            self.SYMMETRIC_ACTION_MAP[action2] = action1
+
     def reset(self):
         """Resets the portfolio to an empty state for a new episode."""
         self.portfolio = pd.DataFrame(columns=self.portfolio_columns).astype(self.portfolio_dtypes)

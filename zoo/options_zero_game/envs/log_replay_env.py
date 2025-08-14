@@ -42,6 +42,8 @@ class LogReplayEnv(gym.Wrapper):
         step_at_action = self.env.current_step
         day_at_action = self.env.current_day
         pre_action_price = self.env.price_manager.current_price
+
+        self.portfolio_manager.receipts_for_current_step = []
         equity_before = self.env.portfolio_manager.get_current_equity(pre_action_price, self.env.iv_bin_index)
         
         self.env._take_action_on_state(action)
