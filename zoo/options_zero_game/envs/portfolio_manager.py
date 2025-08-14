@@ -1700,7 +1700,8 @@ class PortfolioManager:
     def convert_to_iron_condor(self, current_price: float, iv_bin_index: int, current_step: int):
         """
         Adds long wings to a short strangle to define its risk.
-        This definitive version uses the robust "Add and Unify" pattern.
+        This robust version places the protective wings a fixed, symmetrical
+        distance away from the short strikes, guaranteeing a valid Iron Condor.
         """
         # --- 1. Failsafe Checks and Setup ---
         current_id = self.portfolio.iloc[0]['strategy_id']
@@ -1710,28 +1711,41 @@ class PortfolioManager:
             return
         if len(self.portfolio) > self.max_positions - 2: return
 
-        days_to_expiry = self.portfolio.iloc[0]['days_to_expiry']
-
-        # --- 2. Calculate and Price the New Wings (Logic is unchanged) ---
-        strike_long_put = self._find_strike_for_delta(-0.05, 'put', current_price, iv_bin_index, days_to_expiry)
-        strike_long_call = self._find_strike_for_delta(0.05, 'call', current_price, iv_bin_index, days_to_expiry)
-        if strike_long_put is None or strike_long_call is None: return
-
+        original_legs = self.portfolio.to_dict(orient='records')
+        original_creation_id = original_legs[0]['creation_id']
+        days_to_expiry = original_legs[0]['days_to_expiry']
+        
+        # --- 2. Identify Short Strikes and Define a Fixed Wing Width ---
+        put_leg = next(leg for leg in original_legs if leg['type'] == 'put')
+        call_leg = next(leg for leg in original_legs if leg['type'] == 'call')
+        
+        # Define a sensible, fixed width for the wings. e.g., 10 strike increments.
+        # This is now a tunable parameter you could move to the config file.
+        wing_width = self.strike_distance * 10
+        
+        # --- 3. Calculate the New Wing Strikes (Guaranteed Correct) ---
+        strike_long_put = put_leg['strike_price'] - wing_width
+        strike_long_call = call_leg['strike_price'] + wing_width
+        
+        # --- 4. Define, Price, and Assemble the Final Strategy ---
         new_wing_legs_def = [
             {'type': 'put', 'direction': 'long', 'strike_price': strike_long_put, 'entry_step': current_step, 'days_to_expiry': days_to_expiry},
             {'type': 'call', 'direction': 'long', 'strike_price': strike_long_call, 'entry_step': current_step, 'days_to_expiry': days_to_expiry}
         ]
+        # Failsafe for negative strikes
+        if strike_long_put <= 0: return
+
         priced_wings = self._price_legs(new_wing_legs_def, current_price, iv_bin_index)
+        
+        final_condor_legs = original_legs + priced_wings
+        
+        # --- 5. Calculate Unified Profile and Atomically Update Portfolio ---
+        pnl_profile = self._calculate_universal_risk_profile(final_condor_legs, self.realized_pnl)
+        pnl_profile['strategy_id'] = self.strategy_name_to_id.get('SHORT_IRON_CONDOR')
+        
+        self.portfolio = self.portfolio[self.portfolio['creation_id'] != original_creation_id].reset_index(drop=True)
+        self._execute_trades(final_condor_legs, pnl_profile)
 
-        # --- 3. Add the New Legs to the Portfolio ---
-        new_legs_df = pd.DataFrame(priced_wings)
-        self.portfolio = pd.concat([self.portfolio, new_legs_df], ignore_index=True)
-
-        # --- 4. Unify the Entire Portfolio into a Single Iron Condor ---
-        self._unify_and_reprofile_portfolio('SHORT_IRON_CONDOR')
-        self.post_action_portfolio = self.portfolio.copy()
-
-    # <<< REPLACE THE ENTIRE convert_to_iron_fly METHOD >>>
     def convert_to_iron_fly(self, current_price: float, iv_bin_index: int, current_step: int):
         """
         Adds long wings to a short straddle to define its risk.
