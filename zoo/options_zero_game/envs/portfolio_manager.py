@@ -2,9 +2,70 @@
 import pandas as pd
 import numpy as np
 import math
+from numba import jit
 from typing import Dict, List, Any, Tuple, Callable
-from .black_scholes_manager import BlackScholesManager, _numba_cdf
+from .black_scholes_manager import BlackScholesManager, _numba_cdf, _numba_black_scholes
 from .market_rules_manager import MarketRulesManager
+
+# <<< STEP 2: CREATE THE STANDALONE, JIT-COMPILED FUNCTION >>>
+# This function lives OUTSIDE the PortfolioManager class.
+@jit(nopython=True)
+def _numba_calculate_risk_profile(legs_array, realized_pnl, start_price, lot_size, strike_distance, bs_func):
+    """
+    A high-performance, Numba-JIT-compiled version of the risk profile simulation.
+    Operates only on NumPy arrays and primitive types.
+    """
+    # --- 1. Simulation Setup ---
+    sim_low = start_price * 0.25
+    sim_high = start_price * 2.5
+    price_range = np.linspace(sim_low, sim_high, 500)
+    
+    pnl_values = np.empty(len(price_range), dtype=np.float64)
+    breakevens = [] # Numba can handle simple lists that grow
+
+    # --- 2. The Main Simulation Loop ---
+    pnl_prev = 0.0 # Will be calculated on first iteration
+    for i in range(len(price_range)):
+        price_curr = price_range[i]
+        unrealized_pnl = 0.0
+        
+        # Inner loop over each leg
+        for j in range(len(legs_array)):
+            leg = legs_array[j]
+            pnl_mult = 1.0 if leg[3] == 1 else -1.0 # direction_code
+            
+            # We can't use the IV calculator directly, so we use a simplified vol proxy.
+            # A more advanced version could pass the whole IV curve as an array.
+            vol = 0.25 # A reasonable average IV for the simulation
+            
+            # Call the passed-in Black-Scholes function
+            premium = bs_func(price_curr, leg[0], leg[5], 0.0, vol, leg[2] == 1)
+            
+            leg_pnl = premium - leg[1] # current_prem - entry_prem
+            unrealized_pnl += leg_pnl * pnl_mult
+            
+        total_pnl = (unrealized_pnl * lot_size) + realized_pnl
+        pnl_values[i] = total_pnl
+        
+        if i > 0:
+            if np.sign(total_pnl) != np.sign(pnl_prev):
+                price_prev = price_range[i-1]
+                be = price_prev - pnl_prev * (price_curr - price_prev) / (total_pnl - pnl_prev)
+                breakevens.append(be)
+        pnl_prev = total_pnl
+
+    # --- 3. Calculate Final Metrics ---
+    max_profit = np.max(pnl_values)
+    max_loss = np.min(pnl_values)
+    
+    sum_wins = np.sum(pnl_values[pnl_values > 0])
+    sum_losses = np.abs(np.sum(pnl_values[pnl_values <= 0]))
+    
+    profit_factor = 999.0
+    if sum_losses > 1e-6:
+        profit_factor = sum_wins / sum_losses
+    
+    return max_profit, max_loss, profit_factor, breakevens
 
 class PortfolioManager:
     """
@@ -157,7 +218,7 @@ class PortfolioManager:
             else: # Call
                 new_strategy_name = 'BEAR_CALL_SPREAD' if naked_leg_dict['direction'] == 'short' else 'BULL_CALL_SPREAD'
 
-            pnl_profile = self._calculate_universal_risk_profile(new_spread_legs, 0) # Realized PNL for a new trade is 0
+            pnl_profile = self._calculate_universal_risk_profile(new_spread_legs, self.realized_pnl)
             pnl_profile['strategy_id'] = self.strategy_name_to_id.get(new_strategy_name)
             
             # --- 5. Finalize the Portfolio State ---
@@ -1131,7 +1192,23 @@ class PortfolioManager:
             leg['entry_premium'] = self.bs_manager.get_price_with_spread(greeks['price'], is_buy=(leg['direction'] == 'long'), bid_ask_spread_pct=self.bid_ask_spread_pct)
         return legs
 
-    def _calculate_universal_risk_profile(self, legs: List[Dict], realized_pnl: float = 0.0) -> Dict:
+    def _prepare_legs_for_numba(self, legs: List[Dict]) -> np.ndarray:
+        """
+        Safely converts a list of leg dictionaries into a NumPy array suitable
+        for the Numba JIT function. It handles cases where keys might be missing.
+        """
+        # [strike, entry_premium, type_code, direction_code, creation_id, days_to_expiry]
+        legs_array = np.empty((len(legs), 6), dtype=np.float64)
+        for i, leg in enumerate(legs):
+            legs_array[i, 0] = leg['strike_price']
+            legs_array[i, 1] = leg.get('entry_premium', 0.0) # Default to 0 if not priced yet
+            legs_array[i, 2] = 1 if leg['type'] == 'call' else 0
+            legs_array[i, 3] = 1 if leg['direction'] == 'long' else -1
+            legs_array[i, 4] = leg.get('creation_id', -1) # Default to -1 if not created yet
+            legs_array[i, 5] = leg['days_to_expiry']
+        return legs_array
+
+    def _calculate_universal_risk_profile(self, legs: List[Dict], realized_pnl: float) -> Dict:
         """
         The definitive, single-pass, universal risk engine.
         It simulates the P&L curve for any given set of legs and calculates
@@ -1156,50 +1233,22 @@ class PortfolioManager:
                 'breakevens': [breakeven]
             }
 
-        # --- B. The Main Simulation Loop ---
-        def get_pnl_at_price(price, trade_legs):
-            pnl = 0.0
-            for leg in trade_legs:
-                pnl_mult = 1 if leg['direction'] == 'long' else -1
-                leg_pnl = max(0, price - leg['strike_price']) if leg['type'] == 'call' else max(0, leg['strike_price'] - price)
-                pnl += (leg_pnl - leg['entry_premium']) * pnl_mult
-            return pnl * self.lot_size
+        # --- 2. Data Preparation (for all other strategies) ---
+        # The JIT function cannot handle dicts, so we convert to a structured array.
+        # [strike, entry_premium, type_code, direction_code, creation_id, days_to_expiry]
+        legs_array = self._prepare_legs_for_numba(legs)
 
-        sim_low = self.start_price * 0.25
-        sim_high = self.start_price * 2.5
-        price_range = np.linspace(sim_low, sim_high, 500)
-        
-        pnl_values = []
-        breakevens = []
+        # --- 3. Call the High-Performance JIT Function ---
+        max_profit, max_loss, profit_factor, breakevens = _numba_calculate_risk_profile(
+            legs_array,
+            realized_pnl,
+            self.start_price,
+            self.lot_size,
+            self.strike_distance,
+            _numba_black_scholes
+        )
 
-        # Calculate the initial P&L for the first point
-        unrealized_pnl_prev = get_pnl_at_price(price_range[0], legs)
-        pnl_prev = unrealized_pnl_prev + realized_pnl
-        pnl_values.append(pnl_prev)
-
-        for i in range(1, len(price_range)):
-            price_curr = price_range[i]
-            unrealized_pnl_curr = get_pnl_at_price(price_curr, legs)
-            pnl_curr = unrealized_pnl_curr + realized_pnl
-            pnl_values.append(pnl_curr)
-
-            if np.sign(pnl_curr) != np.sign(pnl_prev):
-                price_prev = price_range[i-1]
-                be = price_prev - pnl_prev * (price_curr - price_prev) / (pnl_curr - pnl_prev)
-                breakevens.append(be)
-            pnl_prev = pnl_curr
-
-        # --- C. Calculate Final Metrics from Simulation Results ---
-        max_profit = max(pnl_values) if pnl_values else 0.0
-        max_loss = min(pnl_values) if pnl_values else 0.0
-        
-        positive_pnls = [p for p in pnl_values if p > 0]
-        negative_pnls = [p for p in pnl_values if p <= 0]
-        sum_wins = sum(positive_pnls)
-        sum_losses = abs(sum(negative_pnls))
-        
-        profit_factor = 999.0 if sum_losses < 1e-6 and sum_wins > 0 else (sum_wins / sum_losses if sum_losses > 1e-6 else 0.0)
-
+        # --- 4. Package the Results ---
         return {
             'max_profit': min(self.undefined_risk_cap, max_profit),
             'max_loss': max(-self.undefined_risk_cap, max_loss),
@@ -1218,7 +1267,7 @@ class PortfolioManager:
         strike_price = atm_price + (offset * self.strike_distance)
         legs = [{'type': type.lower(), 'direction': direction.lower(), 'strike_price': strike_price, 'entry_step': current_step, 'days_to_expiry': days_to_expiry}]
         legs = self._price_legs(legs, current_price, iv_bin_index)
-        pnl  = self._calculate_universal_risk_profile(legs)
+        pnl  = self._calculate_universal_risk_profile(legs, self.realized_pnl)
         pnl['strategy_id'] = self.strategy_name_to_id.get(f"{direction}_{type}", -1)
         self._execute_trades(legs, pnl)
 
@@ -1231,8 +1280,10 @@ class PortfolioManager:
         legs = [{'type': 'call', 'direction': direction, 'strike_price': atm_price, 'entry_step': current_step, 'days_to_expiry': days_to_expiry},
                 {'type': 'put', 'direction': direction, 'strike_price': atm_price, 'entry_step': current_step, 'days_to_expiry': days_to_expiry}]
         legs = self._price_legs(legs, current_price, iv_bin_index)
-        pnl  = self._calculate_universal_risk_profile(legs)
-        pnl['strategy_id'] = self.strategy_name_to_id.get(action_name.replace('OPEN_', '').replace('_ATM', ''), -1)
+        pnl  = self._calculate_universal_risk_profile(legs, self.realized_pnl)
+        # 3. Now get the strategy ID.
+        canonical_strategy_name = action_name.replace('OPEN_', '').replace('_ATM', '')
+        pnl['strategy_id'] = self.strategy_name_to_id.get(canonical_strategy_name, -1)
         self._execute_trades(legs, pnl)
 
     def _open_strangle(self, action_name: str, current_price: float, iv_bin_index: int, current_step: int, days_to_expiry: float):
@@ -1414,7 +1465,7 @@ class PortfolioManager:
         
         legs = self._price_legs(legs, current_price, iv_bin_index)
         canonical_strategy_name = action_name.replace('OPEN_', '')
-        pnl  = self._calculate_universal_risk_profile(legs)
+        pnl  = self._calculate_universal_risk_profile(legs, self.realized_pnl)
         pnl['strategy_id'] = self.strategy_name_to_id.get(canonical_strategy_name, -1)
         self._execute_trades(legs, pnl)
 
@@ -1496,7 +1547,7 @@ class PortfolioManager:
         
         legs = self._price_legs(legs, current_price, iv_bin_index)
         canonical_strategy_name = action_name.replace('OPEN_', '')
-        pnl  = self._calculate_universal_risk_profile(legs)
+        pnl  = self._calculate_universal_risk_profile(legs, self.realized_pnl)
         pnl['strategy_id'] = self.strategy_name_to_id.get(canonical_strategy_name, -1)
         self._execute_trades(legs, pnl)
 
