@@ -718,13 +718,13 @@ class OptionsZeroGameEnv(gym.Env):
         if self.price_manager.volatility_embedding is not None:
             start_idx = self.OBS_IDX['VOL_EMBEDDING_START']
             end_idx = start_idx + self.vol_embedding_size
-            obs[start_idx:end_idx] = self.price_manager.volatility_embedding
+            vec[start_idx:end_idx] = self.price_manager.volatility_embedding
             
         # Add Directional Prediction
         if self.price_manager.directional_prediction is not None:
             start_idx = self.OBS_IDX['DIR_PREDICTION_START']
             end_idx = start_idx + self.dir_prediction_size
-            obs[start_idx:end_idx] = self.price_manager.directional_prediction
+            vec[start_idx:end_idx] = self.price_manager.directional_prediction
 
         # Per-Position State
         self.portfolio_manager.get_positions_state(vec, self.PORTFOLIO_START_IDX, self.PORTFOLIO_STATE_SIZE_PER_POS, self.POS_IDX, self.price_manager.current_price, self.iv_bin_index, self.current_step, self.total_steps)
@@ -736,15 +736,15 @@ class OptionsZeroGameEnv(gym.Env):
         # --- 3. THE FIX: FINAL, UNBREAKABLE SANITIZATION PASS ---
         # This is the most robust way to prevent CUDA errors. It checks the
         # entire completed observation vector for any bad numbers and replaces them.
-        if not np.all(np.isfinite(final_obs_vec)):
-            # Find the indices of any inf or NaN values
-            bad_indices = np.where(~np.isfinite(final_obs_vec))
-            # Replace them with a safe default (0.0)
-            final_obs_vec[bad_indices] = 0.0
-            
-            # This print statement is invaluable for debugging. It will tell you
-            # exactly which part of your observation vector is producing bad data.
-            print(f"WARNING: Found and corrected non-finite values in observation vector at indices: {bad_indices}")
+        #if not np.all(np.isfinite(final_obs_vec)):
+        #    # Find the indices of any inf or NaN values
+        #    bad_indices = np.where(~np.isfinite(final_obs_vec))
+        #    # Replace them with a safe default (0.0)
+        #    final_obs_vec[bad_indices] = 0.0
+        #    
+        #    # This print statement is invaluable for debugging. It will tell you
+        #    # exactly which part of your observation vector is producing bad data.
+        #    print(f"WARNING: Found and corrected non-finite values in observation vector at indices: {bad_indices}")
 
         # 2. Then, run assertions on the FINAL object
         assert final_obs_vec.shape == (self.obs_vector_size,), f"Observation shape mismatch. Expected {self.obs_vector_size}, but got {final_obs_vec.shape}"
