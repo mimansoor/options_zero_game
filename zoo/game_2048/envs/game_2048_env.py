@@ -246,7 +246,7 @@ class Game2048Env(gym.Env):
 
         # Render the beginning state of the game.
         if self.render_mode is not None:
-            self.render(self.render_mode)
+            self.render()
 
         return observation
 
