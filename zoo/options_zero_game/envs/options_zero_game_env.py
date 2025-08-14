@@ -452,6 +452,10 @@ class OptionsZeroGameEnv(gym.Env):
             self.portfolio_manager.convert_to_bear_put_spread(
                 self.price_manager.current_price, self.iv_bin_index, self.current_step
             )
+        elif final_action_name.startswith('HEDGE_NAKED_POS_'):
+            self.portfolio_manager.add_hedge(int(final_action_name.split('_')[-1]),
+                self.price_manager.current_price, self.iv_bin_index, self.current_step
+            )
 
         # 4. Sort the portfolio and take the crucial snapshot.
         self.portfolio_manager.sort_portfolio()
