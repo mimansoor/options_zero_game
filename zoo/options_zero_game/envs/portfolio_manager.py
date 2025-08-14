@@ -783,66 +783,76 @@ class PortfolioManager:
 
     def shift_position(self, action_name: str, current_price: float, iv_bin_index: int, current_step: int):
         """
-        Shifts a position by one strike. This is now a two-step atomic operation
-        that correctly calls close_position to ensure proper logging.
+        Shifts a single leg of a strategy up or down one strike, preserving the
+        overall strategy structure using the atomic transformation pattern.
         """
         try:
             parts = action_name.split('_')
             direction, position_index = parts[1].upper(), int(parts[3])
             if not (0 <= position_index < len(self.portfolio)): return
 
-            original_pos = self.portfolio.iloc[position_index].copy()
+            original_legs = self.portfolio.to_dict(orient='records')
+            original_creation_id = original_legs[0]['creation_id']
+            original_strategy_id = original_legs[0]['strategy_id']
             
-            # --- THE FIX ---
-            # 1. First, officially close the original position. This will generate the receipt.
-            self.close_position(position_index, current_price, iv_bin_index)
-            
-            # 2. Then, open the new, shifted leg.
+            leg_to_shift = self.portfolio.iloc[position_index].to_dict()
+            legs_to_keep = self.portfolio.drop(position_index).to_dict(orient='records')
+
+            # --- 1. Define the new, shifted leg ---
             strike_modifier = self.strike_distance if direction == 'UP' else -self.strike_distance
-            new_strike_price = original_pos['strike_price'] + strike_modifier
-            
-            new_leg = {
-                'type': original_pos['type'], 'direction': original_pos['direction'],
-                'strike_price': new_strike_price, 'entry_step': current_step,
-                'days_to_expiry': original_pos['days_to_expiry'],
-            }
-            
-            legs = self._price_legs([new_leg], current_price, iv_bin_index)
-            pnl  = self._calculate_universal_risk_profile(legs)
-            strategy_name = f"{legs[0]['direction'].upper()}_{legs[0]['type'].upper()}"
-            pnl['strategy_id'] = self.strategy_name_to_id.get(strategy_name, -1)
-            self._execute_trades(legs, pnl)
+            new_strike_price = leg_to_shift['strike_price'] + strike_modifier
+
+            new_leg_def = [{
+                'type': leg_to_shift['type'], 'direction': leg_to_shift['direction'],
+                'strike_price': new_strike_price, 'days_to_expiry': leg_to_shift['days_to_expiry'],
+                'entry_step': current_step
+            }]
+            priced_new_leg = self._price_legs(new_leg_def, current_price, iv_bin_index)
+
+            # --- 2. Assemble the final state and calculate profile ---
+            final_strategy_legs = legs_to_keep + priced_new_leg
+            pnl_profile = self._calculate_universal_risk_profile(final_strategy_legs, self.realized_pnl)
+            # Preserve the original strategy ID
+            pnl_profile['strategy_id'] = original_strategy_id
+
+            # --- 3. Atomically replace the old position ---
+            self.portfolio = self.portfolio[self.portfolio['creation_id'] != original_creation_id].reset_index(drop=True)
+            self._execute_trades(final_strategy_legs, pnl_profile)
 
         except (ValueError, IndexError) as e:
             print(f"Warning: Could not parse shift action '{action_name}'. Error: {e}")
 
     def shift_to_atm(self, action_name: str, current_price: float, iv_bin_index: int, current_step: int):
-        """
-        Shifts a position to the ATM strike, correctly calling close_position.
-        """
+        """Shifts a single leg of a strategy to the ATM strike."""
         try:
             position_index = int(action_name.split('_')[-1])
             if not (0 <= position_index < len(self.portfolio)): return
-
-            original_pos = self.portfolio.iloc[position_index].copy()
-
-            # --- THE FIX ---
-            # 1. First, officially close the original position.
-            self.close_position(position_index, current_price, iv_bin_index)
             
-            # 2. Then, open the new ATM leg.
-            new_atm_strike = self.market_rules_manager.get_atm_price(current_price)
-            new_leg = {
-                'type': original_pos['type'], 'direction': original_pos['direction'],
-                'strike_price': new_atm_strike, 'entry_step': current_step,
-                'days_to_expiry': original_pos['days_to_expiry'],
-            }
+            original_legs = self.portfolio.to_dict(orient='records')
+            original_creation_id = original_legs[0]['creation_id']
+            original_strategy_id = original_legs[0]['strategy_id']
+            
+            leg_to_shift = self.portfolio.iloc[position_index].to_dict()
+            legs_to_keep = self.portfolio.drop(position_index).to_dict(orient='records')
 
-            legs = self._price_legs([new_leg], current_price, iv_bin_index)
-            pnl  = self._calculate_universal_risk_profile(legs)
-            strategy_name = f"{legs[0]['direction'].upper()}_{legs[0]['type'].upper()}"
-            pnl['strategy_id'] = self.strategy_name_to_id.get(strategy_name, -1)
-            self._execute_trades(legs, pnl)
+            # --- 1. Define the new, shifted leg ---
+            new_atm_strike = self.market_rules_manager.get_atm_price(current_price)
+            if leg_to_shift['strike_price'] == new_atm_strike: return # Already at ATM
+
+            new_leg_def = [{
+                'type': leg_to_shift['type'], 'direction': leg_to_shift['direction'],
+                'strike_price': new_atm_strike, 'days_to_expiry': leg_to_shift['days_to_expiry'],
+                'entry_step': current_step
+            }]
+            priced_new_leg = self._price_legs(new_leg_def, current_price, iv_bin_index)
+            
+            # --- 2. Assemble, Profile, and Replace ---
+            final_strategy_legs = legs_to_keep + priced_new_leg
+            pnl_profile = self._calculate_universal_risk_profile(final_strategy_legs, self.realized_pnl)
+            pnl_profile['strategy_id'] = original_strategy_id
+
+            self.portfolio = self.portfolio[self.portfolio['creation_id'] != original_creation_id].reset_index(drop=True)
+            self._execute_trades(final_strategy_legs, pnl_profile)
             
         except (ValueError, IndexError) as e:
             print(f"Warning: Could not parse shift_to_atm action '{action_name}'. Error: {e}")
