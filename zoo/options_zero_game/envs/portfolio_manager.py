@@ -1708,7 +1708,7 @@ class PortfolioManager:
             pnl_profile['strategy_id'] = self.strategy_name_to_id.get(canonical_strategy_name, -1)
             self._execute_trades(best_legs_found, pnl_profile)
         else:
-            printf(f"DEBUG: no suitable legs for butterfly were found for {action_name}")
+            print(f"DEBUG: no suitable legs for butterfly were found for {action_name}")
         # If no suitable legs were found, do nothing.
 
     def convert_to_iron_condor(self, current_price: float, iv_bin_index: int, current_step: int):
