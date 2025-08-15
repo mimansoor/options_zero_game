@@ -124,7 +124,7 @@ class OptionsZeroGameEnv(gym.Env):
         # <<< NEW: Load the parameter from the config >>>
         self.capital_preservation_bonus_pct = cfg.get('capital_preservation_bonus_pct', 0.0)
 
-        self.iv_regimes = self._cfg.get('iv_regimes', [])
+        self.regimes = self._cfg.get('unified_regimes', [])
         self.current_iv_regime_name = "N/A" # For logging
         self.current_iv_regime_index = 0 # Start with a default
         
@@ -278,9 +278,9 @@ class OptionsZeroGameEnv(gym.Env):
         # --- 4. Select IV Regime and Initialize Market Managers ---
         # Select the starting IV regime for this episode
         if self.iv_stationary_dist is not None:
-            self.current_iv_regime_index = np.random.choice(len(self.iv_regimes), p=self.iv_stationary_dist)
+            self.current_iv_regime_index = np.random.choice(len(self.regimes), p=self.iv_stationary_dist)
         else:
-            self.current_iv_regime_index = random.randint(0, len(self.iv_regimes) - 1)
+            self.current_iv_regime_index = random.randint(0, len(self.regimes) - 1)
         
         # This single helper now correctly creates the MarketRulesManager.
         self._update_market_rules_for_regime()
@@ -318,7 +318,7 @@ class OptionsZeroGameEnv(gym.Env):
             # Get the probability distribution for the next state
             transition_probs = self.iv_transition_matrix[self.current_iv_regime_index]
             # Choose the next regime based on these probabilities
-            self.current_iv_regime_index = np.random.choice(len(self.iv_regimes), p=transition_probs)
+            self.current_iv_regime_index = np.random.choice(len(self.regimes), p=transition_probs)
             
             # Now that the regime has changed, we must rebuild the market rules
             self._update_market_rules_for_regime()
@@ -328,7 +328,7 @@ class OptionsZeroGameEnv(gym.Env):
     # <<< NEW: Create a helper to generate the skew table on the fly >>>
     def _update_market_rules_for_regime(self):
         """Generates and applies the skew table for the current IV regime."""
-        chosen_regime = self.iv_regimes[self.current_iv_regime_index]
+        chosen_regime = self.regimes[self.current_iv_regime_index]
         self.current_iv_regime_name = chosen_regime['name']
         
         episode_skew_table = generate_dynamic_iv_skew_table(
@@ -582,7 +582,6 @@ class OptionsZeroGameEnv(gym.Env):
             'directional_bias': meter.directional_bias,
             'volatility_bias': meter.volatility_bias,
             'portfolio_stats': self.portfolio_manager.get_raw_portfolio_stats(self.price_manager.current_price, self.iv_bin_index),
-            'market_regime': self.price_manager.current_regime_name,
             'total_steps_in_episode': self.total_steps,
             'market_regime': self.current_iv_regime_name,
             'termination_reason': termination_reason

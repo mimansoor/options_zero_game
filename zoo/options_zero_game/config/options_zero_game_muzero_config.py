@@ -60,37 +60,40 @@ def generate_dynamic_iv_skew_table(max_offset: int, atm_iv: float, far_otm_put_i
 
     return skew_table
 
-market_regimes = [
-    # Name, mu, omega, alpha, beta, overnight_vol_multiplier
-    {'name': 'Bond_Markets', 'mu': 0.00001, 'omega': 0.000002, 'alpha': 0.05, 'beta': 0.92, 'overnight_vol_multiplier': 1.1},
-    {'name': 'Utilities_Sector', 'mu': 0.00004, 'omega': 0.00001, 'alpha': 0.08, 'beta': 0.90, 'overnight_vol_multiplier': 1.2},
-    {'name': 'Developed_Markets', 'mu': 0.00006, 'omega': 0.000005, 'alpha': 0.08, 'beta': 0.90, 'overnight_vol_multiplier': 1.3},
-    {'name': 'Foreign_Exchange_FX', 'mu': 0.0000, 'omega': 0.000003, 'alpha': 0.08, 'beta': 0.91, 'overnight_vol_multiplier': 1.4},
-    {'name': 'Tech_Sector', 'mu': 0.0001, 'omega': 0.00004, 'alpha': 0.11, 'beta': 0.87, 'overnight_vol_multiplier': 1.5},
-    {'name': 'Individual_Stocks', 'mu': 0.00008, 'omega': 0.00007, 'alpha': 0.10, 'beta': 0.88, 'overnight_vol_multiplier': 1.6},
-    {'name': 'Emerging_Markets', 'mu': 0.0001, 'omega': 0.00005, 'alpha': 0.12, 'beta': 0.86, 'overnight_vol_multiplier': 1.7},
-    {'name': 'Bull_LowVol', 'mu': 0.0005, 'omega': 0.000002, 'alpha': 0.05, 'beta': 0.94, 'overnight_vol_multiplier': 1.4},
-    {'name': 'Crisis_HighVol', 'mu': -0.0005, 'omega': 0.0001, 'alpha': 0.15, 'beta': 0.82, 'overnight_vol_multiplier': 2.2},
-    {'name': 'Frontier_Markets', 'mu': 0.0002, 'omega': 0.0001, 'alpha': 0.20, 'beta': 0.70, 'overnight_vol_multiplier': 1.8},
-    {'name': 'Commodities_Oil', 'mu': 0.0000, 'omega': 0.0002, 'alpha': 0.28, 'beta': 0.70, 'overnight_vol_multiplier': 1.9},
-    {'name': 'Volatility_VIX', 'mu': 0.0, 'omega': 0.0005, 'alpha': 0.25, 'beta': 0.65, 'overnight_vol_multiplier': 2.0},
-    {'name': 'Cryptocurrencies', 'mu': 0.001, 'omega': 0.001, 'alpha': 0.20, 'beta': 0.75, 'overnight_vol_multiplier': 2.5},
-    {'name': 'TSLA_Real', 'mu': 0.001070, 'omega': 0.00003585, 'alpha': 0.0350, 'beta': 0.9418, 'overnight_vol_multiplier': 6.58},
-    {'name': 'SPY_Real', 'mu': 0.000905, 'omega': 0.00000397, 'alpha': 0.1280, 'beta': 0.8404, 'overnight_vol_multiplier': 5.99},
-    {'name': 'RELIANCE.NS_Real', 'mu': 0.000352, 'omega': 0.00000267, 'alpha': 0.0207, 'beta': 0.9666, 'overnight_vol_multiplier': 5.14},
-    {'name': '^NSEI_Real', 'mu': 0.000703, 'omega': 0.00000308, 'alpha': 0.0928, 'beta': 0.8733, 'overnight_vol_multiplier': 5.40},
-    {'name': 'TCS.NS_Real', 'mu': 0.000261, 'omega': 0.00002354, 'alpha': 0.0378, 'beta': 0.8327, 'overnight_vol_multiplier': 5.53},
-    {'name': 'ABB.NS_Real', 'mu': 0.001221, 'omega': 0.00025891, 'alpha': 0.1361, 'beta': 0.2717, 'overnight_vol_multiplier': 3.37},
-    {'name': 'BTC-USD_Real', 'mu': 0.001557, 'omega': 0.00002610, 'alpha': 0.0662, 'beta': 0.9083, 'overnight_vol_multiplier': 1.85},
-    {'name': 'INTC_Real', 'mu': -0.000764, 'omega': 0.00033938, 'alpha': 0.3683, 'beta': 0.2445, 'overnight_vol_multiplier': 6.33},
-    {'name': '^DJI_Real', 'mu': 0.000561, 'omega': 0.00000490, 'alpha': 0.1261, 'beta': 0.8208, 'overnight_vol_multiplier': 6.04},
-    {'name': '^IXIC_Real', 'mu': 0.000983, 'omega': 0.00000426, 'alpha': 0.1053, 'beta': 0.8768, 'overnight_vol_multiplier': 6.14},
-    {'name': '^RUT_Real', 'mu': 0.000419, 'omega': 0.00001442, 'alpha': 0.0707, 'beta': 0.8612, 'overnight_vol_multiplier': 6.70},
-    {'name': 'GC=F_Real', 'mu': 0.000309, 'omega': 0.00000454, 'alpha': 0.0361, 'beta': 0.9160, 'overnight_vol_multiplier': 2.02},
-    {'name': 'TLT_Real', 'mu': -0.000399, 'omega': 0.00000113, 'alpha': 0.0301, 'beta': 0.9592, 'overnight_vol_multiplier': 6.58},
-    {'name': 'BND_Real', 'mu': -0.000033, 'omega': 0.00000004, 'alpha': 0.0292, 'beta': 0.9687, 'overnight_vol_multiplier': 6.87},
-    {'name': 'ETH-USD_Real', 'mu': 0.001368, 'omega': 0.00002192, 'alpha': 0.0539, 'beta': 0.9345, 'overnight_vol_multiplier': 1.40},
-    {'name': 'SOL-USD_Real', 'mu': 0.001677, 'omega': 0.00013563, 'alpha': 0.1267, 'beta': 0.8455, 'overnight_vol_multiplier': 1.10},
+# ==============================================================
+#           UNIFIED REGIME DEFINITIONS (The Single Source of Truth)
+# ==============================================================
+# Each dictionary now contains BOTH GARCH parameters for price movement
+# AND IV parameters for option pricing.
+UNIFIED_REGIMES = [
+    {
+        'name': 'Crisis (High Vol, Bearish)',
+        # GARCH Params
+        'mu': -0.0005, 'omega': 0.0001, 'alpha': 0.15, 'beta': 0.82, 'overnight_vol_multiplier': 2.2,
+        # IV Params
+        'atm_iv': 50.0, 'far_otm_put_iv': 90.0, 'far_otm_call_iv': 40.0,
+    },
+    {
+        'name': 'Normal (Medium Vol, Bullish)',
+        # GARCH Params (Using SPY_Real as a baseline)
+        'mu': 0.000905, 'omega': 0.00000397, 'alpha': 0.1280, 'beta': 0.8404, 'overnight_vol_multiplier': 5.99,
+        # IV Params
+        'atm_iv': 25.0, 'far_otm_put_iv': 50.0, 'far_otm_call_iv': 20.0,
+    },
+    {
+        'name': 'Complacent (Low Vol, Neutral)',
+        # GARCH Params (Using Bond_Markets as a baseline)
+        'mu': 0.00001, 'omega': 0.000002, 'alpha': 0.05, 'beta': 0.92, 'overnight_vol_multiplier': 1.1,
+        # IV Params
+        'atm_iv': 12.0, 'far_otm_put_iv': 20.0, 'far_otm_call_iv': 10.0,
+    },
+    {
+        'name': 'Crypto (High Vol, High Growth)',
+        # GARCH Params
+        'mu': 0.0015, 'omega': 0.0001, 'alpha': 0.10, 'beta': 0.88, 'overnight_vol_multiplier': 1.85,
+        # IV Params
+        'atm_iv': 75.0, 'far_otm_put_iv': 110.0, 'far_otm_call_iv': 70.0,
+    },
 ]
 
 # ==============================================================
@@ -207,50 +210,6 @@ class CurriculumHolder:
         return repr(self.schedule)
 
 # ==============================================================
-#           IV Regime Definitions
-# ==============================================================
-# Define different "personalities" for the volatility market.
-# The environment will randomly pick one of these for each episode.
-IV_REGIMES = [
-    {
-        'name': 'Normal Market (s1)',
-        'atm_iv': 25.0,
-        'far_otm_put_iv': 50.0,
-        'far_otm_call_iv': 20.0,
-    },
-    {
-        'name': 'Normal Market (s2)',
-        'atm_iv': 20.0,
-        'far_otm_put_iv': 35.0,
-        'far_otm_call_iv': 18.0,
-    },
-    {
-        'name': 'Normal Market (s3)',
-        'atm_iv': 22.0,
-        'far_otm_put_iv': 40.0,
-        'far_otm_call_iv': 20.0,
-    },
-    {
-        'name': 'High Volatility (Fear)',
-        'atm_iv': 50.0,
-        'far_otm_put_iv': 90.0,  # Put skew is very steep in a panic
-        'far_otm_call_iv': 40.0,
-    },
-    {
-        'name': 'Medium Low Volatility',
-        'atm_iv': 15.0,
-        'far_otm_put_iv': 25.0,  # Skew is much flatter in a calm market
-        'far_otm_call_iv': 12.0,
-    },
-    {
-        'name': 'Low Volatility (Complacency)',
-        'atm_iv': 10.0,
-        'far_otm_put_iv': 16.5,  # Skew is much flatter in a calm market
-        'far_otm_call_iv': 10.5,
-    },
-]
-
-# ==============================================================
 #           Main Config (The Parameters)
 # ==============================================================
 # This makes the script runnable from anywhere.
@@ -303,7 +262,7 @@ options_zero_game_muzero_config = dict(
         price_source='mixed',
         historical_data_path='zoo/options_zero_game/data/market_data_cache',
         drawdown_penalty_weight=0.1,
-        market_regimes=market_regimes,
+        unified_regimes=UNIFIED_REGIMES,
         strategy_name_to_id=strategy_name_to_id,
         illegal_action_penalty=-1.0,
         rolling_vol_window=5,
@@ -322,7 +281,6 @@ options_zero_game_muzero_config = dict(
         butterfly_target_cost_pct=0.01, 
 
         max_strike_offset=MAX_STRIKE_OFFSET,
-        iv_regimes=IV_REGIMES,
         
         # <<< NEW: Add a parameter specifically for the agent's naked opening actions >>>
         # The agent can only OPEN naked positions within this narrower range.

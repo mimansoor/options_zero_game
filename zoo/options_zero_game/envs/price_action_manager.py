@@ -8,6 +8,7 @@ import joblib
 import torch
 import numpy as np
 import pandas as pd
+import pandas_ta as ta
 from typing import Dict, Any, List
 
 # --- Import the necessary components from the expert trainer scripts ---
@@ -24,7 +25,7 @@ class PriceActionManager:
         self._cfg = cfg
         self.price_source = cfg['price_source']
         self.historical_data_path = cfg['historical_data_path']
-        self.market_regimes = cfg['market_regimes']
+        self.market_regimes = cfg.get('unified_regimes', [])
         self.start_price_config = cfg['start_price']
         self.steps_per_day = cfg['steps_per_day']
         self.momentum_window_steps = cfg['momentum_window_steps']
@@ -270,8 +271,8 @@ class PriceActionManager:
     def _generate_garch_price_path(self):
         """
         Generates a price path using a simulation that is dynamically
-        CALIBRATED by the pre-trained Volatility Transformer expert. This ensures
-        the synthetic data is self-consistent with the expert's learned patterns.
+        CALIBRATED by the pre-trained Volatility Transformer expert. This definitive
+        version includes a robust return-clamping mechanism to ensure numerical stability.
         """
         # --- 1. Setup ---
         chosen_regime = random.choice(self.market_regimes)
@@ -280,55 +281,44 @@ class PriceActionManager:
         prices = np.zeros(self.total_steps + 1, dtype=np.float32)
         prices[0] = self.start_price_config
 
-        # We need to bootstrap the simulation with some initial noise.
-        # Create a small buffer of initial prices to generate the first sequence.
+        # Bootstrap the simulation with some initial noise
         if self.total_steps > self.expert_sequence_length:
             initial_vol = chosen_regime['atm_iv'] / 100.0 / np.sqrt(252 * self.steps_per_day)
             for i in range(1, self.expert_sequence_length + 1):
                 step_return = self.np_random.normal(0, initial_vol)
-                prices[i] = prices[i-1] * np.exp(step_return)
+                prices[i] = prices[i-1] * np.exp(np.clip(step_return, -0.5, 0.5))
 
         # --- 2. The Expert-Driven Simulation Loop ---
-        # We start the main loop after our initial bootstrap period.
         for t in range(self.expert_sequence_length + 1, self.total_steps + 1):
 
-            # --- a. Get the Expert's Prediction ---
-            # Default to the regime's base IV if the expert isn't available
             predicted_vol = chosen_regime['atm_iv'] / 100.0
 
             if self.volatility_expert:
-                # Prepare the feature sequence for the expert from the data we've just generated
-                # The helper function gets the last `expert_sequence_length` steps
                 history_tensor = self._get_raw_history_for_transformer(t)
-
                 with torch.no_grad():
-                    # Use .forward() to get the final, single-number prediction
-                    # .item() extracts the Python float value from the tensor.
                     predicted_vol = self.volatility_expert.forward(history_tensor.unsqueeze(0)).item()
 
-            # --- b. Use the Prediction as the Volatility for the Next Step ---
-            # Clamp the prediction to a sensible range to prevent explosive behavior
-            annual_vol = np.clip(predicted_vol, 0.10, 2.50) # Capped at 250% IV
-
-            # De-annualize to get the volatility for a single time step
+            # Use the prediction as the volatility for the next step
+            annual_vol = np.clip(predicted_vol, 0.10, 2.50)
             step_vol = annual_vol / np.sqrt(252 * self.steps_per_day)
 
-            # --- c. Generate the Next Price Step ---
-            # The expert provides the magnitude, the random shock provides the direction
+            # Generate the next price step
             shock = self.np_random.normal(0, 1)
             step_return = shock * step_vol
 
-            # (Optional but recommended) Add overnight/weekend gap logic here
-            # ...
+            # <<< THE FIX: Add a robust "circuit breaker" to the return itself >>>
+            # This prevents np.exp() from underflowing to zero.
+            # A 50% move in a single step is already a massive, historic event.
+            stable_step_return = np.clip(step_return, -0.5, 0.5)
 
-            prices[t] = prices[t-1] * np.exp(step_return)
+            prices[t] = prices[t-1] * np.exp(stable_step_return)
 
-            # Failsafe to prevent the price from going to zero or negative
+            # The old failsafe is still good as a final backup.
             if prices[t] <= 0.01:
                 prices[t] = prices[t-1]
 
         # --- 3. Finalize the Price Path ---
         self.price_path = prices
         self.start_price = self.price_path[0]
-        self.episode_iv_anchor = chosen_regime['atm_iv'] / 100.0
+        self.garch_implied_vol = chosen_regime['atm_iv'] / 100.0
 

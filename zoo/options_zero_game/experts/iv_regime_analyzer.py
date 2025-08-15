@@ -6,7 +6,7 @@ from tqdm import tqdm
 import os
 
 # --- Import your configuration from the main config file ---
-from zoo.options_zero_game.config.options_zero_game_muzero_config import IV_REGIMES, MAX_STRIKE_OFFSET
+from zoo.options_zero_game.config.options_zero_game_muzero_config import UNIFIED_REGIMES
 from zoo.options_zero_game.envs.utils import generate_dynamic_iv_skew_table
 
 def analyze_iv_regimes():
@@ -31,7 +31,7 @@ def analyze_iv_regimes():
     # --- 2. Create Anchor "Fingerprints" for Your Regimes ---
     print("Creating anchor vectors for each IV regime...")
     anchor_vectors = []
-    for regime in IV_REGIMES:
+    for regime in UNIFIED_REGIMES:
         # The fingerprint is [atm_iv, put_skew, call_skew]
         # Skew is defined as (Far OTM IV - ATM IV)
         put_skew = regime['far_otm_put_iv'] - regime['atm_iv']
@@ -71,7 +71,7 @@ def analyze_iv_regimes():
 
     # --- 4. Build the Transition Matrix ---
     print("Building the Transition Matrix...")
-    num_regimes = len(IV_REGIMES)
+    num_regimes = len(UNIFIED_REGIMES)
     transition_matrix = np.zeros((num_regimes, num_regimes))
     
     for i in range(len(labels) - 1):
