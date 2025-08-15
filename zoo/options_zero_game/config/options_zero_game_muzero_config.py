@@ -122,6 +122,9 @@ strategy_name_to_id = {
     'BULL_CALL_SPREAD': 14, 'BEAR_CALL_SPREAD': 15,
     'BULL_PUT_SPREAD': 18, 'BEAR_PUT_SPREAD': 19,
 
+    'LONG_RATIO_SPREAD': 38,  # Or any other unique positive ID
+    'SHORT_RATIO_SPREAD': 39, # Or any other unique positive ID
+
     'CUSTOM_HEDGED': -2,
     'CUSTOM_2_LEGS': -3,
     'CUSTOM_3_LEGS': -4,
