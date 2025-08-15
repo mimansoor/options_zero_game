@@ -1274,15 +1274,17 @@ class PortfolioManager:
         assert len(self.portfolio) < self.max_positions, "Illegal attempt to open a leg when portfolio is full. Action mask failed."
 
         if len(self.portfolio) >= self.max_positions: return
-        _, direction, type, strike_str = action_name.split('_')
-        offset = int(strike_str.replace('ATM', ''))
-        atm_price = self.market_rules_manager.get_atm_price(current_price)
-        strike_price = atm_price + (offset * self.strike_distance)
-        legs = [{'type': type.lower(), 'direction': direction.lower(), 'strike_price': strike_price, 'entry_step': current_step, 'days_to_expiry': days_to_expiry}]
-        legs = self._price_legs(legs, current_price, iv_bin_index)
-        pnl  = self._calculate_universal_risk_profile(legs, self.realized_pnl)
-        pnl['strategy_id'] = self.strategy_name_to_id.get(f"{direction}_{type}", -1)
-        self._execute_trades(legs, pnl)
+        parts = action_name.split('_')
+        direction, option_type, offset_str = parts[1].lower(), parts[2].lower(), parts[3].replace('ATM', '')
+        offset = int(offset_str)
+        strike_price = self.market_rules_manager.get_atm_price(current_price) + (offset * self.strike_distance)
+        
+        legs = [{'type': option_type, 'direction': direction, 'strike_price': strike_price, 'entry_step': current_step, 'days_to_expiry': days_to_expiry}]
+        priced_legs = self._price_legs(legs, current_price, iv_bin_index)
+        
+        pnl_profile = self._calculate_universal_risk_profile(priced_legs, self.realized_pnl)
+        pnl_profile['strategy_id'] = self.strategy_name_to_id.get(action_name, -1)
+        self._execute_trades(priced_legs, pnl_profile)
 
     def _open_straddle(self, action_name: str, current_price: float, iv_bin_index: int, current_step: int, days_to_expiry: float):
         # --- Defensive Assertion ---
@@ -1345,9 +1347,7 @@ class PortfolioManager:
             leg['days_to_expiry'] = days_to_expiry
         
         priced_legs = self._price_legs(legs, current_price, iv_bin_index)
-        
         pnl_profile = self._calculate_universal_risk_profile(priced_legs, self.realized_pnl)
-        
         pnl_profile['strategy_id'] = self.strategy_name_to_id.get(action_name, -1)
         self._execute_trades(priced_legs, pnl_profile)
 
