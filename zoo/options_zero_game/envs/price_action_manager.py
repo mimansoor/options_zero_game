@@ -122,11 +122,15 @@ class PriceActionManager:
             else:
                 raise ValueError("No valid price source could be selected.")
                 
-            if np.any(self.price_path <= 0): raise ValueError("Generated path contains non-positive prices")
+            # --- THE FIX: Add an explicit check for NaN and Inf ---
+            if not np.all(np.isfinite(self.price_path)):
+                raise ValueError("Generated path contains NaN or Inf values.")
+            if np.any(self.price_path <= 0):
+                raise ValueError("Generated path contains non-positive prices.")
 
         except Exception as e:
             # ... (the except block) ...
-            print(f"--- PRICE GENERATION FAILED: {e}. USING FAILSAFE (FLAT) PATH. ---")
+            print(f"--- PRICE GENERATION FAILED: {type(e).__name__}: {e}. USING FAILSAFE (FLAT) PATH. ---")
             self.current_regime_name = "Failsafe (Flat)"
             self.price_path = np.full(self.total_steps + 1, self.start_price, dtype=np.float32)
             self.episode_iv_anchor = 0.2
@@ -164,7 +168,7 @@ class PriceActionManager:
 
         # --- Hierarchical Transformer Expert Pipeline ---
         if self.volatility_expert and self.directional_expert and current_step >= self.expert_sequence_length:
-            raw_history_tensor = self._get_raw_history_for_transformer(current_step)
+            raw_history_tensor = self._get_raw_history_for_transformer(current_step, self.price_path)
             
             with torch.no_grad():
                 # 1. Run Volatility Expert to get the context embedding
@@ -205,20 +209,23 @@ class PriceActionManager:
         
         feature_vector = np.concatenate([log_return_features, rsi_features])
 
-    def _get_raw_history_for_transformer(self, current_step: int) -> torch.Tensor:
-        """A helper to prepare the input tensor for the Transformer models."""
+    def _get_raw_history_for_transformer(self, current_step: int, price_history: np.ndarray) -> torch.Tensor:
+        """A helper to prepare the input tensor. This version is NaN-proof."""
         start_index = current_step - self.expert_sequence_length
-        end_index = current_step
+        price_sequence = price_history[start_index:current_step]
         
-        price_sequence = self.price_path[start_index:end_index]
-        
-        # Calculate features (must match the trainer)
+        # Failsafe for non-positive prices in the sequence
+        if np.any(price_sequence <= 0):
+            price_sequence = np.maximum(price_sequence, 1e-6)
+
         log_returns = np.log(price_sequence[1:] / price_sequence[:-1])
-        log_returns = np.insert(log_returns, 0, 0) # Pad to maintain length
+        log_returns = np.insert(log_returns, 0, 0)
+        
+        # Failsafe for NaN in log returns
+        log_returns = np.nan_to_num(log_returns, nan=0.0, posinf=0.0, neginf=0.0)
         
         volatility = pd.Series(log_returns).rolling(window=14).std().fillna(0).values
         
-        # Stack features and convert to tensor
         feature_array = np.stack([log_returns, volatility], axis=1)
         return torch.FloatTensor(feature_array)
 
@@ -270,54 +277,49 @@ class PriceActionManager:
 
     def _generate_garch_price_path(self):
         """
-        Generates a price path using a simulation that is dynamically
-        CALIBRATED by the pre-trained Volatility Transformer expert. This definitive
-        version includes a robust return-clamping mechanism to ensure numerical stability.
+        The definitive GARCH generator. It is calibrated by the Volatility Expert,
+        numerically stable, and correctly handles short episode lengths.
         """
         # --- 1. Setup ---
         chosen_regime = random.choice(self.market_regimes)
         self.current_regime_name = f"GARCH: {chosen_regime['name']}"
-
         prices = np.zeros(self.total_steps + 1, dtype=np.float32)
         prices[0] = self.start_price_config
 
-        # Bootstrap the simulation with some initial noise
-        if self.total_steps > self.expert_sequence_length:
-            initial_vol = chosen_regime['atm_iv'] / 100.0 / np.sqrt(252 * self.steps_per_day)
-            for i in range(1, self.expert_sequence_length + 1):
-                step_return = self.np_random.normal(0, initial_vol)
-                prices[i] = prices[i-1] * np.exp(np.clip(step_return, -0.5, 0.5))
+        # --- 2. Bootstrap Phase (The Fix is Here) ---
+        # Determine the correct number of steps to bootstrap.
+        # It's either the full sequence length or the entire episode if it's too short.
+        bootstrap_end_step = min(self.expert_sequence_length + 1, self.total_steps + 1)
 
-        # --- 2. The Expert-Driven Simulation Loop ---
+        initial_vol = chosen_regime['atm_iv'] / 100.0 / np.sqrt(252 * self.steps_per_day)
+        for i in range(1, bootstrap_end_step):
+            step_return = self.np_random.normal(0, initial_vol)
+            prices[i] = prices[i-1] * np.exp(np.clip(step_return, -0.5, 0.5))
+            if prices[i] <= 0.01: prices[i] = prices[i-1] # Safety
+
+        # --- 3. The Expert-Driven Simulation Loop ---
+        # This loop will now only run if the episode is long enough.
         for t in range(self.expert_sequence_length + 1, self.total_steps + 1):
-
             predicted_vol = chosen_regime['atm_iv'] / 100.0
-
             if self.volatility_expert:
-                history_tensor = self._get_raw_history_for_transformer(t)
+                history_tensor = self._get_raw_history_for_transformer(t, prices)
                 with torch.no_grad():
-                    predicted_vol = self.volatility_expert.forward(history_tensor.unsqueeze(0)).item()
+                    prediction = self.volatility_expert.forward(history_tensor.unsqueeze(0)).item()
+                    if np.isfinite(prediction):
+                        predicted_vol = prediction
 
-            # Use the prediction as the volatility for the next step
             annual_vol = np.clip(predicted_vol, 0.10, 2.50)
             step_vol = annual_vol / np.sqrt(252 * self.steps_per_day)
-
-            # Generate the next price step
             shock = self.np_random.normal(0, 1)
             step_return = shock * step_vol
-
-            # <<< THE FIX: Add a robust "circuit breaker" to the return itself >>>
-            # This prevents np.exp() from underflowing to zero.
-            # A 50% move in a single step is already a massive, historic event.
             stable_step_return = np.clip(step_return, -0.5, 0.5)
-
             prices[t] = prices[t-1] * np.exp(stable_step_return)
 
-            # The old failsafe is still good as a final backup.
-            if prices[t] <= 0.01:
+            if not np.isfinite(prices[t]) or prices[t] <= 0.01:
+                # This debug print is still valuable as a final safety net
                 prices[t] = prices[t-1]
 
-        # --- 3. Finalize the Price Path ---
+        # --- 4. Finalize the Price Path ---
         self.price_path = prices
         self.start_price = self.price_path[0]
         self.garch_implied_vol = chosen_regime['atm_iv'] / 100.0
