@@ -121,6 +121,10 @@ strategy_name_to_id = {
     # <<< NOTE: This also includes internal names for re-profiling after adjustments >>>
     'BULL_CALL_SPREAD': 14, 'BEAR_CALL_SPREAD': 15,
     'BULL_PUT_SPREAD': 18, 'BEAR_PUT_SPREAD': 19,
+
+    'CUSTOM_HEDGED': -2,
+    'CUSTOM_2_LEGS': -3,
+    'CUSTOM_3_LEGS': -4,
 }
 
 # Dynamically add the new delta-based strangle strategy IDs

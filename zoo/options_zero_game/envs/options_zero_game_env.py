@@ -423,9 +423,9 @@ class OptionsZeroGameEnv(gym.Env):
             days_to_expiry = int(round(days_to_expiry_float))
             self.portfolio_manager.open_strategy(final_action_name, self.price_manager.current_price, self.iv_bin_index, self.current_step, days_to_expiry)
         elif final_action_name.startswith('CLOSE_POSITION_'):
-            self.portfolio_manager.close_position(int(final_action_name.split('_')[-1]), self.price_manager.current_price, self.iv_bin_index)
+            self.portfolio_manager.close_position(int(final_action_name.split('_')[-1]), self.price_manager.current_price, self.iv_bin_index, self.current_step)
         elif final_action_name == 'CLOSE_ALL':
-            self.portfolio_manager.close_all_positions(self.price_manager.current_price, self.iv_bin_index)
+            self.portfolio_manager.close_all_positions(self.price_manager.current_price, self.iv_bin_index, self.current_step)
         elif final_action_name.startswith('SHIFT_'):
             if 'ATM' in final_action_name: self.portfolio_manager.shift_to_atm(final_action_name, self.price_manager.current_price, self.iv_bin_index, self.current_step)
             else: self.portfolio_manager.shift_position(final_action_name, self.price_manager.current_price, self.iv_bin_index, self.current_step)
@@ -470,7 +470,7 @@ class OptionsZeroGameEnv(gym.Env):
         time_decay_days = self._calculate_time_decay()
         self.price_manager.step(self.current_step)
         self._update_realized_vol()
-        self.portfolio_manager.update_positions_after_time_step(time_decay_days, self.price_manager.current_price, self.iv_bin_index)
+        self.portfolio_manager.update_positions_after_time_step(time_decay_days, self.price_manager.current_price, self.iv_bin_index, self.current_step)
 
         # <<< NEW: Call the debug print method here >>>
         # This will only print if the env is in eval_mode.
@@ -555,7 +555,7 @@ class OptionsZeroGameEnv(gym.Env):
         if terminated and termination_reason == "RUNNING":
             termination_reason = "TIME_LIMIT"
 
-        if terminated_by_rule: self.portfolio_manager.close_all_positions(self.price_manager.current_price, self.iv_bin_index)
+        if terminated_by_rule: self.portfolio_manager.close_all_positions(self.price_manager.current_price, self.iv_bin_index, self.current_step)
 
         # --- Calculate Reward ---
         equity_after = self.portfolio_manager.get_current_equity(self.price_manager.current_price, self.iv_bin_index)
@@ -587,11 +587,21 @@ class OptionsZeroGameEnv(gym.Env):
             'termination_reason': termination_reason
         }
 
-        # This is the last possible moment before returning the state.
+        # --- FINAL STATE VALIDATION (The Definitive Safety Net) ---
+        
+        # 1. Check for portfolio size violations
         portfolio_size = len(self.portfolio_manager.portfolio)
         max_size = self._cfg.max_positions
         assert portfolio_size <= max_size, \
             f"FATAL INVARIANT VIOLATION: Portfolio size ({portfolio_size}) has exceeded max_positions ({max_size}). Action taken: '{action_taken}'"
+
+        # <<< THE FIX: Add the new check for invalid Strategy IDs >>>
+        # 2. Check for invalid or temporary Strategy IDs
+        if not self.portfolio_manager.portfolio.empty:
+            # Check if any leg in the portfolio has a negative strategy_id
+            invalid_ids_exist = (self.portfolio_manager.portfolio['strategy_id'] < 0).any()
+            assert not invalid_ids_exist, \
+                f"FATAL: Portfolio contains legs with invalid Strategy IDs (< 0) after action: '{action_taken}'.\n{self.portfolio_manager.portfolio.to_string()}"
 
         if terminated: info['episode_duration'] = self.current_step
         return BaseEnvTimestep({'observation': obs, 'action_mask': action_mask, 'to_play': -1}, final_reward, terminated, info)

@@ -481,7 +481,7 @@ class PortfolioManager:
     def get_current_equity(self, current_price: float, iv_bin_index: int) -> float:
         return self.initial_cash + self.get_total_pnl(current_price, iv_bin_index)
 
-    def update_positions_after_time_step(self, days_of_decay: int, current_price: float, iv_bin_index: int):
+    def update_positions_after_time_step(self, days_of_decay: int, current_price: float, iv_bin_index: int, current_step: int):
         """
         Applies time decay and handles expirations. Crucially,
         """
@@ -497,102 +497,81 @@ class PortfolioManager:
         expired_indices = self.portfolio[self.portfolio['days_to_expiry'] == 0].index
         if not expired_indices.empty:
             for idx in sorted(expired_indices, reverse=True):
-                self.close_position(idx, current_price, iv_bin_index)
+                self.close_position(idx, current_price, iv_bin_index, current_step)
 
         # Finally, check for any profitable short legs that can be closed for cheap.
-        self._close_worthless_short_legs(current_price, iv_bin_index)
+        self._close_worthless_short_legs(current_price, iv_bin_index, current_step)
 
-    def close_position(self, position_index: int, current_price: float, iv_bin_index: int):
+    def close_position(self, position_index: int, current_price: float, iv_bin_index: int, current_step: int):
         """
         Atomically closes a single leg and correctly re-evaluates the risk profile
         and strategy ID of the entire remaining strategy. This is the definitive,
-        robust implementation.
+        robust implementation that correctly handles all re-profiling.
         """
-        # --- 1. Robust Failsafe Check (The Fix) ---
-        if position_index < 0:
-            position_index = len(self.portfolio) + position_index
-
-        assert 0 <= position_index < len(self.portfolio), f"Attempted to close invalid index: {position_index}."
-
+        # --- 1. Robust Failsafe Check ---
+        portfolio_size = len(self.portfolio)
+        if not (-portfolio_size <= position_index < portfolio_size):
+            print(f"Warning: Attempted to close invalid index: {position_index} on portfolio of size {portfolio_size}. Aborting.")
+            return
+        
         # --- 2. Identify and Process the Closing Leg ---
         pos_to_close = self.portfolio.iloc[position_index].copy()
         original_creation_id = pos_to_close['creation_id']
-        
-        # Calculate the realized P&L for the leg being closed
-        is_call = pos_to_close['type'] == 'call'
-        atm_price = self.market_rules_manager.get_atm_price(current_price)
-        offset = round((pos_to_close['strike_price'] - atm_price) / self.strike_distance)
-        vol = self.iv_calculator(offset, pos_to_close['type'])
-        
-        greeks = self.bs_manager.get_all_greeks_and_price(
-            current_price, pos_to_close['strike_price'], pos_to_close['days_to_expiry'], vol, is_call
-        )
-        
-        is_short = pos_to_close['direction'] == 'short'
-        exit_premium = self.bs_manager.get_price_with_spread(
-            greeks['price'], is_buy=is_short, bid_ask_spread_pct=self.bid_ask_spread_pct
-        )
-        
-        pnl_multiplier = 1 if pos_to_close['direction'] == 'long' else -1
-        pnl = (exit_premium - pos_to_close['entry_premium']) * pnl_multiplier * self.lot_size
-        
-        # Update realized P&L and best/worst trade trackers
-        self.realized_pnl += pnl - self.brokerage_per_leg
-        if pnl > self.highest_realized_profit: self.highest_realized_profit = pnl
-        if pnl < self.lowest_realized_loss: self.lowest_realized_loss = pnl
-
-        # Create a receipt for the closed trade log
-        if self.is_eval_mode:
-            receipt = {
-                'position': f"{pos_to_close['direction'].upper()} {pos_to_close['type'].upper()}",
-                'strike': pos_to_close['strike_price'],
-                'entry_day': (pos_to_close['entry_step'] // self.steps_per_day) + 1,
-                'entry_prem': pos_to_close['entry_premium'],
-                'exit_prem': exit_premium,
-                'realized_pnl': pnl
-            }
-            self.receipts_for_current_step.append(receipt)
+        absolute_index_to_close = self.portfolio.index[position_index]
+        self._process_leg_closures(pd.DataFrame([pos_to_close.to_dict()]), current_price, current_step)
 
         # --- 3. Atomically Rebuild the Portfolio ---
-        # Filter to get the legs that are NOT being closed.
         remaining_legs_df = self.portfolio[
             (self.portfolio['creation_id'] == original_creation_id) &
-            (self.portfolio.index != position_index)
-        ].copy() # Use .copy() to avoid SettingWithCopyWarning
+            (self.portfolio.index != absolute_index_to_close)
+        ].copy()
         
-        # Remove all legs of the old strategy.
         self.portfolio = self.portfolio[self.portfolio['creation_id'] != original_creation_id].reset_index(drop=True)
 
         # --- 4. Intelligently Re-Profile and Execute the Remaining Legs ---
         if not remaining_legs_df.empty:
             remaining_legs_list = remaining_legs_df.to_dict(orient='records')
-            new_strategy_name = "UNKNOWN_CUSTOM" # Default name
             
-            # <<< NEW: Intelligent Strategy Identification Logic >>>
-            num_remaining = len(remaining_legs_list)
-            if num_remaining == 1:
-                # If one leg is left, its new strategy name is its own type (e.g., "SHORT_PUT").
-                leg = remaining_legs_list[0]
-                new_strategy_name = f"{leg['direction'].upper()}_{leg['type'].upper()}"
-            else:
-                # For more complex remainders, use a generic "CUSTOM" name.
-                new_strategy_name = f"CUSTOM_{num_remaining}_LEGS"
-
-            # Calculate the final risk profile for the remaining legs
+            # <<< THE FIX: Definitive, Intelligent Strategy Identification >>>
+            new_strategy_name = self._identify_strategy_from_legs(remaining_legs_df)
+            
             pnl_profile = self._calculate_universal_risk_profile(remaining_legs_list, self.realized_pnl)
-            
-            # Look up the now-correct strategy ID. Fall back to -3 if it's a custom combo.
             pnl_profile['strategy_id'] = self.strategy_name_to_id.get(new_strategy_name, -3)
             
-            # Re-execute the remaining legs as a new, unified position.
             self._execute_trades(remaining_legs_list, pnl_profile)
+        else:
+            self.post_action_portfolio = self.portfolio.copy()
 
-        # 1. Always update the hedge status after a change.
-        self._update_hedge_status()
+    # <<< ADD THIS NEW, DEDICATED HELPER METHOD FOR IDENTIFICATION >>>
+    def _identify_strategy_from_legs(self, legs_df: pd.DataFrame) -> str:
+        """
+        A robust helper function that identifies the name of a strategy
+        based on the properties of its constituent legs.
+        """
+        num_legs = len(legs_df)
+        
+        if num_legs == 1:
+            leg = legs_df.iloc[0]
+            return f"{leg['direction'].upper()}_{leg['type'].upper()}"
+        
+        if num_legs == 2:
+            # Could be a vertical, strangle, or straddle.
+            # For simplicity, we'll give it a generic name, but you could add
+            # more detailed logic here if needed.
+            return "CUSTOM_2_LEGS" # Or a more specific name
+            
+        if num_legs == 3:
+            # This is likely what's left after closing one leg of a butterfly or condor.
+            return "CUSTOM_3_LEGS"
+            
+        # Fallback for any other complex combination
+        return f"CUSTOM_{num_legs}_LEGS"
 
-    def close_all_positions(self, current_price: float, iv_bin_index: int):
+    def close_all_positions(self, current_price: float, iv_bin_index: int, current_step: int):
+        """Closes all open positions in the portfolio one by one."""
+        # We loop while the portfolio is not empty, always closing the last element.
         while not self.portfolio.empty:
-            self.close_position(-1, current_price, iv_bin_index)
+            self.close_position(-1, current_price, iv_bin_index, current_step)
 
     def get_pnl_verification(self, current_price: float, iv_bin_index: int) -> dict:
         """Calculates the components for the P&L verification panel."""
@@ -785,7 +764,7 @@ class PortfolioManager:
             'vega_norm': math.tanh(total_vega / self.initial_cash)
         }
 
-    def _close_worthless_short_legs(self, current_price: float, iv_bin_index: int):
+    def _close_worthless_short_legs(self, current_price: float, iv_bin_index: int, current_step: int):
         """
         Automatically closes any short leg that is profitable and whose current
         premium has decayed below a configured threshold (e.g., $1.00).
@@ -820,7 +799,7 @@ class PortfolioManager:
         if indices_to_close:
             #print(f"DEBUG: Auto-closing {len(indices_to_close)} worthless short positions.") # Optional debug print
             for index in sorted(indices_to_close, reverse=True):
-                self.close_position(index, current_price, iv_bin_index)
+                self.close_position(index, current_price, iv_bin_index, current_step)
 
     def _update_hedge_status(self):
         """
