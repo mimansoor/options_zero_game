@@ -14,8 +14,16 @@ import zoo.options_zero_game.envs.options_zero_game_env
 import zoo.options_zero_game.envs.log_replay_env
 
 def get_valid_strategies() -> list:
-    """Helper function to get a list of all valid opening strategies."""
-    temp_env = zoo.options_zero_game.envs.options_zero_game_env.OptionsZeroGameEnv()
+    """
+    Helper function to get a list of all valid opening strategies.
+    This corrected version properly initializes the environment with a config.
+    """
+    # --- THE FIX: Create a temporary environment using the main config ---
+    # This ensures the environment has all the necessary parameters to build itself,
+    # including the logic for creating the action space.
+    temp_env_cfg = copy.deepcopy(main_config.env)
+    temp_env = zoo.options_zero_game.envs.options_zero_game_env.OptionsZeroGameEnv(cfg=temp_env_cfg)
+
     return [name for name in temp_env.actions_to_indices if name.startswith('OPEN_')]
 
 def calculate_statistics(results: list, strategy_name: str) -> dict:

@@ -318,9 +318,8 @@ class PortfolioManager:
                 leg['entry_step'] = current_step
 
             # Use the original action name for the ID to give the agent credit
-            canonical_strategy_name = action_name.replace('OPEN_', '')
             pnl_profile = self._calculate_universal_risk_profile(found_legs, self.realized_pnl)
-            pnl_profile['strategy_id'] = self.strategy_name_to_id.get(canonical_strategy_name, -1)
+            pnl_profile['strategy_id'] = self.strategy_name_to_id.get(action_name, -1)
             self._execute_trades(found_legs, pnl_profile)
 
     def update_mtm_water_marks(self, current_total_pnl: float):
@@ -504,9 +503,9 @@ class PortfolioManager:
 
     def close_position(self, position_index: int, current_price: float, iv_bin_index: int, current_step: int):
         """
-        Atomically closes a single leg and correctly re-evaluates the risk profile
-        and strategy ID of the entire remaining strategy. This is the definitive,
-        robust implementation that correctly handles all re-profiling.
+        Atomically closes a single leg. It now correctly isolates the target
+        strategy, re-profiles only its remaining legs, and leaves all other
+        strategies in the portfolio untouched. This is the definitive version.
         """
         # --- 1. Robust Failsafe Check ---
         portfolio_size = len(self.portfolio)
@@ -514,33 +513,37 @@ class PortfolioManager:
             print(f"Warning: Attempted to close invalid index: {position_index} on portfolio of size {portfolio_size}. Aborting.")
             return
         
-        # --- 2. Identify and Process the Closing Leg ---
-        pos_to_close = self.portfolio.iloc[position_index].copy()
-        original_creation_id = pos_to_close['creation_id']
+        # --- 2. Isolate the Target Leg and its Strategy ---
+        leg_to_close = self.portfolio.iloc[position_index].copy()
+        target_creation_id = leg_to_close['creation_id']
         absolute_index_to_close = self.portfolio.index[position_index]
-        self._process_leg_closures(pd.DataFrame([pos_to_close.to_dict()]), current_price, current_step)
 
-        # --- 3. Atomically Rebuild the Portfolio ---
-        remaining_legs_df = self.portfolio[
-            (self.portfolio['creation_id'] == original_creation_id) &
-            (self.portfolio.index != absolute_index_to_close)
-        ].copy()
-        
-        self.portfolio = self.portfolio[self.portfolio['creation_id'] != original_creation_id].reset_index(drop=True)
+        # Isolate all other, untouched strategies
+        untouched_strategies_df = self.portfolio[self.portfolio['creation_id'] != target_creation_id]
+        # Isolate the legs of the strategy we are actually modifying
+        strategy_to_modify_df = self.portfolio[self.portfolio['creation_id'] == target_creation_id]
 
-        # --- 4. Intelligently Re-Profile and Execute the Remaining Legs ---
+        # --- 3. Process the Closing Leg ---
+        self._process_leg_closures(pd.DataFrame([leg_to_close.to_dict()]), current_price, current_step)
+
+        # --- 4. Intelligently Re-Profile the REMAINDER of the TARGET STRATEGY ---
+        remaining_legs_df = strategy_to_modify_df.drop(absolute_index_to_close)
+
         if not remaining_legs_df.empty:
             remaining_legs_list = remaining_legs_df.to_dict(orient='records')
-            
-            # <<< THE FIX: Definitive, Intelligent Strategy Identification >>>
             new_strategy_name = self._identify_strategy_from_legs(remaining_legs_df)
             
             pnl_profile = self._calculate_universal_risk_profile(remaining_legs_list, self.realized_pnl)
             pnl_profile['strategy_id'] = self.strategy_name_to_id.get(new_strategy_name, -3)
             
+            # --- 5. Atomically Rebuild the Portfolio ---
+            # Start with the untouched strategies
+            self.portfolio = untouched_strategies_df.copy()
+            # Add the newly modified strategy back into the portfolio
             self._execute_trades(remaining_legs_list, pnl_profile)
         else:
-            self.post_action_portfolio = self.portfolio.copy()
+            # If no legs remain from the target strategy, the portfolio is just the untouched ones.
+            self.portfolio = untouched_strategies_df.copy().reset_index(drop=True)
 
     def _identify_strategy_from_legs(self, legs_df: pd.DataFrame) -> str:
         """
@@ -899,7 +902,6 @@ class PortfolioManager:
             self._execute_trades(modified_strategy_legs, pnl_profile)
             
             self._update_hedge_status()
-            self.post_action_portfolio = self.portfolio.copy()
 
         except (ValueError, IndexError) as e:
             print(f"Warning: Could not parse shift action '{action_name}'. Error: {e}")
@@ -936,7 +938,6 @@ class PortfolioManager:
             self._execute_trades(modified_strategy_legs, pnl_profile)
             
             self._update_hedge_status()
-            self.post_action_portfolio = self.portfolio.copy()
         except (ValueError, IndexError) as e:
             print(f"Warning: Could not parse shift_to_atm action '{action_name}'. Error: {e}")
 
@@ -1163,7 +1164,7 @@ class PortfolioManager:
     def _execute_trades(self, trades_to_execute: List[Dict], strategy_pnl: Dict):
         """
         The definitive method for adding legs to the portfolio. It is the single
-        source of truth for updating hedge status and taking the post-action snapshot.
+        source of truth for updating hedge status.
         This version ensures state is finalized even when trades_to_execute is empty.
         """
         # --- 1. Add New Trades (if any) ---
@@ -1294,8 +1295,7 @@ class PortfolioManager:
         legs = self._price_legs(legs, current_price, iv_bin_index)
         pnl  = self._calculate_universal_risk_profile(legs, self.realized_pnl)
         # 3. Now get the strategy ID.
-        canonical_strategy_name = action_name.replace('OPEN_', '').replace('_ATM', '')
-        pnl['strategy_id'] = self.strategy_name_to_id.get(canonical_strategy_name, -1)
+        pnl['strategy_id'] = self.strategy_name_to_id.get(action_name, -1)
         self._execute_trades(legs, pnl)
 
     def _open_strangle(self, action_name: str, current_price: float, iv_bin_index: int, current_step: int, days_to_expiry: float):
@@ -1346,14 +1346,9 @@ class PortfolioManager:
         
         priced_legs = self._price_legs(legs, current_price, iv_bin_index)
         
-        # For 'OPEN_SHORT_STRANGLE_ATM_1', this becomes 'SHORT_STRANGLE_1'
-        # For 'OPEN_SHORT_STRANGLE_DELTA_15', this becomes 'SHORT_STRANGLE_DELTA_15'
-        canonical_strategy_name = action_name.replace('OPEN_', '').replace('_ATM', '')
-        
-        # <<< FIX #2: Pass realized_pnl for a consistent risk profile >>>
         pnl_profile = self._calculate_universal_risk_profile(priced_legs, self.realized_pnl)
         
-        pnl_profile['strategy_id'] = self.strategy_name_to_id.get(canonical_strategy_name, -1)
+        pnl_profile['strategy_id'] = self.strategy_name_to_id.get(action_name, -1)
         self._execute_trades(priced_legs, pnl_profile)
 
     def _find_strike_from_delta_list(
@@ -1476,9 +1471,8 @@ class PortfolioManager:
             leg['entry_step'] = current_step
         
         legs = self._price_legs(legs, current_price, iv_bin_index)
-        canonical_strategy_name = action_name.replace('OPEN_', '')
         pnl  = self._calculate_universal_risk_profile(legs, self.realized_pnl)
-        pnl['strategy_id'] = self.strategy_name_to_id.get(canonical_strategy_name, -1)
+        pnl['strategy_id'] = self.strategy_name_to_id.get(action_name, -1)
         self._execute_trades(legs, pnl)
 
     def _open_iron_fly(self, action_name: str, current_price: float, iv_bin_index: int, current_step: int, days_to_expiry: float):
@@ -1558,9 +1552,8 @@ class PortfolioManager:
             leg['entry_step'] = current_step
         
         legs = self._price_legs(legs, current_price, iv_bin_index)
-        canonical_strategy_name = action_name.replace('OPEN_', '')
         pnl  = self._calculate_universal_risk_profile(legs, self.realized_pnl)
-        pnl['strategy_id'] = self.strategy_name_to_id.get(canonical_strategy_name, -1)
+        pnl['strategy_id'] = self.strategy_name_to_id.get(action_name, -1)
         self._execute_trades(legs, pnl)
 
     def _find_best_available_spread(
@@ -1715,9 +1708,8 @@ class PortfolioManager:
             for leg in best_legs_found:
                 leg['entry_step'] = current_step
 
-            canonical_strategy_name = action_name.replace('OPEN_', '')
             pnl_profile = self._calculate_universal_risk_profile(best_legs_found, self.realized_pnl)
-            pnl_profile['strategy_id'] = self.strategy_name_to_id.get(canonical_strategy_name, -1)
+            pnl_profile['strategy_id'] = self.strategy_name_to_id.get(action_name, -1)
             self._execute_trades(best_legs_found, pnl_profile)
         else:
             print(f"DEBUG: no suitable legs for butterfly were found for {action_name}")
@@ -1885,6 +1877,7 @@ class PortfolioManager:
         self._execute_trades(legs_to_keep, pnl_profile)
 
     def debug_print_portfolio(self, current_price: float, step: int, day: int, action_taken: str):
+        return
         """
         Prints a detailed, human-readable snapshot of the current portfolio state,
         including all stored data and live calculated values for each leg.
