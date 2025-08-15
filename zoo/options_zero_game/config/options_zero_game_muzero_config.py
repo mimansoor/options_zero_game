@@ -10,14 +10,14 @@ from zoo.options_zero_game.envs.utils import generate_dynamic_iv_skew_table
 # ==============================================================
 #                 Static Parameters
 # ==============================================================
-collector_env_num = 64
-n_episode = 64
-evaluator_env_num = 32
-batch_size = 512
-num_simulations = 50
-update_per_collect = 1000
+collector_env_num = 32
+n_episode = 32
+evaluator_env_num = 16
+batch_size = 256
+num_simulations = 35
+update_per_collect = 500
 replay_ratio = 0.25
-max_env_step = int(6e7)
+max_env_step = int(7e8)
 reanalyze_ratio = 0.
 
 # <<< NEW: Add this powerful helper function at the top of your config file >>>
