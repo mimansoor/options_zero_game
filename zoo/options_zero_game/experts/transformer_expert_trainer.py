@@ -56,6 +56,9 @@ class TransformerExpert(nn.Module):
         super().__init__()
         self.model_dim = model_dim
         self.input_embedding = nn.Linear(input_dim, model_dim)
+
+        # <<< THE FIX: The self.pos_encoder line has been completely removed >>>
+
         encoder_layers = nn.TransformerEncoderLayer(d_model=model_dim, nhead=num_heads, dropout=dropout, batch_first=True)
         self.transformer_encoder = nn.TransformerEncoder(encoder_layers, num_layers=num_layers)
         self.output_head = nn.Linear(model_dim, output_dim)
@@ -65,9 +68,10 @@ class TransformerExpert(nn.Module):
         return self.output_head(embedding)
 
     def encode(self, src: torch.Tensor) -> torch.Tensor:
+        # The logic is simpler and cleaner without the unused encoder.
         x = self.input_embedding(src) * math.sqrt(self.model_dim)
         x = self.transformer_encoder(x)
-        return x.mean(dim=1) # Mean pooling
+        return x.mean(dim=1)
 
 class HybridGRUTransformerExpert(nn.Module):
     """SOTA GRU-Transformer Hybrid for the Directional Strategist."""
