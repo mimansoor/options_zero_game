@@ -190,7 +190,7 @@ dynamic_iv_skew_table = generate_dynamic_iv_skew_table(
 )
 
 # ==============================================================================
-#                 Strategy ID Mapping (Definitive, Complete Version)
+#                 Strategy ID Mapping (Definitive, Final Version)
 # ==============================================================================
 # This block programmatically generates all strategy IDs to ensure consistency
 # and completeness, making it the single source of truth.
@@ -199,14 +199,11 @@ strategy_name_to_id = {}
 next_id = 0
 
 # --- 1. Simple Naked Legs (Internal Use for Re-profiling) ---
-# These are the "base" identities.
 for direction in ['LONG', 'SHORT']:
     for opt_type in ['CALL', 'PUT']:
         strategy_name_to_id[f'{direction}_{opt_type}'] = next_id; next_id += 1
 
-# <<< THE CRITICAL FIX: Add the full OPEN_* action names for single legs >>>
-# This loop creates keys like "OPEN_SHORT_CALL_ATM+5" and maps them to the
-# base IDs created above (e.g., to the ID for "SHORT_CALL").
+# Add the full action names for all single leg actions
 agent_max_open_offset = AGENT_MAX_OPEN_OFFSET
 for offset in range(-agent_max_open_offset, agent_max_open_offset + 1):
     strike_str = f"ATM{offset:+d}"
@@ -218,7 +215,14 @@ for offset in range(-agent_max_open_offset, agent_max_open_offset + 1):
 
 # --- 2. Core Volatility Strategies ---
 for direction in ['LONG', 'SHORT']:
-    for name in ['STRADDLE', 'IRON_CONDOR', 'IRON_FLY']:
+    internal_name = f'{direction}_STRADDLE'
+    strategy_name_to_id[internal_name] = next_id; next_id += 1
+    # The action name includes "_ATM"
+    strategy_name_to_id[f'OPEN_{internal_name}_ATM'] = strategy_name_to_id[internal_name]
+
+# The other core strategies do not have the suffix
+for direction in ['LONG', 'SHORT']:
+    for name in ['IRON_CONDOR', 'IRON_FLY']:
         internal_name = f'{direction}_{name}'
         strategy_name_to_id[internal_name] = next_id; next_id += 1
         strategy_name_to_id[f'OPEN_{internal_name}'] = strategy_name_to_id[internal_name]
@@ -250,8 +254,6 @@ strategy_name_to_id['CUSTOM_2_LEGS'] = -3
 strategy_name_to_id['CUSTOM_3_LEGS'] = -4
 strategy_name_to_id['LONG_RATIO_SPREAD'] = next_id; next_id += 1
 strategy_name_to_id['SHORT_RATIO_SPREAD'] = next_id; next_id += 1
-
-
 
 options_zero_game_muzero_config = dict(
     # Define the main output directory for all experiments.
