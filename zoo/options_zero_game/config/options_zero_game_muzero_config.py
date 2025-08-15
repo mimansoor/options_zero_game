@@ -96,52 +96,56 @@ UNIFIED_REGIMES = [
     },
 ]
 
-# ==============================================================
-#                 Strategy ID Mapping
-# ==============================================================
-# The single, complete source of truth for all strategy names and their IDs.
-strategy_name_to_id = {
-    # Base strategies (for single legs)
-    'LONG_CALL': 0, 'SHORT_CALL': 1, 'LONG_PUT': 2, 'SHORT_PUT': 3,
+# ==============================================================================
+#                 Strategy ID Mapping (Definitive Version)
+# ==============================================================================
+# This block programmatically generates all strategy IDs to ensure consistency
+# and completeness, making it the single source of truth.
 
-    # Complex Strategies
-    'LONG_STRADDLE': 4, 'SHORT_STRADDLE': 5,
-    'LONG_IRON_FLY': 10, 'SHORT_IRON_FLY': 11,
-    'LONG_IRON_CONDOR': 12, 'SHORT_IRON_CONDOR': 13,
+strategy_name_to_id = {}
+next_id = 0
 
-    # Strategies with Width Variations
-    'LONG_STRANGLE_1': 6, 'SHORT_STRANGLE_1': 7,
-    'LONG_STRANGLE_2': 8, 'SHORT_STRANGLE_2': 9,
+# --- 1. Simple Naked Legs (Internal Use for Re-profiling) ---
+for direction in ['LONG', 'SHORT']:
+    for opt_type in ['CALL', 'PUT']:
+        strategy_name_to_id[f'{direction}_{opt_type}'] = next_id; next_id += 1
 
-    'LONG_CALL_FLY_1': 22, 'SHORT_CALL_FLY_1': 23,
-    'LONG_PUT_FLY_1': 24, 'SHORT_PUT_FLY_1': 25,
-    'LONG_CALL_FLY_2': 26, 'SHORT_CALL_FLY_2': 27,
-    'LONG_PUT_FLY_2': 28, 'SHORT_PUT_FLY_2': 29,
+# --- 2. Core Volatility Strategies ---
+for direction in ['LONG', 'SHORT']:
+    for name in ['STRADDLE', 'IRON_CONDOR', 'IRON_FLY']:
+        strategy_name_to_id[f'{direction}_{name}'] = next_id; next_id += 1
+        # Also add the full action name that will be looked up
+        strategy_name_to_id[f'OPEN_{direction}_{name}'] = strategy_name_to_id[f'{direction}_{name}']
 
-    # <<< NOTE: This also includes internal names for re-profiling after adjustments >>>
-    'BULL_CALL_SPREAD': 14, 'BEAR_CALL_SPREAD': 15,
-    'BULL_PUT_SPREAD': 18, 'BEAR_PUT_SPREAD': 19,
+# --- 3. Spreads ---
+for direction in ['BULL', 'BEAR']:
+    for opt_type in ['CALL', 'PUT']:
+        name = f'{direction}_{opt_type}_SPREAD'
+        strategy_name_to_id[name] = next_id; next_id += 1
+        strategy_name_to_id[f'OPEN_{name}'] = strategy_name_to_id[name]
 
-    'LONG_RATIO_SPREAD': 38,  # Or any other unique positive ID
-    'SHORT_RATIO_SPREAD': 39, # Or any other unique positive ID
+# --- 4. Strategies with Variations (Strangles, Butterflies) ---
+# Delta Strangles
+for direction in ['LONG', 'SHORT']:
+    for delta in [15, 20, 25, 30]:
+        name = f'{direction}_STRANGLE_DELTA_{delta}'
+        strategy_name_to_id[name] = next_id; next_id += 1
+        strategy_name_to_id[f'OPEN_{name}'] = strategy_name_to_id[name]
+# Fixed-Width Butterflies
+for direction in ['LONG', 'SHORT']:
+    for width in [1, 2]:
+        for opt_type in ['CALL', 'PUT']:
+            name = f'{direction}_{opt_type}_FLY_{width}'
+            strategy_name_to_id[name] = next_id; next_id += 1
+            strategy_name_to_id[f'OPEN_{name}'] = strategy_name_to_id[name]
 
-    'CUSTOM_HEDGED': -2,
-    'CUSTOM_2_LEGS': -3,
-    'CUSTOM_3_LEGS': -4,
-}
+# --- 5. Custom / Post-Adjustment States (Negative IDs) ---
+strategy_name_to_id['CUSTOM_HEDGED'] = -2
+strategy_name_to_id['CUSTOM_2_LEGS'] = -3
+strategy_name_to_id['CUSTOM_3_LEGS'] = -4
+strategy_name_to_id['LONG_RATIO_SPREAD'] = 38  # Example positive ID
+strategy_name_to_id['SHORT_RATIO_SPREAD'] = 39 # Example positive ID
 
-# Dynamically add the new delta-based strangle strategy IDs
-next_id = max(strategy_name_to_id.values()) + 1
-for delta in range(15, 31, 5):
-    strategy_name_to_id[f'LONG_STRANGLE_DELTA_{delta}'] = next_id
-    next_id += 1
-    strategy_name_to_id[f'SHORT_STRANGLE_DELTA_{delta}'] = next_id
-    next_id += 1
-
-strategy_name_to_id['OPEN_BULL_CALL_SPREAD'] = strategy_name_to_id['BULL_CALL_SPREAD']
-strategy_name_to_id['OPEN_BEAR_CALL_SPREAD'] = strategy_name_to_id['BEAR_CALL_SPREAD']
-strategy_name_to_id['OPEN_BULL_PUT_SPREAD'] = strategy_name_to_id['BULL_PUT_SPREAD']
-strategy_name_to_id['OPEN_BEAR_PUT_SPREAD'] = strategy_name_to_id['BEAR_PUT_SPREAD']
 # ==============================================================
 #                 Curriculum Schedule
 # ==============================================================
