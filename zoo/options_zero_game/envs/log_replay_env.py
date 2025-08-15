@@ -138,7 +138,7 @@ class LogReplayEnv(gym.Wrapper):
         pnl_verification = self.env.portfolio_manager.get_pnl_verification(price_for_log, self.env.iv_bin_index)
         payoff_data = self.env.portfolio_manager.get_payoff_data(price_for_log, self.env.iv_bin_index)
         
-        meter = BiasMeter(obs_for_bias[:self.env.market_and_portfolio_state_size], self.env.OBS_IDX)
+        meter = BiasMeter(obs_for_bias[:self.env.model_observation_size], self.env.OBS_IDX)
         
         last_price = self._episode_history[-1]['info']['price'] if self._episode_history else self.env.price_manager.start_price
         last_price_change_pct = ((price_for_log / last_price) - 1) * 100 if last_price > 0 else 0.0
