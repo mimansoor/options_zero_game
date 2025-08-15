@@ -172,7 +172,7 @@ class OptionsZeroGameEnv(gym.Env):
             'PORTFOLIO_RR_RATIO_NORM': 13, 'PORTFOLIO_PROB_PROFIT': 14,
             'PORTFOLIO_PROFIT_FACTOR_NORM': 15, 'MTM_PNL_HIGH_NORM': 16, 'MTM_PNL_LOW_NORM': 17,
             'EXPERT_EMA_RATIO': 18, 'EXPERT_RSI_OVERSOLD': 19,
-            'EXPERT_RSI_NEUTRAL': 20, 'EXPERT_RSI_OVERBOUGHT': 21, 'EXPERT_VOL_NORM': 22,
+            'EXPERT_RSI_NEUTRAL': 20, 'EXPERT_RSI_OVERBOUGHT': 21,
         }
         
         # 4. Calculate the TRUE sizes and start indices robustly
@@ -645,8 +645,8 @@ class OptionsZeroGameEnv(gym.Env):
         vec[self.OBS_IDX['PRICE_NORM']] = (self.price_manager.current_price / self.price_manager.start_price) - 1.0
         vec[self.OBS_IDX['TIME_NORM']] = (self.total_steps - self.current_step) / self.total_steps
         vec[self.OBS_IDX['PNL_NORM']] = math.tanh(self.portfolio_manager.get_total_pnl(self.price_manager.current_price, self.iv_bin_index) / self._cfg.initial_cash)
-        garch_vol = self.price_manager.garch_implied_vol
-        vec[self.OBS_IDX['VOL_MISMATCH_NORM']] = math.tanh((self.realized_vol_series[self.current_step] / garch_vol) - 1.0) if garch_vol > 0 else 0.0
+        iv_anchor = self.price_manager.episode_iv_anchor
+        vec[self.OBS_IDX['VOL_MISMATCH_NORM']] = math.tanh((self.realized_vol_series[self.current_step] / iv_anchor) - 1.0) if iv_anchor > 0 else 0.0
         log_return = math.log(self.price_manager.current_price / (self.price_manager.price_path[self.current_step - 1] + 1e-8)) if self.current_step > 0 else 0.0
         vec[self.OBS_IDX['LOG_RETURN']] = np.clip(log_return, -0.1, 0.1) * 10
         vec[self.OBS_IDX['MOMENTUM_NORM']] = self.price_manager.momentum_signal
@@ -696,8 +696,6 @@ class OptionsZeroGameEnv(gym.Env):
         vec[self.OBS_IDX['EXPERT_RSI_NEUTRAL']] = rsi_probs[1]
         vec[self.OBS_IDX['EXPERT_RSI_OVERBOUGHT']] = rsi_probs[2]
         
-        vec[self.OBS_IDX['EXPERT_VOL_NORM']] = math.tanh(self.price_manager.expert_vol_pred)
-
         # 2. Get the complete portfolio risk profile in one go.
         stats = self.portfolio_manager.get_raw_portfolio_stats(self.price_manager.current_price, self.iv_bin_index)
 
