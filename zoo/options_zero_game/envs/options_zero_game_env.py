@@ -173,6 +173,7 @@ class OptionsZeroGameEnv(gym.Env):
             'PORTFOLIO_PROFIT_FACTOR_NORM': 15, 'MTM_PNL_HIGH_NORM': 16, 'MTM_PNL_LOW_NORM': 17,
             'EXPERT_EMA_RATIO': 18, 'EXPERT_RSI_OVERSOLD': 19,
             'EXPERT_RSI_NEUTRAL': 20, 'EXPERT_RSI_OVERBOUGHT': 21,
+            'EXPERT_TAIL_RISK_PROB': 22,
         }
         
         # 4. Calculate the TRUE sizes and start indices robustly
@@ -382,7 +383,7 @@ class OptionsZeroGameEnv(gym.Env):
         
         # 2. Get the expert's forward-looking volatility prediction.
         # This value is already calculated and stored in the PriceActionManager every step.
-        predicted_vol = self.price_manager.expert_vol_pred
+        predicted_vol = self.price_manager.volatility_transformer_prediction
         
         # We need to ensure the predicted vol is a sensible number (e.g., between 5% and 300%)
         # and has a default value for the initial steps before the expert has enough data.

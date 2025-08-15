@@ -1,12 +1,14 @@
 # zoo/options_zero_game/entry/bias_meter.py
+# <<< DEFINITIVE SOTA VERSION >>>
 
 import numpy as np
 import math
 
 class BiasMeter:
     """
-    A class that takes a full observation vector from the OptionsZeroGameEnv
-    and synthesizes it into human-readable directional and volatility biases.
+    A definitive, SOTA Bias Meter that synthesizes the agent's observation
+    vector, including the powerful Transformer expert outputs, into a
+    human-readable market bias.
     """
     def __init__(self, observation_vector: np.ndarray, obs_idx_map: dict):
         self.obs = observation_vector
@@ -18,73 +20,82 @@ class BiasMeter:
 
     def _calculate_directional_score(self) -> float:
         """
-        Calculates a final directional score by combining multiple trend and momentum indicators.
-        A positive score is bullish, a negative score is bearish.
+        Calculates a directional score. For the SOTA version, this relies
+        almost entirely on the powerful Tail Risk Expert.
+        
+        Score Interpretation:
+        - Highly Negative: Strong bearish signal (high tail risk).
+        - Around Zero: Neutral.
+        - Positive: Mildly bullish signal (low tail risk).
         """
-        # --- Define Weights for each signal ---
-        # The expert's trend prediction is the most important signal.
-        WEIGHT_EXPERT_TREND = 0.5
-        # The current established momentum is the next most important.
-        WEIGHT_CURRENT_MOMENTUM = 0.3
-        # The expert's RSI prediction is a good contrary indicator.
-        WEIGHT_EXPERT_RSI = 0.2
+        # --- Define Weights ---
+        # The new Tail Risk expert is our most powerful directional signal.
+        # Its prediction should dominate the calculation.
+        WEIGHT_TAIL_RISK = 0.8
         
-        # --- Gather the Signals from the Observation Vector ---
+        # The simple momentum signal is a good secondary confirmation.
+        WEIGHT_MOMENTUM = 0.2
         
-        # 1. Expert Trend Signal (from EMA Ratio prediction)
-        # This is already a tanh'd value from -1 (bearish) to +1 (bullish).
-        expert_trend_signal = self.obs[self.idx['EXPERT_EMA_RATIO']]
+        # --- Gather Signals ---
+        # 1. Tail Risk Signal (from the Directional Transformer)
+        # We get the probability of a "DOWN" move. This is a direct bearish signal.
+        # The observation is scaled to [-1, 1], so we need to un-scale it first.
+        tail_risk_prob_scaled = self.obs[self.idx['EXPERT_TAIL_RISK_PROB']]
+        tail_risk_prob = (tail_risk_prob_scaled + 1.0) / 2.0
         
-        # 2. Current Momentum Signal
-        # This is the price vs. its SMA, also tanh'd from -1 to +1.
-        current_momentum_signal = self.obs[self.idx['MOMENTUM_NORM']]
-        
-        # 3. Expert RSI Signal (as a contrarian indicator)
-        # If the expert predicts a high chance of being overbought, that's a bearish signal.
-        # If it predicts a high chance of being oversold, that's a bullish signal.
-        prob_oversold = self.obs[self.idx['EXPERT_RSI_OVERSOLD']]
-        prob_overbought = self.obs[self.idx['EXPERT_RSI_OVERBOUGHT']]
-        expert_rsi_signal = prob_oversold - prob_overbought # Ranges from +1 (bullish) to -1 (bearish)
+        # We want a score from +1 (bullish) to -1 (bearish).
+        # So, we'll use (1 - prob_of_down) and scale it.
+        # A 50% tail risk prob -> 0 score. 100% -> -1 score. 0% -> +1 score.
+        tail_risk_signal = 1.0 - (2 * tail_risk_prob)
 
-        # --- Calculate the Final Weighted Score ---
-        final_score = (
-            (expert_trend_signal * WEIGHT_EXPERT_TREND) +
-            (current_momentum_signal * WEIGHT_CURRENT_MOMENTUM) +
-            (expert_rsi_signal * WEIGHT_EXPERT_RSI)
-        )
+        # 2. Current Momentum Signal (unchanged)
+        momentum_signal = self.obs[self.idx['MOMENTUM_NORM']]
         
+        # --- Calculate Final Score ---
+        final_score = (
+            (tail_risk_signal * WEIGHT_TAIL_RISK) +
+            (momentum_signal * WEIGHT_MOMENTUM)
+        )
         return final_score
 
     def _calculate_volatility_score(self) -> float:
         """
-        Calculates a score representing the likelihood of high volatility.
-        A positive score means high vol is expected.
+        Calculates a volatility score. The SOTA version uses the powerful
+        128-dim embedding from the Volatility Transformer as its primary input.
         """
-        # --- Define Weights ---
-        WEIGHT_EXPERT_VOL = 0.6 # The expert's forecast is most important.
-        WEIGHT_VOL_MISMATCH = 0.4 # The current market state is also important.
-
-        # --- Gather Signals ---
-        # 1. Expert Volatility Prediction (tanh'd value)
-        expert_vol_signal = self.obs[self.idx['EXPERT_VOL_NORM']]
+        # --- Feature Extraction from the Embedding ---
+        # The 128-dim vector is a rich, high-dimensional representation.
+        # A simple, robust way to collapse this into a single "volatility score"
+        # is to calculate its L2 norm (magnitude).
+        # A large magnitude means the model's internal "neurons" are firing
+        # intensely, which usually corresponds to a confident or extreme prediction.
         
-        # 2. Current Volatility Surprise (tanh'd value)
+        start_idx = self.idx['VOL_EMBEDDING_START']
+        end_idx = start_idx + 128 # Assuming embedding size is 128
+        
+        vol_embedding = self.obs[start_idx:end_idx]
+        
+        # Calculate the magnitude (L2 norm) of the embedding vector.
+        # We use tanh to squash the result into a predictable [-1, 1] range.
+        embedding_magnitude_score = math.tanh(np.linalg.norm(vol_embedding))
+
+        # --- Secondary Signal: The Volatility Mismatch ---
+        # This tells us if the current market is behaving as expected.
+        # A large mismatch is also a sign of potential volatility.
         vol_mismatch_signal = self.obs[self.idx['VOL_MISMATCH_NORM']]
         
-        # --- Calculate Final Score ---
-        final_score = (
-            (expert_vol_signal * WEIGHT_EXPERT_VOL) +
-            (vol_mismatch_signal * WEIGHT_VOL_MISMATCH)
-        )
+        # --- Final Score (Weighted Average) ---
+        # We'll weight the powerful embedding score more heavily.
+        final_score = (embedding_magnitude_score * 0.7) + (vol_mismatch_signal * 0.3)
         return final_score
 
     @property
     def directional_bias(self) -> str:
         """Returns the human-readable directional bias."""
         score = self._directional_score
-        if score > 0.6: return "Hugely Bullish"
+        if score > 0.6: return "Strongly Bullish"
         if score > 0.2: return "Mildly Bullish"
-        if score < -0.6: return "Hugely Bearish"
+        if score < -0.6: return "Strongly Bearish"
         if score < -0.2: return "Mildly Bearish"
         return "Neutral"
     
@@ -92,8 +103,8 @@ class BiasMeter:
     def volatility_bias(self) -> str:
         """Returns the human-readable volatility bias."""
         score = self._volatility_score
-        # If the combined score is positive, it indicates an expectation of volatility.
-        if score > 0.3: return "High Volatility Expected"
+        if score > 0.5: return "High Volatility Expected"
+        if score < -0.2: return "Low Volatility Expected"
         return "Neutral / Low Volatility Expected"
 
     def summary(self):

@@ -8,7 +8,7 @@ import joblib
 import torch
 import numpy as np
 import pandas as pd
-from typing import Dict, Any
+from typing import Dict, Any, List
 
 # --- Import the necessary components from the expert trainer scripts ---
 from zoo.options_zero_game.experts.transformer_expert_trainer import TransformerExpert, HybridGRUTransformerExpert, CONFIG as ExpertConfig
@@ -46,6 +46,7 @@ class PriceActionManager:
         # --- Holy Trinity State ---
         self.ema_expert, self.rsi_expert = None, None
         self.expert_ema_pred: float = 0.0
+        self.expert_lookback = 30 # Must match the lookback used in training
         self.expert_rsi_pred: np.ndarray = np.array([0.33, 0.34, 0.33])
         self._load_holy_trinity_experts()
 
@@ -55,6 +56,7 @@ class PriceActionManager:
         self.volatility_embedding = None
         self.directional_prediction = 0.0
         self._load_transformer_experts()
+        self.volatility_transformer_prediction = 0.20 # Default value
 
     def _load_tickers(self) -> List[str]:
         if self.price_source in ['historical', 'mixed']:
@@ -153,7 +155,7 @@ class PriceActionManager:
 
         # --- Holy Trinity Predictions ---
         # --- THE FIX: Get predictions ONLY from the Holy Trinity experts ---
-        if self.ema_expert and self.rsi_expert
+        if self.ema_expert and self.rsi_expert:
             features = self._get_features_for_experts(current_step)
             if features is not None:
                 self.expert_ema_pred = self.ema_expert.predict(features)[0]
@@ -167,6 +169,7 @@ class PriceActionManager:
                 # 1. Run Volatility Expert to get the context embedding
                 vol_embedding = self.volatility_expert.encode(raw_history_tensor.unsqueeze(0))
                 self.volatility_embedding = vol_embedding.cpu().numpy().flatten()
+                self.volatility_transformer_prediction = self.volatility_expert.forward(raw_history_tensor.unsqueeze(0)).item()
 
                 # 2. Fuse features for the Directional Expert
                 vol_embedding_tiled = vol_embedding.repeat(self.expert_sequence_length, 1)
@@ -176,6 +179,30 @@ class PriceActionManager:
                 dir_prediction_logits = self.directional_expert(directional_input.unsqueeze(0))
                 dir_prediction_probs = torch.nn.functional.softmax(dir_prediction_logits, dim=-1)
                 self.directional_prediction = dir_prediction_probs[0, 0].item()
+
+    def _get_features_for_experts(self, current_step: int) -> np.ndarray:
+        """Prepares the feature vector for the Holy Trinity experts."""
+        if current_step < self.expert_lookback: 
+            return None
+
+        # A more robust start index calculation
+        start_index = max(0, current_step - self.expert_lookback - 30) 
+        end_index = current_step + 1
+        history_df = pd.DataFrame({'Close': self.price_path[start_index:end_index]})
+        
+        # Calculate indicators needed for features
+        history_df.ta.rsi(length=14, append=True)
+        history_df['log_return'] = np.log(history_df['Close'] / history_df['Close'].shift(1))
+        
+        if len(history_df.dropna()) < self.expert_lookback:
+            return None
+
+        valid_history = history_df.dropna().tail(self.expert_lookback)
+        
+        log_return_features = valid_history['log_return'].values
+        rsi_features = valid_history['RSI_14'].values
+        
+        feature_vector = np.concatenate([log_return_features, rsi_features])
 
     def _get_raw_history_for_transformer(self, current_step: int) -> torch.Tensor:
         """A helper to prepare the input tensor for the Transformer models."""
