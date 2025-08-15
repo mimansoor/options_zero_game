@@ -542,29 +542,43 @@ class PortfolioManager:
         else:
             self.post_action_portfolio = self.portfolio.copy()
 
-    # <<< ADD THIS NEW, DEDICATED HELPER METHOD FOR IDENTIFICATION >>>
     def _identify_strategy_from_legs(self, legs_df: pd.DataFrame) -> str:
         """
-        A robust helper function that identifies the name of a strategy
+        A definitive, intelligent helper that identifies the name of a strategy
         based on the properties of its constituent legs.
         """
         num_legs = len(legs_df)
         
+        # --- Case 1: Single Leg ---
         if num_legs == 1:
             leg = legs_df.iloc[0]
             return f"{leg['direction'].upper()}_{leg['type'].upper()}"
         
+        # --- Case 2: Two Legs ---
         if num_legs == 2:
-            # Could be a vertical, strangle, or straddle.
-            # For simplicity, we'll give it a generic name, but you could add
-            # more detailed logic here if needed.
-            return "CUSTOM_2_LEGS" # Or a more specific name
-            
-        if num_legs == 3:
-            # This is likely what's left after closing one leg of a butterfly or condor.
-            return "CUSTOM_3_LEGS"
-            
-        # Fallback for any other complex combination
+            # Check for a vertical spread (same type, different directions)
+            if len(legs_df['type'].unique()) == 1 and len(legs_df['direction'].unique()) == 2:
+                leg1, leg2 = legs_df.iloc[0], legs_df.iloc[1]
+                option_type = leg1['type'].upper()
+                
+                # Identify based on the direction of the leg with the higher strike
+                if leg1['strike_price'] > leg2['strike_price']:
+                    higher_strike_leg, lower_strike_leg = leg1, leg2
+                else:
+                    higher_strike_leg, lower_strike_leg = leg2, leg1
+                
+                if option_type == 'CALL':
+                    # If the higher strike is short, it's a Bear Call (credit)
+                    # If the higher strike is long, it's a Bull Call (debit)
+                    return 'BEAR_CALL_SPREAD' if higher_strike_leg['direction'] == 'short' else 'BULL_CALL_SPREAD'
+                else: # PUT
+                    # If the higher strike is short, it's a Bull Put (credit)
+                    # If the higher strike is long, it's a Bear Put (debit)
+                    return 'BULL_PUT_SPREAD' if higher_strike_leg['direction'] == 'short' else 'BEAR_PUT_SPREAD'
+
+            # (You could add logic here to identify straddles/strangles if needed)
+        
+        # --- Fallback for all other complex, custom combinations ---
         return f"CUSTOM_{num_legs}_LEGS"
 
     def close_all_positions(self, current_price: float, iv_bin_index: int, current_step: int):
