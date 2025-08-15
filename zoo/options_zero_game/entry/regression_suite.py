@@ -418,6 +418,160 @@ def test_hedge_straddle_leg():
     finally:
         env.close()
 
+def test_no_new_trades_when_active():
+    """
+    Tests the core design rule: The agent cannot open a new position
+    if a portfolio is already active.
+    """
+    test_name = "test_no_new_trades_when_active"
+    print(f"\n--- RUNNING: {test_name} ---")
+    # We can start with any simple strategy to make the portfolio active.
+    env = create_test_env('OPEN_BULL_PUT_SPREAD')
+    try:
+        # Step 0: Open the initial position to make the portfolio non-empty.
+        env.reset(seed=51)
+        timestep = env.step(env.actions_to_indices['HOLD'])
+        assert not env.portfolio_manager.get_portfolio().empty, "Setup failed: Portfolio is empty."
+
+        # --- The Real Test: Check the action mask from the new state ---
+        action_mask = timestep.obs['action_mask']
+
+        # --- Assertions ---
+        # 1. Verify that NO 'OPEN_*' actions are legal.
+        num_open_actions_tested = 0
+        for action_name, index in env.actions_to_indices.items():
+            if action_name.startswith('OPEN_'):
+                num_open_actions_tested += 1
+                assert action_mask[index] == 0, f"Illegal OPEN action found in mask for active portfolio: {action_name}"
+
+        print(f"Verified that all {num_open_actions_tested} 'OPEN_*' actions are correctly disabled.")
+
+        # 2. As a sanity check, verify that 'HOLD' IS legal.
+        assert action_mask[env.actions_to_indices['HOLD']] == 1, "HOLD action was not legal for an active portfolio."
+
+        print(f"--- PASSED: {test_name} ---")
+        return True
+    except Exception:
+        traceback.print_exc()
+        print(f"--- FAILED: {test_name} ---")
+        return False
+    finally:
+        env.close()
+
+def test_all_open_actions_are_legal():
+    """
+    A critical "smoke test" to ensure that every defined 'OPEN_*' action
+    can be legal under ideal conditions (empty portfolio, no curriculum).
+    """
+    test_name = "test_all_open_actions_are_legal"
+    print(f"\n--- RUNNING: {test_name} ---")
+
+    # We create a custom env_cfg for this test to guarantee ideal conditions.
+    env_cfg = copy.deepcopy(main_config.env)
+    env_cfg.is_eval_mode = True
+    env_cfg.disable_opening_curriculum = True # CRITICAL: curriculum would restrict the mask
+    env_cfg.max_positions = 4 # CRITICAL: Ensure enough slots for Condors/Flies
+    env = gym.make('OptionsZeroGame-v0', cfg=env_cfg)
+
+    try:
+        # Step 0: Reset the environment to get the initial action mask.
+        # We don't need to step, as reset() provides the mask for an empty portfolio.
+        obs_dict = env.reset(seed=42)
+        action_mask = obs_dict['action_mask']
+
+        # --- Assertions ---
+        # We will collect all OPEN actions that were unexpectedly illegal.
+        illegal_open_actions = []
+
+        for action_name, index in env.actions_to_indices.items():
+            if action_name.startswith('OPEN_'):
+                # Check if this OPEN action is disabled in the mask
+                if action_mask[index] == 0:
+                    illegal_open_actions.append(action_name)
+
+        # The final assertion: the list of illegal actions must be empty.
+        assert not illegal_open_actions, \
+            f"FAIL: The following OPEN actions were unexpectedly illegal on Step 0: {illegal_open_actions}"
+
+        print(f"--- PASSED: {test_name} ---")
+        return True
+    except Exception:
+        traceback.print_exc()
+        print(f"--- FAILED: {test_name} ---")
+        return False
+    finally:
+        env.close()
+
+def test_dte_decay_logic():
+    """
+    A quantitative test to verify that DTE decays correctly, including
+    intra-day, overnight, and weekend decay periods.
+    """
+    test_name = "test_dte_decay_logic"
+    print(f"\n--- RUNNING: {test_name} ---")
+
+    # --- 1. Setup a custom, deterministic environment ---
+    env_cfg = copy.deepcopy(main_config.env)
+    env_cfg.is_eval_mode = True
+    env_cfg.disable_opening_curriculum = True
+    env_cfg.forced_opening_strategy_name = 'OPEN_SHORT_STRADDLE_ATM'
+    env_cfg.forced_historical_symbol = 'SPY'
+
+    env_cfg.steps_per_day = 4
+    env_cfg.forced_episode_length = 30
+
+    env = gym.make('OptionsZeroGame-v0', cfg=env_cfg)
+
+    try:
+        # --- 2. Initialize and get baseline DTE ---
+        env.reset(seed=52)
+
+        # Step 0: Open the position
+        timestep = env.step(env.actions_to_indices['HOLD'])
+        portfolio = env.portfolio_manager.get_portfolio()
+
+        # <<< THE FIX: Use the correct column name 'days_to_expiry' >>>
+        initial_dte = portfolio.iloc[0]['days_to_expiry']
+
+        # The initial DTE is calculated based on the episode length
+        expected_initial_dte = 30 * (7.0 / 5.0)
+        assert np.isclose(initial_dte, expected_initial_dte, atol=0.1), \
+            f"Initial DTE is wrong. Expected ~{expected_initial_dte}, got {initial_dte}"
+
+        # --- 3. Simulate forward for 4 full days (Monday -> Thursday) ---
+        # 4 days * 4 steps/day = 16 steps total from the start of the episode
+        for i in range(1, 16):
+            timestep = env.step(env.actions_to_indices['HOLD'])
+
+        # --- 4. First Assertion: Check DTE at the end of Thursday ---
+        # <<< THE FIX: Use the correct column name 'days_to_expiry' >>>
+        dte_after_thursday = env.portfolio_manager.get_portfolio().iloc[0]['days_to_expiry']
+        expected_dte_thursday = initial_dte - 4.0
+        print(f"Checking DTE EOD Thursday (Step 16): Expected={expected_dte_thursday:.2f}, Actual={dte_after_thursday:.2f}")
+        assert np.isclose(dte_after_thursday, expected_dte_thursday, atol=0.1), \
+            "DTE after 4 normal days is incorrect."
+
+        # --- 5. Simulate forward one more day to complete Friday ---
+        for i in range(4):
+            timestep = env.step(env.actions_to_indices['HOLD'])
+
+        # --- 6. Final Assertion: Check DTE after the weekend decay ---
+        # <<< THE FIX: Use the correct column name 'days_to_expiry' >>>
+        dte_after_friday = env.portfolio_manager.get_portfolio().iloc[0]['days_to_expiry']
+        expected_dte_friday = expected_dte_thursday - 3.0
+        print(f"Checking DTE EOD Friday (Step 20): Expected={expected_dte_friday:.2f}, Actual={dte_after_friday:.2f}")
+        assert np.isclose(dte_after_friday, expected_dte_friday, atol=0.1), \
+            "Weekend DTE decay is incorrect. Expected a 3-day drop."
+
+        print(f"--- PASSED: {test_name} ---")
+        return True
+    except Exception:
+        traceback.print_exc()
+        print(f"--- FAILED: {test_name} ---")
+        return False
+    finally:
+        env.close()
+
 # ==============================================================================
 #                                TEST SUITE RUNNER
 # ==============================================================================
@@ -440,6 +594,9 @@ if __name__ == "__main__":
         test_convert_put_fly_to_vertical,
         test_hedge_strangle_leg,
         test_hedge_straddle_leg,
+        test_no_new_trades_when_active,
+        test_all_open_actions_are_legal,
+        test_dte_decay_logic,
     ]
 
     failures = []

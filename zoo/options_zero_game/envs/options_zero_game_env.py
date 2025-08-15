@@ -1090,30 +1090,44 @@ class OptionsZeroGameEnv(gym.Env):
                 base_mask[index] = 1
         return base_mask
 
-    def _is_legal_opening_action(self, action_name, atm_price, days_to_expiry) -> bool:
-        """Check if a given opening action is legal."""
+    def _is_legal_opening_action(self, action_name: str, atm_price: float, days_to_expiry: float) -> bool:
+        """
+        Check if a given opening action is legal. This definitive version uses
+        more permissive and robust rules.
+        """
+        # --- Rule 1: Multi-leg strategies are always considered legal at this stage ---
+        # Their legality is determined by slot constraints later.
         is_single_leg = 'ATM' in action_name and 'STRADDLE' not in action_name and 'STRANGLE' not in action_name
         if not is_single_leg:
-            return True  # multi-leg assumed legal for now
+            return True
 
-        parts = action_name.split('_')
-        direction, option_type, offset_str = parts[1], parts[2].lower(), parts[3].replace('ATM', '')
-        offset = int(offset_str)
+        # --- Rule 2: Single-leg specific rules ---
+        try:
+            parts = action_name.split('_')
+            direction, option_type, offset_str = parts[1], parts[2].lower(), parts[3].replace('ATM', '')
+            offset = int(offset_str)
+        except (ValueError, IndexError):
+            return False # Invalid action name format
 
-        if direction == 'SHORT' and abs(offset) > self._cfg.short_leg_max_offset:
-            return False
+        # --- Rule 2a: Prevent shorting deep in-the-money options ---
+        # This is a critical risk management rule.
+        if direction == 'SHORT':
+            strike_price = atm_price + (offset * self._cfg.strike_distance)
+            if strike_price <= 0: return False
 
-        strike_price = atm_price + (offset * self._cfg.strike_distance)
-        vol = self.market_rules_manager.get_implied_volatility(offset, option_type, self.iv_bin_index)
-        greeks = self.bs_manager.get_all_greeks_and_price(
-            self.price_manager.current_price, strike_price, days_to_expiry, vol, option_type == 'call'
-        )
-        abs_delta = abs(greeks['delta'])
+            # Use the dynamic IV calculator for an accurate delta
+            vol = self._get_dynamic_iv(offset, option_type)
+            greeks = self.bs_manager.get_all_greeks_and_price(
+                self.price_manager.current_price, strike_price, days_to_expiry, vol, option_type == 'call'
+            )
+            abs_delta = abs(greeks['delta'])
 
-        if direction == 'LONG':
-            return self._cfg.otm_long_delta_threshold <= abs_delta <= self._cfg.itm_long_delta_threshold
-        elif direction == 'SHORT':
-            return abs_delta <= self._cfg.itm_short_delta_threshold
+            # Disallow shorting any option that has more than an 80% chance of expiring ITM.
+            if abs_delta > 0.80:
+                return False
+        
+        # If none of the above rules failed, the action is legal.
+        # We no longer restrict long options by delta at this stage.
         return True
 
     def _apply_slot_constraints(self, base_mask: np.ndarray) -> np.ndarray:
