@@ -161,6 +161,7 @@ class OptionsZeroGameEnv(gym.Env):
             'DELTA': 8, 'GAMMA': 9, 'THETA': 10, 'VEGA': 11, 'IS_HEDGED': 12,
         }
         self.PORTFOLIO_STATE_SIZE_PER_POS = len(self.POS_IDX)
+        self.positions_block_size = self._cfg.max_positions * self.PORTFOLIO_STATE_SIZE_PER_POS
 
         # 3. Define the layout of the main summary/market block
         self.OBS_IDX = {
@@ -176,27 +177,22 @@ class OptionsZeroGameEnv(gym.Env):
         
         # 4. Calculate the TRUE sizes and start indices robustly
         base_summary_size = len(self.OBS_IDX)
-        
+        self.summary_block_size = base_summary_size + self.vol_embedding_size + self.dir_prediction_size
+
         # Add start indices to the dictionary for easy lookup and self-documentation
         self.OBS_IDX['VOL_EMBEDDING_START'] = base_summary_size
         self.OBS_IDX['DIR_PREDICTION_START'] = base_summary_size + self.vol_embedding_size
-        
-        # This is the single source of truth for the size of the first block of data.
-        self.market_and_portfolio_state_size = base_summary_size + self.vol_embedding_size + self.dir_prediction_size
-        
-        # This is the single source of truth for where the per-position data begins.
-        self.PORTFOLIO_START_IDX = self.market_and_portfolio_state_size
-        
-        # 5. Calculate the final total observation size
-        total_obs_size = self.market_and_portfolio_state_size + (self._cfg.max_positions * self.PORTFOLIO_STATE_SIZE_PER_POS)
-        
-        # This is the observation for the model, which does not include the action mask.
-        self.model_obs_size = total_obs_size 
-        
-        # The final observation vector passed to the framework INCLUDES the action mask.
-        self.obs_vector_size = total_obs_size + self.action_space_size
 
-        self._observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(self.obs_vector_size,), dtype=np.float32)
+        # This is the single source of truth for where the per-position data begins.
+        self.PORTFOLIO_START_IDX = self.summary_block_size
+        
+        # The model sees the complete state: the summary block + the positions block.
+        self.model_observation_size = self.summary_block_size + self.positions_block_size
+        
+        # The full vector passed in the timestep includes the model's observation + the action mask.
+        self.framework_vec_size = self.model_observation_size + self.action_space_size
+        
+        self._observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(self.framework_vec_size,), dtype=np.float32)
         self._reward_range = (-1.0, 1.0)
 
         self.current_step: int = 0
@@ -575,7 +571,7 @@ class OptionsZeroGameEnv(gym.Env):
         # --- Prepare and Return Timestep ---
         obs = self._get_observation()
         action_mask = self._get_true_action_mask() if not self._cfg.ignore_legal_actions else np.ones(self.action_space_size, dtype=np.int8)
-        meter = BiasMeter(obs[:self.market_and_portfolio_state_size], self.OBS_IDX)
+        meter = BiasMeter(obs[:self.model_observation_size], self.OBS_IDX)
 
         info = {
             'price': self.price_manager.current_price,
@@ -645,7 +641,7 @@ class OptionsZeroGameEnv(gym.Env):
 
     def _get_observation(self) -> np.ndarray:
         # Market State
-        vec = np.zeros(self.market_and_portfolio_state_size, dtype=np.float32)
+        vec = np.zeros(self.model_observation_size, dtype=np.float32)
         vec[self.OBS_IDX['PRICE_NORM']] = (self.price_manager.current_price / self.price_manager.start_price) - 1.0
         vec[self.OBS_IDX['TIME_NORM']] = (self.total_steps - self.current_step) / self.total_steps
         vec[self.OBS_IDX['PNL_NORM']] = math.tanh(self.portfolio_manager.get_total_pnl(self.price_manager.current_price, self.iv_bin_index) / self._cfg.initial_cash)
@@ -748,7 +744,7 @@ class OptionsZeroGameEnv(gym.Env):
         #    print(f"WARNING: Found and corrected non-finite values in observation vector at indices: {bad_indices}")
 
         # 2. Then, run assertions on the FINAL object
-        assert final_obs_vec.shape == (self.obs_vector_size,), f"Observation shape mismatch. Expected {self.obs_vector_size}, but got {final_obs_vec.shape}"
+        assert final_obs_vec.shape == (self.framework_vec_size,), f"Observation shape mismatch. Expected {self.framework_vec_size}, but got {final_obs_vec.shape}"
         assert np.all(np.isfinite(final_obs_vec)), "Observation vector contains NaN or Inf."
 
         # 3. Return the fully validated final vector
@@ -1170,7 +1166,7 @@ class OptionsZeroGameEnv(gym.Env):
 
         # --- NEW: Add the Bias Meter Summary ---
         # We get the observation vector but slice off the action mask at the end.
-        current_obs_vector = self._get_observation()[:self.market_and_portfolio_state_size]
+        current_obs_vector = self._get_observation()[:self.model_observation_size]
         meter = BiasMeter(current_obs_vector, self.OBS_IDX)
         meter.summary()
 
