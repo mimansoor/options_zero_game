@@ -777,7 +777,7 @@ class OptionsZeroGameEnv(gym.Env):
         # --- 4. THE FIX: Calculate the Capital Preservation Bonus ---
         capital_preservation_bonus = 0.0
         # Check if we are in a profitable state
-        current_pnl = equity_after - self.initial_cash
+        current_pnl = equity_after - self._cfg.initial_cash
         if self.capital_preservation_bonus_pct > 0 and current_pnl > 0:
             # The bonus is a small percentage of the profit being preserved
             capital_preservation_bonus = current_pnl * self.capital_preservation_bonus_pct
