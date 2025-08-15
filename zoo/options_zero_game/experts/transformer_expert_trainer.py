@@ -1,17 +1,17 @@
 # zoo/options_zero_game/experts/transformer_expert_trainer.py
+# <<< DEFINITIVE SOTA VERSION >>>
 
-import random
 import torch
 import torch.nn as nn
-from torch.utils.data import DataLoader, TensorDataset
 import numpy as np
 import pandas as pd
-import pandas_ta as ta
-import os
-import glob
 import argparse
+import glob
+import os
 import math
+import random
 from tqdm import tqdm
+from torch.utils.data import DataLoader, TensorDataset
 
 # ==============================================================================
 #                            CONFIGURATION
@@ -19,98 +19,78 @@ from tqdm import tqdm
 CONFIG = {
     "data_path": "zoo/options_zero_game/data/market_data_cache",
     "model_save_path": "zoo/options_zero_game/experts/",
-    
-    # --- Shared Model Hyperparameters ---
-    "embedding_dim": 128,   # The core size of the model's internal representation
-    "num_heads": 4,         # Number of attention heads
+
+    "embedding_dim": 128,
+    "num_heads": 4,
     "dropout": 0.1,
-    
-    # <<< NEW: Expert-Specific Architectural Parameters >>>
+
     "volatility_expert_params": {
-        "num_layers": 3,       # As you requested
-        "input_dim": 2,        # log_return, volatility
-        "output_dim": 1,       # A single predicted volatility value (regression)
+        "num_layers": 3,
+        "input_dim": 2,
+        "output_dim": 1,
     },
     "directional_expert_params": {
-        "num_layers": 4,       # As you requested
-        "input_dim": 2 + 128,  # base_features + volatility_embedding_dim
-        "output_dim": 3,       # UP, NEUTRAL, DOWN probabilities (classification)
+        "num_layers": 2, # Note: Fewer Transformer layers are often better in a hybrid
+        "gru_layers": 2,
+        "input_dim": 2 + 128, # base_features + vol_embedding
+        "output_dim": 3,
     },
-    
-    # --- Shared Training Hyperparameters ---
+
     "sequence_length": 60,
     "prediction_horizon": 5,
     "batch_size": 64,
     "epochs": 15,
     "lr": 1e-4,
-    
-    # --- Shared Target Engineering ---
+
     "volatility_period": 14,
     "directional_threshold": 0.005,
 }
 
 # ==============================================================================
-#                          TRANSFORMER MODEL DEFINITION
+#                          MODEL ARCHITECTURES
 # ==============================================================================
 
-class PositionalEncoding(nn.Module):
-    """ Standard sinusoidal positional encoding """
-    def __init__(self, d_model: int, dropout: float = 0.1, max_len: int = 5000):
-        super().__init__()
-        self.dropout = nn.Dropout(p=dropout)
-        position = torch.arange(max_len).unsqueeze(1)
-        div_term = torch.exp(torch.arange(0, d_model, 2) * (-math.log(10000.0) / d_model))
-        pe = torch.zeros(max_len, 1, d_model)
-        pe[:, 0, 0::2] = torch.sin(position * div_term)
-        pe[:, 0, 1::2] = torch.cos(position * div_term)
-        self.register_buffer('pe', pe)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = x + self.pe[:x.size(0)]
-        return self.dropout(x)
-
 class TransformerExpert(nn.Module):
-    """
-    A flexible Transformer model for both regression and classification tasks.
-    It includes an `encode` method to extract embeddings for inference.
-    """
+    """Standard Transformer Encoder for the Volatility Analyst."""
     def __init__(self, input_dim, model_dim, num_heads, num_layers, output_dim, dropout=0.1):
         super().__init__()
         self.model_dim = model_dim
         self.input_embedding = nn.Linear(input_dim, model_dim)
-        self.pos_encoder = PositionalEncoding(model_dim, dropout)
         encoder_layers = nn.TransformerEncoderLayer(d_model=model_dim, nhead=num_heads, dropout=dropout, batch_first=True)
         self.transformer_encoder = nn.TransformerEncoder(encoder_layers, num_layers=num_layers)
         self.output_head = nn.Linear(model_dim, output_dim)
 
     def forward(self, src: torch.Tensor) -> torch.Tensor:
-        # Generate the rich embedding first
         embedding = self.encode(src)
-        # Pass the embedding through the final output layer
-        output = self.output_head(embedding)
-        return output
+        return self.output_head(embedding)
 
     def encode(self, src: torch.Tensor) -> torch.Tensor:
-        """
-        Runs the model up to the point of producing the embedding.
-        This is used for feature generation.
-        """
-        # src shape: (batch_size, seq_len, input_dim)
-        src = self.input_embedding(src) * math.sqrt(self.model_dim)
-        # Note: Positional encoding expects (seq_len, batch_size, model_dim) if batch_first=False
-        # Since we use batch_first=True, we need to adapt. Let's assume a simpler addition.
-        # A more robust implementation might require permuting dimensions.
-        
-        # Simple positional encoding for batch_first=True
-        # x = src.permute(1, 0, 2) # (seq_len, batch_size, features)
-        # x = self.pos_encoder(x)
-        # x = x.permute(1, 0, 2) # (batch_size, seq_len, features)
-        x = self.transformer_encoder(src)
-        
-        # Pool the sequence of embeddings into a single embedding
-        # Taking the mean of the sequence is a standard and effective method
-        pooled_embedding = x.mean(dim=1)
-        return pooled_embedding
+        x = self.input_embedding(src) * math.sqrt(self.model_dim)
+        x = self.transformer_encoder(x)
+        return x.mean(dim=1) # Mean pooling
+
+class HybridGRUTransformerExpert(nn.Module):
+    """SOTA GRU-Transformer Hybrid for the Directional Strategist."""
+    def __init__(self, input_dim, model_dim, num_heads, num_layers, gru_layers, output_dim, dropout=0.1):
+        super().__init__()
+        self.model_dim = model_dim
+
+        self.gru = nn.GRU(
+            input_size=input_dim,
+            hidden_size=model_dim,
+            num_layers=gru_layers,
+            batch_first=True
+        )
+
+        encoder_layers = nn.TransformerEncoderLayer(d_model=model_dim, nhead=num_heads, dropout=dropout, batch_first=True)
+        self.transformer_encoder = nn.TransformerEncoder(encoder_layers, num_layers=num_layers)
+        self.output_head = nn.Linear(model_dim, output_dim)
+
+    def forward(self, src: torch.Tensor) -> torch.Tensor:
+        gru_out, _ = self.gru(src)
+        transformer_out = self.transformer_encoder(gru_out)
+        final_embedding = transformer_out[:, -1, :] # Use last hidden state
+        return self.output_head(final_embedding)
 
 # ==============================================================================
 #                         DATA PREPARATION PIPELINE
@@ -174,17 +154,18 @@ def create_sequences(df: pd.DataFrame, config: dict, device: torch.device, vol_e
 # ==============================================================================
 def main(model_type: str):
     """
-    Main function to orchestrate the training process. This version is memory-efficient
-    and processes files in a streaming fashion to handle large datasets.
+    Main function to orchestrate the training process. This version uses the
+    appropriate SOTA model for each expert.
     """
     # --- 1. Setup ---
     print(f"--- Starting Training for: {model_type.upper()} EXPERT ---")
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
 
-    # --- 2. Define Model and Optimizer (once, before the loops) ---
+    # --- 2. Define Model and Optimizer ---
     if model_type == 'volatility':
         params = CONFIG['volatility_expert_params']
+        # Use the standard Transformer for the proven volatility task
         model = TransformerExpert(
             input_dim=params['input_dim'], model_dim=CONFIG['embedding_dim'],
             num_heads=CONFIG['num_heads'], num_layers=params['num_layers'],
@@ -193,10 +174,12 @@ def main(model_type: str):
         criterion = nn.MSELoss()
     elif model_type == 'directional':
         params = CONFIG['directional_expert_params']
-        model = TransformerExpert(
+        # Use the new, more powerful SOTA Hybrid model for the difficult directional task
+        model = HybridGRUTransformerExpert(
             input_dim=params['input_dim'], model_dim=CONFIG['embedding_dim'],
             num_heads=CONFIG['num_heads'], num_layers=params['num_layers'],
-            output_dim=params['output_dim'], dropout=CONFIG['dropout']
+            gru_layers=params['gru_layers'], output_dim=params['output_dim'],
+            dropout=CONFIG['dropout']
         ).to(device)
         criterion = nn.CrossEntropyLoss()
     else:
@@ -214,14 +197,13 @@ def main(model_type: str):
     for epoch in range(CONFIG['epochs']):
         epoch_loss = 0.0
         num_batches = 0
-        
-        # Shuffle files each epoch for better training stability
         random.shuffle(all_files)
         
-        # Load the vol expert once per epoch if needed
+        # Load the vol expert once per epoch if in directional mode
         if model_type == 'directional' and vol_expert_for_fusion is None:
             vol_params = CONFIG['volatility_expert_params']
             try:
+                # We need to load the *standard* TransformerExpert here for fusion
                 vol_expert_for_fusion = TransformerExpert(
                     input_dim=vol_params['input_dim'], model_dim=CONFIG['embedding_dim'],
                     num_heads=CONFIG['num_heads'], num_layers=vol_params['num_layers'],
