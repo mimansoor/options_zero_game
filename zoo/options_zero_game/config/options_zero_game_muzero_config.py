@@ -345,6 +345,12 @@ options_zero_game_muzero_config = dict(
             self_supervised_learning_loss=True,
             discrete_action_encoding_type='one_hot',
             norm_type='BN',
+            # <<< THE FIX: Add these mandatory parameters >>>
+            # This explicitly tells the model the range of rewards and values to expect.
+            # This MUST be wide enough to handle the large P&L swings in your financial env.
+            # A range of -50k to +50k with a step/bucket size of 250 is a robust choice.
+            reward_support_size=401,  # Corresponds to a range of (-50000, 50000) with step 250
+            value_support_size=401,   # Must match reward_support_size
         ),
         model_path='./best_ckpt/ckpt_best.pth.tar',
         cuda=True,

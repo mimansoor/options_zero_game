@@ -148,40 +148,54 @@ class OptionsZeroGameEnv(gym.Env):
         self.actions_to_indices = self._build_action_space()
         self.indices_to_actions = {v: k for k, v in self.actions_to_indices.items()}
         self.action_space_size = len(self.actions_to_indices)
-
-        # <<< UPDATE YOUR OBS_IDX AND SIZES >>>
-        self.vol_embedding_size = 128 # Must match your model's embedding_dim
-        self.dir_prediction_size = 3   # UP, NEUTRAL, DOWN probabilities
-
-        self.OBS_IDX = {
-            'PRICE_NORM': 0, 'TIME_NORM': 1, 'PNL_NORM': 2, 'VOL_MISMATCH_NORM': 3, 'LOG_RETURN': 4,
-            'MOMENTUM_NORM': 5, 'PORTFOLIO_DELTA': 6, 'PORTFOLIO_GAMMA': 7, 'PORTFOLIO_THETA': 8, 'PORTFOLIO_VEGA': 9,
-            'PORTFOLIO_MAX_PROFIT_NORM': 10, 'PORTFOLIO_MAX_LOSS_NORM': 11, 'PORTFOLIO_RR_RATIO_NORM': 12, 'PORTFOLIO_PROB_PROFIT': 13,
-            # --- NEW EXPERT FEATURES ---
-            'EXPERT_EMA_RATIO': 14, 'EXPERT_RSI_OVERSOLD': 15, 'EXPERT_RSI_NEUTRAL': 16, 'EXPERT_RSI_OVERBOUGHT': 17, 'EXPERT_VOL_NORM': 18,
-            # --- NEW MARKET EXPECTATION FEATURE ---
-            'EXPECTED_MOVE_NORM': 19, 'PORTFOLIO_PROFIT_FACTOR_NORM': 20,
-            # --- Realized and MtM Highest and Lowest Profit/Loss
-            'MTM_PNL_HIGH_NORM': 21, 'MTM_PNL_LOW_NORM': 22,
-            # --- NEW EXPERT FEATURES ---
-            'VOL_EMBEDDING_START': 23, # A marker for the start
-            'DIR_PREDICTION_START': 23 + self.vol_embedding_size, # e.g., 151
-        }
-        self.summary_state_size = 23 + self.vol_embedding_size + self.dir_prediction_size
-        self.POS_IDX = {
-            'IS_OCCUPIED': 0, 'TYPE_NORM': 1, 'DIRECTION_NORM': 2, 'STRIKE_DIST_NORM': 3, 'DAYS_HELD_NORM': 4,
-            'PROB_OF_PROFIT': 5, 'MAX_PROFIT_NORM': 6, 'MAX_LOSS_NORM': 7, 'DELTA': 8, 'GAMMA': 9, 'THETA': 10, 'VEGA': 11,
-            'IS_HEDGED': 12,
-        }
-        
-        self.MARKET_STATE_SIZE = len(self.OBS_IDX)
-        self.PORTFOLIO_STATE_SIZE_PER_POS = len(self.POS_IDX)
-        self.PORTFOLIO_START_IDX = self.MARKET_STATE_SIZE
-        
-        self.market_and_portfolio_state_size = self.MARKET_STATE_SIZE + (self._cfg.max_positions * self.PORTFOLIO_STATE_SIZE_PER_POS)
-        self.obs_vector_size = self.market_and_portfolio_state_size + self.action_space_size
-        
         self._action_space = spaces.Discrete(self.action_space_size)
+
+        # 1. Define the sizes of the different observation blocks
+        self.vol_embedding_size = 128
+        self.dir_prediction_size = 3
+        
+        # 2. Define the layout of the per-position block
+        self.POS_IDX = {
+            'IS_OCCUPIED': 0, 'TYPE_NORM': 1, 'DIRECTION_NORM': 2, 'STRIKE_DIST_NORM': 3,
+            'DAYS_HELD_NORM': 4, 'PROB_OF_PROFIT': 5, 'MAX_PROFIT_NORM': 6, 'MAX_LOSS_NORM': 7,
+            'DELTA': 8, 'GAMMA': 9, 'THETA': 10, 'VEGA': 11, 'IS_HEDGED': 12,
+        }
+        self.PORTFOLIO_STATE_SIZE_PER_POS = len(self.POS_IDX)
+
+        # 3. Define the layout of the main summary/market block
+        self.OBS_IDX = {
+            'PRICE_NORM': 0, 'TIME_NORM': 1, 'PNL_NORM': 2, 'VOL_MISMATCH_NORM': 3,
+            'LOG_RETURN': 4, 'MOMENTUM_NORM': 5, 'EXPECTED_MOVE_NORM': 6,
+            'PORTFOLIO_DELTA': 7, 'PORTFOLIO_GAMMA': 8, 'PORTFOLIO_THETA': 9, 'PORTFOLIO_VEGA': 10,
+            'PORTFOLIO_MAX_PROFIT_NORM': 11, 'PORTFOLIO_MAX_LOSS_NORM': 12,
+            'PORTFOLIO_RR_RATIO_NORM': 13, 'PORTFOLIO_PROB_PROFIT': 14,
+            'PORTFOLIO_PROFIT_FACTOR_NORM': 15, 'MTM_PNL_HIGH_NORM': 16, 'MTM_PNL_LOW_NORM': 17,
+            'EXPERT_EMA_RATIO': 18, 'EXPERT_RSI_OVERSOLD': 19,
+            'EXPERT_RSI_NEUTRAL': 20, 'EXPERT_RSI_OVERBOUGHT': 21, 'EXPERT_VOL_NORM': 22,
+        }
+        
+        # 4. Calculate the TRUE sizes and start indices robustly
+        base_summary_size = len(self.OBS_IDX)
+        
+        # Add start indices to the dictionary for easy lookup and self-documentation
+        self.OBS_IDX['VOL_EMBEDDING_START'] = base_summary_size
+        self.OBS_IDX['DIR_PREDICTION_START'] = base_summary_size + self.vol_embedding_size
+        
+        # This is the single source of truth for the size of the first block of data.
+        self.market_and_portfolio_state_size = base_summary_size + self.vol_embedding_size + self.dir_prediction_size
+        
+        # This is the single source of truth for where the per-position data begins.
+        self.PORTFOLIO_START_IDX = self.market_and_portfolio_state_size
+        
+        # 5. Calculate the final total observation size
+        total_obs_size = self.market_and_portfolio_state_size + (self._cfg.max_positions * self.PORTFOLIO_STATE_SIZE_PER_POS)
+        
+        # This is the observation for the model, which does not include the action mask.
+        self.model_obs_size = total_obs_size 
+        
+        # The final observation vector passed to the framework INCLUDES the action mask.
+        self.obs_vector_size = total_obs_size + self.action_space_size
+
         self._observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(self.obs_vector_size,), dtype=np.float32)
         self._reward_range = (-1.0, 1.0)
 
@@ -423,45 +437,29 @@ class OptionsZeroGameEnv(gym.Env):
             self.portfolio_manager.adjust_to_delta_neutral(
                 self.price_manager.current_price, self.iv_bin_index, self.current_step
             )
-        elif final_action_name == 'CONVERT_TO_IRON_CONDOR':
-            self.portfolio_manager.convert_to_iron_condor(
-                self.price_manager.current_price, self.iv_bin_index, self.current_step
-            )
-        elif final_action_name == 'CONVERT_TO_IRON_FLY':
-            self.portfolio_manager.convert_to_iron_fly(
-                self.price_manager.current_price, self.iv_bin_index, self.current_step
-            )
-        elif final_action_name == 'CONVERT_TO_STRANGLE':
-            self.portfolio_manager.convert_to_strangle(
-                self.price_manager.current_price, self.iv_bin_index, self.current_step
-            )
-        elif final_action_name == 'CONVERT_TO_STRADDLE':
-            self.portfolio_manager.convert_to_straddle(
-                self.price_manager.current_price, self.iv_bin_index, self.current_step
-            )
-        elif final_action_name == 'CONVERT_TO_BULL_PUT_SPREAD':
-            self.portfolio_manager.convert_to_bull_put_spread(
-                self.price_manager.current_price, self.iv_bin_index, self.current_step
-            )
-        elif final_action_name == 'CONVERT_TO_BEAR_CALL_SPREAD':
-            self.portfolio_manager.convert_to_bear_call_spread(
-                self.price_manager.current_price, self.iv_bin_index, self.current_step
-            )
-        elif final_action_name == 'CONVERT_TO_BULL_CALL_SPREAD':
-            self.portfolio_manager.convert_to_bull_call_spread(
-                self.price_manager.current_price, self.iv_bin_index, self.current_step
-            )
-        elif final_action_name == 'CONVERT_TO_BEAR_PUT_SPREAD':
-            self.portfolio_manager.convert_to_bear_put_spread(
-                self.price_manager.current_price, self.iv_bin_index, self.current_step
-            )
         elif final_action_name.startswith('HEDGE_NAKED_POS_'):
             self.portfolio_manager.add_hedge(int(final_action_name.split('_')[-1]),
                 self.price_manager.current_price, self.iv_bin_index, self.current_step
             )
+        elif final_action_name.startswith('CONVERT_TO_'):
+            self._route_convert_action(final_action_name)
 
         # 4. Sort the portfolio and take the crucial snapshot.
         self.portfolio_manager.sort_portfolio()
+
+    def _route_convert_action(self, action_name):
+        """Helper to route all CONVERT_TO_* actions."""
+        # (This is just a cleaner way to organize the many elif statements)
+        pm = self.portfolio_manager
+        price, iv_idx, step = self.price_manager.current_price, self.iv_bin_index, self.current_step
+        if action_name == 'CONVERT_TO_IRON_CONDOR': pm.convert_to_iron_condor(price, iv_idx, step)
+        elif action_name == 'CONVERT_TO_IRON_FLY': pm.convert_to_iron_fly(price, iv_idx, step)
+        elif action_name == 'CONVERT_TO_STRANGLE': pm.convert_to_strangle(price, iv_idx, step)
+        elif action_name == 'CONVERT_TO_STRADDLE': pm.convert_to_straddle(price, iv_idx, step)
+        elif action_name == 'CONVERT_TO_BULL_CALL_SPREAD': pm.convert_to_bull_call_spread(price, iv_idx, step)
+        elif action_name == 'CONVERT_TO_BULL_PUT_SPREAD': pm.convert_to_bull_put_spread(price, iv_idx, step)
+        elif action_name == 'CONVERT_TO_BEAR_CALL_SPREAD': pm.convert_to_bear_call_spread(price, iv_idx, step)
+        elif action_name == 'CONVERT_TO_BEAR_PUT_SPREAD': pm.convert_to_bear_put_spread(price, iv_idx, step)
 
     def _advance_market_and_get_outcome(self, equity_before: float, action_taken: str) -> BaseEnvTimestep:
         """
