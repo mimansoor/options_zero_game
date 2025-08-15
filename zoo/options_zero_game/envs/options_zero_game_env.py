@@ -152,7 +152,7 @@ class OptionsZeroGameEnv(gym.Env):
 
         # 1. Define the sizes of the different observation blocks
         self.vol_embedding_size = 128
-        self.dir_prediction_size = 3
+        self.dir_prediction_size = 1
         
         # 2. Define the layout of the per-position block
         self.POS_IDX = {
@@ -181,7 +181,6 @@ class OptionsZeroGameEnv(gym.Env):
 
         # Add start indices to the dictionary for easy lookup and self-documentation
         self.OBS_IDX['VOL_EMBEDDING_START'] = base_summary_size
-        self.OBS_IDX['DIR_PREDICTION_START'] = base_summary_size + self.vol_embedding_size
 
         # This is the single source of truth for where the per-position data begins.
         self.PORTFOLIO_START_IDX = self.summary_block_size
@@ -709,18 +708,17 @@ class OptionsZeroGameEnv(gym.Env):
         vec[self.OBS_IDX['MTM_PNL_HIGH_NORM']] = high_water_mark_norm
         vec[self.OBS_IDX['MTM_PNL_LOW_NORM']] = max_drawdown_norm
 
+        # The value is already a probability [0, 1], so we can scale it to [-1, 1]
+        # to match the range of other features.
+        if self.price_manager.directional_prediction is not None:
+             vec[self.OBS_IDX['EXPERT_TAIL_RISK_PROB']] = (self.price_manager.directional_prediction * 2) - 1.0
+
         # Add Volatility Embedding
         if self.price_manager.volatility_embedding is not None:
             start_idx = self.OBS_IDX['VOL_EMBEDDING_START']
             end_idx = start_idx + self.vol_embedding_size
             vec[start_idx:end_idx] = self.price_manager.volatility_embedding
             
-        # Add Directional Prediction
-        if self.price_manager.directional_prediction is not None:
-            start_idx = self.OBS_IDX['DIR_PREDICTION_START']
-            end_idx = start_idx + self.dir_prediction_size
-            vec[start_idx:end_idx] = self.price_manager.directional_prediction
-
         # Per-Position State
         self.portfolio_manager.get_positions_state(vec, self.PORTFOLIO_START_IDX, self.PORTFOLIO_STATE_SIZE_PER_POS, self.POS_IDX, self.price_manager.current_price, self.iv_bin_index, self.current_step, self.total_steps)
 

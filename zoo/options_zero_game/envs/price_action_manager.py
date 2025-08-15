@@ -53,7 +53,7 @@ class PriceActionManager:
         self.volatility_expert = None
         self.directional_expert = None
         self.volatility_embedding = None
-        self.directional_prediction = None
+        self.directional_prediction = 0.0
         self._load_transformer_experts()
 
     def _load_tickers(self) -> List[str]:
@@ -175,7 +175,7 @@ class PriceActionManager:
                 # 3. Run Directional Expert on the fused input
                 dir_prediction_logits = self.directional_expert(directional_input.unsqueeze(0))
                 dir_prediction_probs = torch.nn.functional.softmax(dir_prediction_logits, dim=-1)
-                self.directional_prediction = dir_prediction_probs.cpu().numpy().flatten()
+                self.directional_prediction = dir_prediction_probs[0, 0].item()
 
     def _get_raw_history_for_transformer(self, current_step: int) -> torch.Tensor:
         """A helper to prepare the input tensor for the Transformer models."""
