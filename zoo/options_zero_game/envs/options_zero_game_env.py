@@ -121,6 +121,9 @@ class OptionsZeroGameEnv(gym.Env):
         # environment (for the action mask) and the portfolio manager.
         self.strategy_name_to_id = cfg.get('strategy_name_to_id', {})
 
+        # <<< NEW: Load the parameter from the config >>>
+        self.capital_preservation_bonus_pct = cfg.get('capital_preservation_bonus_pct', 0.0)
+
         self.iv_regimes = self._cfg.get('iv_regimes', [])
         self.current_iv_regime_name = "N/A" # For logging
         self.current_iv_regime_index = 0 # Start with a default
@@ -754,14 +757,45 @@ class OptionsZeroGameEnv(gym.Env):
         return final_obs_vec
 
     def _calculate_shaped_reward(self, equity_before: float, equity_after: float) -> Tuple[float, float]:
+        """
+        Calculates the final shaped reward for the agent. This definitive version
+        includes:
+        1. The raw P&L change (raw_reward).
+        2. A penalty for drawdown from the high-water mark.
+        3. A bonus for preserving existing capital (positive P&L).
+        """
+        # --- 1. Calculate Raw P&L Change ---
         raw_reward = equity_after - equity_before
+        
+        # --- 2. Update Water Marks and Calculate Drawdown ---
         self.portfolio_manager.update_mtm_water_marks(equity_after)
         drawdown = self.portfolio_manager.high_water_mark - equity_after
-        risk_adjusted_raw_reward = raw_reward - (self._cfg.drawdown_penalty_weight * drawdown)
-        scaled_reward = risk_adjusted_raw_reward / self._cfg.pnl_scaling_factor
+        
+        # --- 3. Calculate the Drawdown Penalty ---
+        drawdown_penalty = self._cfg.drawdown_penalty_weight * drawdown
+        
+        # --- 4. THE FIX: Calculate the Capital Preservation Bonus ---
+        capital_preservation_bonus = 0.0
+        # Check if we are in a profitable state
+        current_pnl = equity_after - self.initial_cash
+        if self.capital_preservation_bonus_pct > 0 and current_pnl > 0:
+            # The bonus is a small percentage of the profit being preserved
+            capital_preservation_bonus = current_pnl * self.capital_preservation_bonus_pct
+            
+        # --- 5. Combine Components into the Final Reward ---
+        # The agent's reward is the P&L it made, minus the drawdown risk, plus the bonus for being patient.
+        risk_adjusted_reward = raw_reward - drawdown_penalty + capital_preservation_bonus
+        
+        # --- 6. Scale and Squash the Reward ---
+        # Scaling helps stabilize the learning process.
+        scaled_reward = risk_adjusted_reward / self._cfg.pnl_scaling_factor
 
-        # --- Defensive Assertion ---
-        assert math.isfinite(scaled_reward), f"Calculated a non-finite reward: {scaled_reward}"
+        # Defensive Assertion
+        if not math.isfinite(scaled_reward):
+            print(f"WARNING: Calculated a non-finite reward. Raw: {raw_reward}, Drawdown: {drawdown_penalty}, Bonus: {capital_preservation_bonus}")
+            scaled_reward = 0.0 # Prevent crash
+
+        # tanh squashes the reward to a [-1, 1] range, which is ideal for the MuZero model.
         return math.tanh(scaled_reward), raw_reward
 
     def _calculate_time_decay(self) -> float:

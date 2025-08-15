@@ -330,6 +330,9 @@ options_zero_game_muzero_config = dict(
 
         # This MUST match the 'sequence_length' used in the expert trainer CONFIG.
         expert_sequence_length=60,
+        # <<< NEW: Parameter for the Capital Preservation Bonus >>>
+        # A small percentage of the current P&L to add to the reward each step.
+        capital_preservation_bonus_pct=0.001, # 0.1% of P&L per step
     ),
     policy=dict(
         model=dict(
