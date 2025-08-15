@@ -863,68 +863,85 @@ class PortfolioManager:
         # no further action is needed.
 
     def shift_position(self, action_name: str, current_price: float, iv_bin_index: int, current_step: int):
-        """Shifts a single leg, preserving strategy identity and creating a receipt."""
+        """
+        Shifts a single leg of a strategy, correctly preserving all other legs
+        and strategies in the portfolio. This is the definitive, robust version.
+        """
         try:
             parts = action_name.split('_')
             direction, position_index = parts[1].upper(), int(parts[3])
             if not (-len(self.portfolio) <= position_index < len(self.portfolio)): return
 
-            original_legs = self.portfolio.to_dict(orient='records')
-            original_creation_id = original_legs[0]['creation_id']
-            original_strategy_id = original_legs[0]['strategy_id']
+            # --- 1. Identify all components ---
+            leg_to_shift_df = self.portfolio.iloc[[position_index]]
+            leg_to_shift = leg_to_shift_df.iloc[0].to_dict()
+            original_creation_id = leg_to_shift['creation_id']
             
-            # --- Isolate and process the closing leg ---
-            leg_to_shift = self.portfolio.iloc[position_index].to_dict()
-            self._process_leg_closures(pd.DataFrame([leg_to_shift]), current_price, current_step)
+            # Isolate all other, untouched legs from all other strategies
+            untouched_legs = self.portfolio[self.portfolio['creation_id'] != original_creation_id]
+            # Isolate the sibling legs of the strategy being modified
+            sibling_legs = self.portfolio[(self.portfolio['creation_id'] == original_creation_id) & (self.portfolio.index != position_index)]
+
+            # --- 2. Process the "close" part of the shift for the target leg ---
+            self._process_leg_closures(leg_to_shift_df, current_price, current_step)
             
-            # --- Define the new, shifted leg ---
+            # --- 3. Define and price the new, shifted leg ---
             strike_modifier = self.strike_distance if direction == 'UP' else -self.strike_distance
             new_leg_def = [{'type': leg_to_shift['type'], 'direction': leg_to_shift['direction'],
                             'strike_price': leg_to_shift['strike_price'] + strike_modifier,
                             'days_to_expiry': leg_to_shift['days_to_expiry'], 'entry_step': current_step}]
             priced_new_leg = self._price_legs(new_leg_def, current_price, iv_bin_index)
             
-            # --- Assemble, Profile, and Atomically Replace ---
-            legs_to_keep = self.portfolio.drop(self.portfolio.iloc[[position_index]].index).to_dict(orient='records')
-            final_strategy_legs = legs_to_keep + priced_new_leg
-            
-            pnl_profile = self._calculate_universal_risk_profile(final_strategy_legs, self.realized_pnl)
-            pnl_profile['strategy_id'] = original_strategy_id
+            # --- 4. Re-assemble the modified strategy and calculate its new profile ---
+            modified_strategy_legs = sibling_legs.to_dict(orient='records') + priced_new_leg
+            pnl_profile = self._calculate_universal_risk_profile(modified_strategy_legs, self.realized_pnl)
+            pnl_profile['strategy_id'] = leg_to_shift['strategy_id'] # Preserve original strategy ID
 
-            self.portfolio = self.portfolio[self.portfolio['creation_id'] != original_creation_id].reset_index(drop=True)
-            self._execute_trades(final_strategy_legs, pnl_profile)
+            # --- 5. Atomically rebuild the entire portfolio ---
+            # Start with the legs that were never touched
+            self.portfolio = untouched_legs.copy()
+            # Add the newly modified strategy
+            self._execute_trades(modified_strategy_legs, pnl_profile)
+            
+            self._update_hedge_status()
+            self.post_action_portfolio = self.portfolio.copy()
+
         except (ValueError, IndexError) as e:
             print(f"Warning: Could not parse shift action '{action_name}'. Error: {e}")
 
+    # <<< REPLACE THE ENTIRE shift_to_atm METHOD >>>
     def shift_to_atm(self, action_name: str, current_price: float, iv_bin_index: int, current_step: int):
-        """Shifts a single leg to the ATM strike, creating a receipt."""
+        """Shifts a single leg to the ATM strike, correctly preserving other strategies."""
         try:
             position_index = int(action_name.split('_')[-1])
             if not (-len(self.portfolio) <= position_index < len(self.portfolio)): return
             
-            original_legs = self.portfolio.to_dict(orient='records')
-            original_creation_id = original_legs[0]['creation_id']
-            original_strategy_id = original_legs[0]['strategy_id']
+            leg_to_shift_df = self.portfolio.iloc[[position_index]]
+            leg_to_shift = leg_to_shift_df.iloc[0].to_dict()
+            original_creation_id = leg_to_shift['creation_id']
             
-            leg_to_shift = self.portfolio.iloc[position_index].to_dict()
             new_atm_strike = self.market_rules_manager.get_atm_price(current_price)
             if leg_to_shift['strike_price'] == new_atm_strike: return
 
-            self._process_leg_closures(pd.DataFrame([leg_to_shift]), current_price, current_step)
+            untouched_legs = self.portfolio[self.portfolio['creation_id'] != original_creation_id]
+            sibling_legs = self.portfolio[(self.portfolio['creation_id'] == original_creation_id) & (self.portfolio.index != position_index)]
+
+            self._process_leg_closures(leg_to_shift_df, current_price, current_step)
             
             new_leg_def = [{'type': leg_to_shift['type'], 'direction': leg_to_shift['direction'],
                             'strike_price': new_atm_strike, 'days_to_expiry': leg_to_shift['days_to_expiry'],
                             'entry_step': current_step}]
             priced_new_leg = self._price_legs(new_leg_def, current_price, iv_bin_index)
             
-            legs_to_keep = self.portfolio.drop(self.portfolio.iloc[[position_index]].index).to_dict(orient='records')
-            final_strategy_legs = legs_to_keep + priced_new_leg
+            modified_strategy_legs = sibling_legs.to_dict(orient='records') + priced_new_leg
+            pnl_profile = self._calculate_universal_risk_profile(modified_strategy_legs, self.realized_pnl)
+            pnl_profile['strategy_id'] = leg_to_shift['strategy_id']
+
+            self.portfolio = untouched_legs.copy()
+            self._execute_trades(modified_strategy_legs, pnl_profile)
             
-            pnl_profile = self._calculate_universal_risk_profile(final_strategy_legs, self.realized_pnl)
-            pnl_profile['strategy_id'] = original_strategy_id
-            
-            self.portfolio = self.portfolio[self.portfolio['creation_id'] != original_creation_id].reset_index(drop=True)
-            self._execute_trades(final_strategy_legs, pnl_profile)
+            self._update_hedge_status()
+            self.post_action_portfolio = self.portfolio.copy()
         except (ValueError, IndexError) as e:
             print(f"Warning: Could not parse shift_to_atm action '{action_name}'. Error: {e}")
 

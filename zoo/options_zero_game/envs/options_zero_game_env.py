@@ -587,6 +587,12 @@ class OptionsZeroGameEnv(gym.Env):
             'termination_reason': termination_reason
         }
 
+        # This is the last possible moment before returning the state.
+        portfolio_size = len(self.portfolio_manager.portfolio)
+        max_size = self._cfg.max_positions
+        assert portfolio_size <= max_size, \
+            f"FATAL INVARIANT VIOLATION: Portfolio size ({portfolio_size}) has exceeded max_positions ({max_size}). Action taken: '{action_taken}'"
+
         if terminated: info['episode_duration'] = self.current_step
         return BaseEnvTimestep({'observation': obs, 'action_mask': action_mask, 'to_play': -1}, final_reward, terminated, info)
 

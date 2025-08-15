@@ -572,6 +572,56 @@ def test_dte_decay_logic():
     finally:
         env.close()
 
+def test_no_runaway_duplication_on_transform():
+    """
+    A critical regression test to ensure that transformation actions like
+    HEDGE and SHIFT do not incorrectly increase the number of portfolio legs.
+    This test explicitly targets the "runaway duplication" bug.
+    """
+    test_name = "test_no_runaway_duplication_on_transform"
+    print(f"\n--- RUNNING: {test_name} ---")
+
+    # Start with a 2-leg strangle
+    env = create_test_env('OPEN_SHORT_STRANGLE_DELTA_20')
+    try:
+        # Step 0: Open the initial position
+        env.reset(seed=53)
+        env.step(env.actions_to_indices['HOLD'])
+        portfolio_step0 = env.portfolio_manager.get_portfolio()
+        assert len(portfolio_step0) == 2, "Setup failed: Did not open a 2-leg strangle."
+
+        # --- Test 1: HEDGE action ---
+        # Hedge one of the legs. The portfolio should grow from 2 to 3 legs.
+        print("  - Testing HEDGE action...")
+        env.step(env.actions_to_indices['HEDGE_NAKED_POS_0'])
+        portfolio_step1 = env.portfolio_manager.get_portfolio()
+        assert len(portfolio_step1) == 3, \
+            f"HEDGE failed: Expected 3 legs, but found {len(portfolio_step1)}. Runaway duplication may have occurred."
+
+        # --- Test 2: SHIFT action on the new 3-leg portfolio ---
+        # Shift one of the legs. The portfolio size should remain exactly 3.
+        print("  - Testing SHIFT action on a 3-leg portfolio...")
+        env.step(env.actions_to_indices['SHIFT_UP_POS_1'])
+        portfolio_step2 = env.portfolio_manager.get_portfolio()
+        assert len(portfolio_step2) == 3, \
+            f"SHIFT failed: Expected 3 legs, but found {len(portfolio_step2)}. Runaway duplication may have occurred."
+
+        # --- Test 3: Another SHIFT action ---
+        # Shift another leg. The portfolio size should still be exactly 3.
+        print("  - Testing a second SHIFT action...")
+        env.step(env.actions_to_indices['SHIFT_DOWN_POS_2'])
+        portfolio_step3 = env.portfolio_manager.get_portfolio()
+        assert len(portfolio_step3) == 3, \
+            f"Second SHIFT failed: Expected 3 legs, but found {len(portfolio_step3)}. Runaway duplication may have occurred."
+
+        print(f"--- PASSED: {test_name} ---")
+        return True
+    except Exception:
+        traceback.print_exc()
+        print(f"--- FAILED: {test_name} ---")
+        return False
+    finally:
+        env.close()
 # ==============================================================================
 #                                TEST SUITE RUNNER
 # ==============================================================================
@@ -597,6 +647,7 @@ if __name__ == "__main__":
         test_no_new_trades_when_active,
         test_all_open_actions_are_legal,
         test_dte_decay_logic,
+        test_no_runaway_duplication_on_transform,
     ]
 
     failures = []
