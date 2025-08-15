@@ -20,7 +20,7 @@ def _numba_calculate_risk_profile(legs_array, realized_pnl, start_price, lot_siz
     sim_high = start_price * 2.5
     price_range = np.linspace(sim_low, sim_high, 500)
     
-    pnl_values = np.empty(len(price_range), dtype=np.float64)
+    pnl_values = np.empty(len(price_range), dtype=np.float32)
     breakevens = [] # Numba can handle simple lists that grow
 
     # --- 2. The Main Simulation Loop ---
@@ -108,7 +108,7 @@ class PortfolioManager:
         self.next_creation_id: int = 0
         self.initial_net_premium: float = 0.0
         self.portfolio_columns = ['type', 'direction', 'entry_step', 'strike_price', 'entry_premium', 'days_to_expiry', 'creation_id', 'strategy_id', 'strategy_max_profit', 'strategy_max_loss', 'is_hedged']
-        self.portfolio_dtypes = {'type': 'object', 'direction': 'object', 'entry_step': 'int64', 'strike_price': 'float64', 'entry_premium': 'float64', 'days_to_expiry': 'float64', 'creation_id': 'int64', 'strategy_id': 'int64', 'strategy_max_profit': 'float64', 'strategy_max_loss': 'float64', 'is_hedged': 'bool'}
+        self.portfolio_dtypes = {'type': 'object', 'direction': 'object', 'entry_step': 'int16', 'strike_price': 'float32', 'entry_premium': 'float32', 'days_to_expiry': 'float32', 'creation_id': 'int16', 'strategy_id': 'int16', 'strategy_max_profit': 'float32', 'strategy_max_loss': 'float32', 'is_hedged': 'bool'}
         self.highest_realized_profit = 0.0
         self.lowest_realized_loss = 0.0
         self.mtm_pnl_high = 0.0  # Tracks the highest MtM P&L seen
@@ -1194,7 +1194,7 @@ class PortfolioManager:
         for the Numba JIT function. It handles cases where keys might be missing.
         """
         # [strike, entry_premium, type_code, direction_code, creation_id, days_to_expiry]
-        legs_array = np.empty((len(legs), 6), dtype=np.float64)
+        legs_array = np.empty((len(legs), 6), dtype=np.float32)
         for i, leg in enumerate(legs):
             legs_array[i, 0] = leg['strike_price']
             legs_array[i, 1] = leg.get('entry_premium', 0.0) # Default to 0 if not priced yet
