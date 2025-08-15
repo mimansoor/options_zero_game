@@ -96,56 +96,6 @@ UNIFIED_REGIMES = [
     },
 ]
 
-# ==============================================================================
-#                 Strategy ID Mapping (Definitive Version)
-# ==============================================================================
-# This block programmatically generates all strategy IDs to ensure consistency
-# and completeness, making it the single source of truth.
-
-strategy_name_to_id = {}
-next_id = 0
-
-# --- 1. Simple Naked Legs (Internal Use for Re-profiling) ---
-for direction in ['LONG', 'SHORT']:
-    for opt_type in ['CALL', 'PUT']:
-        strategy_name_to_id[f'{direction}_{opt_type}'] = next_id; next_id += 1
-
-# --- 2. Core Volatility Strategies ---
-for direction in ['LONG', 'SHORT']:
-    for name in ['STRADDLE', 'IRON_CONDOR', 'IRON_FLY']:
-        strategy_name_to_id[f'{direction}_{name}'] = next_id; next_id += 1
-        # Also add the full action name that will be looked up
-        strategy_name_to_id[f'OPEN_{direction}_{name}'] = strategy_name_to_id[f'{direction}_{name}']
-
-# --- 3. Spreads ---
-for direction in ['BULL', 'BEAR']:
-    for opt_type in ['CALL', 'PUT']:
-        name = f'{direction}_{opt_type}_SPREAD'
-        strategy_name_to_id[name] = next_id; next_id += 1
-        strategy_name_to_id[f'OPEN_{name}'] = strategy_name_to_id[name]
-
-# --- 4. Strategies with Variations (Strangles, Butterflies) ---
-# Delta Strangles
-for direction in ['LONG', 'SHORT']:
-    for delta in [15, 20, 25, 30]:
-        name = f'{direction}_STRANGLE_DELTA_{delta}'
-        strategy_name_to_id[name] = next_id; next_id += 1
-        strategy_name_to_id[f'OPEN_{name}'] = strategy_name_to_id[name]
-# Fixed-Width Butterflies
-for direction in ['LONG', 'SHORT']:
-    for width in [1, 2]:
-        for opt_type in ['CALL', 'PUT']:
-            name = f'{direction}_{opt_type}_FLY_{width}'
-            strategy_name_to_id[name] = next_id; next_id += 1
-            strategy_name_to_id[f'OPEN_{name}'] = strategy_name_to_id[name]
-
-# --- 5. Custom / Post-Adjustment States (Negative IDs) ---
-strategy_name_to_id['CUSTOM_HEDGED'] = -2
-strategy_name_to_id['CUSTOM_2_LEGS'] = -3
-strategy_name_to_id['CUSTOM_3_LEGS'] = -4
-strategy_name_to_id['LONG_RATIO_SPREAD'] = 38  # Example positive ID
-strategy_name_to_id['SHORT_RATIO_SPREAD'] = 39 # Example positive ID
-
 # ==============================================================
 #                 Curriculum Schedule
 # ==============================================================
@@ -226,6 +176,7 @@ class CurriculumHolder:
 # This makes the script runnable from anywhere.
 # <<< NEW: Define high-level volatility parameters >>>
 MAX_STRIKE_OFFSET = 40
+AGENT_MAX_OPEN_OFFSET = 10
 ATM_IV = 25.0  # Volatility at the money is 25%
 FAR_OTM_PUT_IV = 50.0 # Volatility for the -30 strike put is 50%
 FAR_OTM_CALL_IV = 20.0 # Volatility for the +30 strike call is 20% (creating a "smirk")
@@ -237,6 +188,70 @@ dynamic_iv_skew_table = generate_dynamic_iv_skew_table(
     far_otm_put_iv=FAR_OTM_PUT_IV,
     far_otm_call_iv=FAR_OTM_CALL_IV
 )
+
+# ==============================================================================
+#                 Strategy ID Mapping (Definitive, Complete Version)
+# ==============================================================================
+# This block programmatically generates all strategy IDs to ensure consistency
+# and completeness, making it the single source of truth.
+
+strategy_name_to_id = {}
+next_id = 0
+
+# --- 1. Simple Naked Legs (Internal Use for Re-profiling) ---
+# These are the "base" identities.
+for direction in ['LONG', 'SHORT']:
+    for opt_type in ['CALL', 'PUT']:
+        strategy_name_to_id[f'{direction}_{opt_type}'] = next_id; next_id += 1
+
+# <<< THE CRITICAL FIX: Add the full OPEN_* action names for single legs >>>
+# This loop creates keys like "OPEN_SHORT_CALL_ATM+5" and maps them to the
+# base IDs created above (e.g., to the ID for "SHORT_CALL").
+agent_max_open_offset = AGENT_MAX_OPEN_OFFSET
+for offset in range(-agent_max_open_offset, agent_max_open_offset + 1):
+    strike_str = f"ATM{offset:+d}"
+    for direction in ['LONG', 'SHORT']:
+        for opt_type in ['CALL', 'PUT']:
+            action_name = f'OPEN_{direction}_{opt_type}_{strike_str}'
+            internal_name = f'{direction}_{opt_type}'
+            strategy_name_to_id[action_name] = strategy_name_to_id[internal_name]
+
+# --- 2. Core Volatility Strategies ---
+for direction in ['LONG', 'SHORT']:
+    for name in ['STRADDLE', 'IRON_CONDOR', 'IRON_FLY']:
+        internal_name = f'{direction}_{name}'
+        strategy_name_to_id[internal_name] = next_id; next_id += 1
+        strategy_name_to_id[f'OPEN_{internal_name}'] = strategy_name_to_id[internal_name]
+
+# --- 3. Spreads ---
+for direction in ['BULL', 'BEAR']:
+    for opt_type in ['CALL', 'PUT']:
+        internal_name = f'{direction}_{opt_type}_SPREAD'
+        strategy_name_to_id[internal_name] = next_id; next_id += 1
+        strategy_name_to_id[f'OPEN_{internal_name}'] = strategy_name_to_id[internal_name]
+
+# --- 4. Strategies with Variations (Strangles, Butterflies) ---
+for direction in ['LONG', 'SHORT']:
+    # Delta Strangles
+    for delta in [15, 20, 25, 30]:
+        internal_name = f'{direction}_STRANGLE_DELTA_{delta}'
+        strategy_name_to_id[internal_name] = next_id; next_id += 1
+        strategy_name_to_id[f'OPEN_{internal_name}'] = strategy_name_to_id[internal_name]
+    # Fixed-Width Butterflies
+    for width in [1, 2]:
+        for opt_type in ['CALL', 'PUT']:
+            internal_name = f'{direction}_{opt_type}_FLY_{width}'
+            strategy_name_to_id[internal_name] = next_id; next_id += 1
+            strategy_name_to_id[f'OPEN_{internal_name}'] = strategy_name_to_id[internal_name]
+
+# --- 5. Custom / Post-Adjustment States ---
+strategy_name_to_id['CUSTOM_HEDGED'] = -2
+strategy_name_to_id['CUSTOM_2_LEGS'] = -3
+strategy_name_to_id['CUSTOM_3_LEGS'] = -4
+strategy_name_to_id['LONG_RATIO_SPREAD'] = next_id; next_id += 1
+strategy_name_to_id['SHORT_RATIO_SPREAD'] = next_id; next_id += 1
+
+
 
 options_zero_game_muzero_config = dict(
     # Define the main output directory for all experiments.
@@ -295,7 +310,7 @@ options_zero_game_muzero_config = dict(
         
         # <<< NEW: Add a parameter specifically for the agent's naked opening actions >>>
         # The agent can only OPEN naked positions within this narrower range.
-        agent_max_open_offset=10,
+        agent_max_open_offset=AGENT_MAX_OPEN_OFFSET,
 
         # This MUST match the 'sequence_length' used in the expert trainer CONFIG.
         expert_sequence_length=60,

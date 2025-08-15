@@ -1284,6 +1284,7 @@ class PortfolioManager:
         
         pnl_profile = self._calculate_universal_risk_profile(priced_legs, self.realized_pnl)
         pnl_profile['strategy_id'] = self.strategy_name_to_id.get(action_name, -1)
+        #print(f"DEBUG: {pnl_profile['strategy_id']} {action_name}")
         self._execute_trades(priced_legs, pnl_profile)
 
     def _open_straddle(self, action_name: str, current_price: float, iv_bin_index: int, current_step: int, days_to_expiry: float):
