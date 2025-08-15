@@ -74,14 +74,28 @@ def evaluate_holy_trinity(holdout_dfs: list):
         print(f"ERROR: Could not load Holy Trinity model. Have you trained them yet? Details: {e}")
         return
 
+    # Create clean lists to store the validated data
     all_true = {'ema': [], 'rsi': [], 'vol': []}
     all_preds = {'ema': [], 'rsi': [], 'vol': []}
 
-    for df in holdout_dfs:
+    # --- THE FIX: A new, robust data processing loop ---
+    for df in tqdm(holdout_dfs, desc="Processing Holdout DataFrames"):
+        # 1. Create features AND targets. This will introduce NaNs.
         processed_df = create_holy_trinity_features_and_targets(df.copy())
+        
+        # 2. CRITICAL: Drop all rows with any NaN values.
+        # This is the step that was missing and caused the crash.
+        processed_df.dropna(inplace=True)
+        
+        # Failsafe: if the df is empty after cleaning, skip it.
+        if processed_df.empty:
+            continue
+
+        # 3. Extract features from the now-clean DataFrame
         feature_names = [col for col in processed_df.columns if 'lag' in col]
         X_test = processed_df[feature_names]
         
+        # 4. Append the CLEANED ground truth and predictions to the lists
         all_true['ema'].extend(processed_df['ema_ratio_target'])
         all_preds['ema'].extend(ema_expert.predict(X_test))
         
@@ -90,6 +104,13 @@ def evaluate_holy_trinity(holdout_dfs: list):
 
         all_true['vol'].extend(processed_df['volatility_target'])
         all_preds['vol'].extend(vol_expert.predict(X_test))
+
+    # --- The rest of the function is now guaranteed to work ---
+    
+    # Failsafe for the case where no valid data was found in any file
+    if not all_true['ema']:
+        print("\nERROR: No valid, non-NaN data was found in the holdout set to evaluate.")
+        return
 
     # --- EMA Trend Expert Report ---
     print("\n--- [Report for EMA Trend Expert (Regression)] ---")
