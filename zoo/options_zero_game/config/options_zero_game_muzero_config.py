@@ -249,9 +249,10 @@ for direction in ['LONG', 'SHORT']:
             strategy_name_to_id[f'OPEN_{internal_name}'] = strategy_name_to_id[internal_name]
 
 # --- 5. Custom / Post-Adjustment States ---
-strategy_name_to_id['CUSTOM_HEDGED'] = -2
-strategy_name_to_id['CUSTOM_2_LEGS'] = -3
-strategy_name_to_id['CUSTOM_3_LEGS'] = -4
+strategy_name_to_id['CUSTOM_HEDGED'] = next_id; next_id += 1
+strategy_name_to_id['CUSTOM_2_LEGS'] = next_id; next_id += 1
+strategy_name_to_id['CUSTOM_3_LEGS'] = next_id; next_id += 1
+strategy_name_to_id['CUSTOM_4_LEGS'] = next_id; next_id += 1
 strategy_name_to_id['LONG_RATIO_SPREAD'] = next_id; next_id += 1
 strategy_name_to_id['SHORT_RATIO_SPREAD'] = next_id; next_id += 1
 

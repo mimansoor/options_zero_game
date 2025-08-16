@@ -549,7 +549,8 @@ class PortfolioManager:
         """
         A definitive, intelligent helper that identifies the name of a strategy
         based on the properties of its constituent legs. This version can
-        identify single legs, vertical spreads, and common 3-legged ratio spreads.
+        identify single legs, all four vertical spread types, and the two most
+        common 3-legged ratio spreads.
         """
         num_legs = len(legs_df)
         
@@ -560,30 +561,48 @@ class PortfolioManager:
         
         # --- Case 2: Two Legs ---
         if num_legs == 2:
+            # Check for a vertical spread (same type, different directions)
             if len(legs_df['type'].unique()) == 1 and len(legs_df['direction'].unique()) == 2:
-                # This is a Vertical Spread.
-                # ... (the existing, correct logic for identifying the specific spread) ...
-                return "..." # Placeholder for your existing correct logic
+                leg1, leg2 = legs_df.iloc[0], legs_df.iloc[1]
+                option_type = leg1['type'].upper()
+                
+                # Identify the legs by their strike prices
+                if leg1['strike_price'] > leg2['strike_price']:
+                    higher_strike_leg, lower_strike_leg = leg1, leg2
+                else:
+                    higher_strike_leg, lower_strike_leg = leg2, leg1
+                
+                if option_type == 'CALL':
+                    # A Bear Call Spread is a credit spread (short the lower strike).
+                    # But here we look at the higher strike leg. If it's short, it's a Bear Call.
+                    return 'OPEN_BEAR_CALL_SPREAD' if higher_strike_leg['direction'] == 'short' else 'OPEN_BULL_CALL_SPREAD'
+                else: # PUT
+                    # A Bull Put Spread is a credit spread (short the higher strike).
+                    return 'OPEN_BULL_PUT_SPREAD' if higher_strike_leg['direction'] == 'short' else 'OPEN_BEAR_PUT_SPREAD'
+
             else:
-                # Could be a straddle or strangle, but after a close, it's custom.
+                # This could be a straddle/strangle, but after a close operation,
+                # it's safer to classify it as a custom position.
                 return "CUSTOM_2_LEGS"
 
-        # --- Case 3: Three Legs (The Fix is Here) ---
+        # --- Case 3: Three Legs ---
         if num_legs == 3:
-            # This is often a Ratio Spread, a common adjustment result.
-            # Check the number of longs vs. shorts.
             direction_counts = legs_df['direction'].value_counts()
-            if direction_counts.get('short', 0) == 2 and direction_counts.get('long', 0) == 1:
-                # This is a 2-to-1 credit-style ratio spread (like a broken wing butterfly)
-                return "SHORT_RATIO_SPREAD"
+            
+            # Check for a 2-to-1 debit-style ratio spread
             if direction_counts.get('long', 0) == 2 and direction_counts.get('short', 0) == 1:
-                # This is a 2-to-1 debit-style ratio spread
                 return "LONG_RATIO_SPREAD"
+            
+            # Check for a 2-to-1 credit-style ratio spread
+            elif direction_counts.get('short', 0) == 2 and direction_counts.get('long', 0) == 1:
+                return "SHORT_RATIO_SPREAD"
+            
             else:
                 # Fallback for other, rarer 3-leg combos (e.g., 3 longs)
                 return "CUSTOM_3_LEGS"
         
-        # --- Fallback for all other complex, custom combinations ---
+        # --- Fallback for all other complex combinations (e.g., 4+ legs) ---
+        # This is a critical fallback to ensure the function always returns a string.
         return f"CUSTOM_{num_legs}_LEGS"
 
     def close_all_positions(self, current_price: float, iv_bin_index: int, current_step: int):
