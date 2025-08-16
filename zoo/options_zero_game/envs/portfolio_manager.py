@@ -1173,13 +1173,22 @@ class PortfolioManager:
 
     def sort_portfolio(self):
         """
-        Sorts the portfolio. Uses a simple, chronological sort for training and a
-        more complex, human-readable sort for evaluation.
+        Sorts the portfolio using a multi-key, stable sorting algorithm. This
+        ensures an absolutely deterministic order for the DataFrame's index,
+        which is critical for both the RL agent's state representation and for
+        allowing human analysis to correlate actions (e.g., SHIFT_POS_1) with
+        the correct leg in the UI. This logic is used for all modes.
         """
         if not self.portfolio.empty:
-            # The key for human analysis and debugging
-            sort_key = ['creation_id']
-            self.portfolio = self.portfolio.sort_values(by=sort_key).reset_index(drop=True)
+            # Define the deterministic sorting hierarchy.
+            sort_keys = ['creation_id', 'type', 'strike_price']
+            
+            # Use a stable sorting algorithm (mergesort) to break any potential
+            # (though highly unlikely) remaining ties consistently.
+            self.portfolio = self.portfolio.sort_values(
+                by=sort_keys, 
+                kind='mergesort'
+            ).reset_index(drop=True)
 
     def render(self, current_price: float, current_step: int, iv_bin_index: int, steps_per_day: int):
         total_pnl = self.get_total_pnl(current_price, iv_bin_index)
