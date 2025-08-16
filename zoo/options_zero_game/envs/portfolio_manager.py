@@ -207,7 +207,17 @@ class PortfolioManager:
                 hedge_strike = closest_valid_strike if closest_valid_strike != naked_strike else (naked_strike + self.strike_distance if hedge_type == 'call' else naked_strike - self.strike_distance)
             
             hedge_leg_def = [{'type': hedge_type, 'direction': hedge_direction, 'strike_price': hedge_strike, 'days_to_expiry': days_to_expiry, 'entry_step': current_step}]
-            priced_hedge_leg = self._price_legs(hedge_leg_def, current_price, iv_bin_index)
+
+            # We explicitly ask _price_legs to enforce the rule for the new hedge leg.
+            priced_hedge_leg = self._price_legs(hedge_leg_def, current_price, iv_bin_index, check_short_rule=True)
+
+            # If the hedge leg (which could be short) violates the premium rule, abort.
+            if not priced_hedge_leg:
+                # IMPORTANT: We must put the original naked leg back into the portfolio
+                # since we removed it earlier in the function.
+                self.portfolio = pd.concat([self.portfolio, pd.DataFrame([naked_leg_to_hedge.to_dict()])], ignore_index=True)
+                self.sort_portfolio() # Re-sort to maintain consistency
+                return
             
             # --- 4. Create the New, Two-Leg Vertical Spread ---
             new_spread_legs = [naked_leg_dict] + priced_hedge_leg
@@ -925,7 +935,6 @@ class PortfolioManager:
         except (ValueError, IndexError) as e:
             print(f"Warning: Could not parse shift action '{action_name}'. Error: {e}")
 
-    # <<< REPLACE THE ENTIRE shift_to_atm METHOD >>>
     def shift_to_atm(self, action_name: str, current_price: float, iv_bin_index: int, current_step: int):
         """Shifts a single leg to the ATM strike, correctly preserving other strategies."""
         try:
@@ -1215,13 +1224,33 @@ class PortfolioManager:
         # the hedge status and the post-action snapshot are correctly updated.
         self._update_hedge_status()
 
-    def _price_legs(self, legs: List[Dict], current_price: float, iv_bin_index: int) -> List[Dict]:
+    def _price_legs(self, legs: List[Dict], current_price: float, iv_bin_index: int, check_short_rule: bool = False) -> List[Dict] or None:
+        """
+        Calculates the entry premium for a list of legs.
+        MODIFIED: Can now optionally check if a new short leg's premium is above a minimum threshold.
+        If the check is enabled and fails, the function returns None.
+        """
         atm_price = self.market_rules_manager.get_atm_price(current_price)
         for leg in legs:
             offset = round((leg['strike_price'] - atm_price) / self.strike_distance)
             vol = self.iv_calculator(offset, leg['type'])
             greeks = self.bs_manager.get_all_greeks_and_price(current_price, leg['strike_price'], leg['days_to_expiry'], vol, leg['type'] == 'call')
+
+            # First, check if the rule should be applied at all for this call.
+            if check_short_rule:
+                # If we are opening a SHORT position...
+                if leg['direction'] == 'short':
+                    # Calculate the premium we would receive (the "bid" price)
+                    premium_received = self.bs_manager.get_price_with_spread(greeks['price'], is_buy=False, bid_ask_spread_pct=self.bid_ask_spread_pct)
+                    
+                    # ...and if that premium is below the minimum threshold...
+                    if premium_received < self.close_short_leg_on_profit_threshold:
+                        # ...then this trade is illegal. Abort the entire pricing operation.
+                        return None # Signal failure
+
+            # If the rule is off or passes, assign the final entry premium.
             leg['entry_premium'] = self.bs_manager.get_price_with_spread(greeks['price'], is_buy=(leg['direction'] == 'long'), bid_ask_spread_pct=self.bid_ask_spread_pct)
+        
         return legs
 
     def _prepare_legs_for_numba(self, legs: List[Dict]) -> np.ndarray:
@@ -1299,7 +1328,12 @@ class PortfolioManager:
         strike_price = self.market_rules_manager.get_atm_price(current_price) + (offset * self.strike_distance)
         
         legs = [{'type': option_type, 'direction': direction, 'strike_price': strike_price, 'entry_step': current_step, 'days_to_expiry': days_to_expiry}]
-        priced_legs = self._price_legs(legs, current_price, iv_bin_index)
+        # We now explicitly ask _price_legs to enforce the rule for this new position.
+        priced_legs = self._price_legs(legs, current_price, iv_bin_index, check_short_rule=True)
+        
+        # If pricing failed because of our new rule, abort the action.
+        if not priced_legs:
+            return
         
         pnl_profile = self._calculate_universal_risk_profile(priced_legs, self.realized_pnl)
         pnl_profile['strategy_id'] = self.strategy_name_to_id.get(action_name, -1)
