@@ -218,7 +218,7 @@ for direction in ['LONG', 'SHORT']:
     internal_name = f'{direction}_STRADDLE'
     strategy_name_to_id[internal_name] = next_id; next_id += 1
     # The action name includes "_ATM"
-    strategy_name_to_id[f'OPEN_{internal_name}_ATM'] = strategy_name_to_id[internal_name]
+    strategy_name_to_id[f'OPEN_{internal_name}'] = strategy_name_to_id[internal_name]
 
 # The other core strategies do not have the suffix
 for direction in ['LONG', 'SHORT']:

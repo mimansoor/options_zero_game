@@ -214,9 +214,9 @@ class PortfolioManager:
             
             # Determine the correct name and ID for the new spread
             if hedge_type == 'put':
-                new_strategy_name = 'BULL_PUT_SPREAD' if naked_leg_dict['direction'] == 'short' else 'BEAR_PUT_SPREAD'
+                new_strategy_name = 'OPEN_BULL_PUT_SPREAD' if naked_leg_dict['direction'] == 'short' else 'OPEN_BEAR_PUT_SPREAD'
             else: # Call
-                new_strategy_name = 'BEAR_CALL_SPREAD' if naked_leg_dict['direction'] == 'short' else 'BULL_CALL_SPREAD'
+                new_strategy_name = 'OPEN_BEAR_CALL_SPREAD' if naked_leg_dict['direction'] == 'short' else 'OPEN_BULL_CALL_SPREAD'
 
             pnl_profile = self._calculate_universal_risk_profile(new_spread_legs, self.realized_pnl)
             pnl_profile['strategy_id'] = self.strategy_name_to_id.get(new_strategy_name)
@@ -1331,17 +1331,7 @@ class PortfolioManager:
                         {'type': 'put', 'direction': direction, 'strike_price': strike_put}]
             else:
                 return # Fallback if no valid delta strikes are found
-        else:
-            # --- LEGACY, FIXED-WIDTH LOGIC ---
-            try:
-                width_str = parts[4]
-                strike_offset = int(width_str) * 2 * self.strike_distance
-            except (ValueError, IndexError): return # Invalid format
-
-            atm_price = self.market_rules_manager.get_atm_price(current_price)
-            legs = [{'type': 'call', 'direction': direction, 'strike_price': atm_price + strike_offset},
-                    {'type': 'put', 'direction': direction, 'strike_price': atm_price - strike_offset}]
-        
+       
         # --- Finalize the Trade (common to both logic paths) ---
         for leg in legs:
             leg['entry_step'] = current_step
@@ -1720,7 +1710,7 @@ class PortfolioManager:
         """Adds long wings to a short strangle using the atomic transformation pattern."""
         current_id = self.portfolio.iloc[0]['strategy_id']
         current_name = self.id_to_strategy_name.get(current_id, '')
-        if len(self.portfolio) != 2 or 'SHORT_STRANGLE' not in current_name: return
+        if len(self.portfolio) != 2 or 'OPEN_SHORT_STRANGLE' not in current_name: return
         if len(self.portfolio) > self.max_positions - 2: return
 
         original_legs = self.portfolio.to_dict(orient='records')
@@ -1742,7 +1732,7 @@ class PortfolioManager:
         final_condor_legs = original_legs + priced_wings
         
         pnl_profile = self._calculate_universal_risk_profile(final_condor_legs, self.realized_pnl)
-        pnl_profile['strategy_id'] = self.strategy_name_to_id.get('SHORT_IRON_CONDOR')
+        pnl_profile['strategy_id'] = self.strategy_name_to_id.get('OPEN_SHORT_IRON_CONDOR')
         
         self.portfolio = self.portfolio[self.portfolio['creation_id'] != original_creation_id].reset_index(drop=True)
         self._execute_trades(final_condor_legs, pnl_profile)
@@ -1755,7 +1745,7 @@ class PortfolioManager:
         # --- 1. Failsafe Checks and Setup ---
         current_id = self.portfolio.iloc[0]['strategy_id']
         current_name = self.id_to_strategy_name.get(current_id, '')
-        if len(self.portfolio) != 2 or current_name != 'SHORT_STRADDLE':
+        if len(self.portfolio) != 2 or current_name != 'OPEN_SHORT_STRADDLE':
             # This is not a bug, just the agent choosing an illegal action. No print needed.
             return
         if len(self.portfolio) > self.max_positions - 2:
@@ -1790,7 +1780,7 @@ class PortfolioManager:
         
         # --- 5. Calculate Unified Profile and Atomically Update Portfolio ---
         pnl_profile = self._calculate_universal_risk_profile(final_fly_legs, self.realized_pnl)
-        pnl_profile['strategy_id'] = self.strategy_name_to_id.get('SHORT_IRON_FLY')
+        pnl_profile['strategy_id'] = self.strategy_name_to_id.get('OPEN_SHORT_IRON_FLY')
         
         self.portfolio = self.portfolio[self.portfolio['creation_id'] != original_creation_id].reset_index(drop=True)
         self._execute_trades(final_fly_legs, pnl_profile)
@@ -1805,7 +1795,7 @@ class PortfolioManager:
         legs_to_close = self.portfolio[self.portfolio['direction'] == 'long']
         self._process_leg_closures(legs_to_close, current_price, current_step)
         pnl_profile = self._calculate_universal_risk_profile(legs_to_keep, self.realized_pnl)
-        pnl_profile['strategy_id'] = self.strategy_name_to_id.get('SHORT_STRANGLE_DELTA_20')
+        pnl_profile['strategy_id'] = self.strategy_name_to_id.get('OPEN_SHORT_STRANGLE_DELTA_20')
         self.portfolio = self.portfolio[self.portfolio['creation_id'] != original_creation_id].reset_index(drop=True)
         self._execute_trades(legs_to_keep, pnl_profile)
 
@@ -1817,7 +1807,7 @@ class PortfolioManager:
         legs_to_close = self.portfolio[self.portfolio['direction'] == 'long']
         self._process_leg_closures(legs_to_close, current_price, current_step)
         pnl_profile = self._calculate_universal_risk_profile(legs_to_keep, self.realized_pnl)
-        pnl_profile['strategy_id'] = self.strategy_name_to_id.get('SHORT_STRADDLE')
+        pnl_profile['strategy_id'] = self.strategy_name_to_id.get('OPEN_SHORT_STRADDLE')
         self.portfolio = self.portfolio[self.portfolio['creation_id'] != original_creation_id].reset_index(drop=True)
         self._execute_trades(legs_to_keep, pnl_profile)
 
@@ -1829,7 +1819,7 @@ class PortfolioManager:
         legs_to_close = self.portfolio[self.portfolio['type'] == 'call']
         self._process_leg_closures(legs_to_close, current_price, current_step)
         pnl_profile = self._calculate_universal_risk_profile(legs_to_keep, self.realized_pnl)
-        pnl_profile['strategy_id'] = self.strategy_name_to_id.get('BULL_PUT_SPREAD')
+        pnl_profile['strategy_id'] = self.strategy_name_to_id.get('OPEN_BULL_PUT_SPREAD')
         self.portfolio = self.portfolio[self.portfolio['creation_id'] != original_creation_id].reset_index(drop=True)
         self._execute_trades(legs_to_keep, pnl_profile)
 
@@ -1841,7 +1831,7 @@ class PortfolioManager:
         legs_to_close = self.portfolio[self.portfolio['type'] == 'put']
         self._process_leg_closures(legs_to_close, current_price, current_step)
         pnl_profile = self._calculate_universal_risk_profile(legs_to_keep, self.realized_pnl)
-        pnl_profile['strategy_id'] = self.strategy_name_to_id.get('BEAR_CALL_SPREAD')
+        pnl_profile['strategy_id'] = self.strategy_name_to_id.get('OPEN_BEAR_CALL_SPREAD')
         self.portfolio = self.portfolio[self.portfolio['creation_id'] != original_creation_id].reset_index(drop=True)
         self._execute_trades(legs_to_keep, pnl_profile)
 
@@ -1857,7 +1847,7 @@ class PortfolioManager:
         legs_to_keep = self.portfolio.drop(legs_to_close.index).to_dict(orient='records')
         self._process_leg_closures(legs_to_close, current_price, current_step)
         pnl_profile = self._calculate_universal_risk_profile(legs_to_keep, self.realized_pnl)
-        pnl_profile['strategy_id'] = self.strategy_name_to_id.get('BULL_CALL_SPREAD')
+        pnl_profile['strategy_id'] = self.strategy_name_to_id.get('OPEN_BULL_CALL_SPREAD')
         self.portfolio = self.portfolio[self.portfolio['creation_id'] != original_creation_id].reset_index(drop=True)
         self._execute_trades(legs_to_keep, pnl_profile)
 
@@ -1873,7 +1863,7 @@ class PortfolioManager:
         legs_to_keep = self.portfolio.drop(legs_to_close.index).to_dict(orient='records')
         self._process_leg_closures(legs_to_close, current_price, current_step)
         pnl_profile = self._calculate_universal_risk_profile(legs_to_keep, self.realized_pnl)
-        pnl_profile['strategy_id'] = self.strategy_name_to_id.get('BEAR_PUT_SPREAD')
+        pnl_profile['strategy_id'] = self.strategy_name_to_id.get('OPEN_BEAR_PUT_SPREAD')
         self.portfolio = self.portfolio[self.portfolio['creation_id'] != original_creation_id].reset_index(drop=True)
         self._execute_trades(legs_to_keep, pnl_profile)
 

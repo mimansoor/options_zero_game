@@ -872,11 +872,7 @@ class OptionsZeroGameEnv(gym.Env):
         actions['ADJUST_TO_DELTA_NEUTRAL'] = i; i+=1
 
         for d in ['LONG', 'SHORT']:
-            actions[f'OPEN_{d}_STRADDLE_ATM'] = i; i+=1
-
-        for w in [1, 2]:
-            for d in ['LONG', 'SHORT']:
-                actions[f'OPEN_{d}_STRANGLE_ATM_{w}'] = i; i+=1
+            actions[f'OPEN_{d}_STRADDLE'] = i; i+=1
 
         # Generate a range of delta-based strangle actions.
         for delta in range(15, 31, 5): # This creates [15, 20, 25, 30]

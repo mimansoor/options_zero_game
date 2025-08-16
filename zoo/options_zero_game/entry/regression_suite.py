@@ -276,7 +276,7 @@ def test_convert_straddle_to_fly():
     """Tests if CONVERT_TO_IRON_FLY correctly adds wings to a straddle."""
     test_name = "test_convert_straddle_to_fly"
     print(f"\n--- RUNNING: {test_name} ---")
-    env = create_test_env('OPEN_SHORT_STRADDLE_ATM')
+    env = create_test_env('OPEN_SHORT_STRADDLE')
     try:
         env.reset(seed=46)
         env.step(env.actions_to_indices['HOLD'])
@@ -286,7 +286,8 @@ def test_convert_straddle_to_fly():
         
         portfolio_after = env.portfolio_manager.get_portfolio()
         stats = env.portfolio_manager.get_raw_portfolio_stats(env.price_manager.current_price, env.iv_bin_index)
-        assert len(portfolio_after) == 4, "Conversion failed: Expected 4 legs."
+        legs = len(portfolio_after)
+        assert legs == 4, f"Conversion failed: Expected 4 legs. Got {legs}"
         assert portfolio_after.iloc[0]['strategy_id'] == env.strategy_name_to_id['SHORT_IRON_FLY'], "Incorrect strategy ID."
         assert stats['max_loss'] > -500000, "Conversion failed: Risk is still undefined."
         
@@ -389,7 +390,7 @@ def test_hedge_straddle_leg():
     """Tests hedging one leg of a two-leg straddle."""
     test_name = "test_hedge_straddle_leg"
     print(f"\n--- RUNNING: {test_name} ---")
-    env = create_test_env('OPEN_SHORT_STRADDLE_ATM')
+    env = create_test_env('OPEN_SHORT_STRADDLE')
     try:
         env.reset(seed=50)
         env.step(env.actions_to_indices['HOLD'])
@@ -514,7 +515,7 @@ def test_dte_decay_logic():
     env_cfg = copy.deepcopy(main_config.env)
     env_cfg.is_eval_mode = True
     env_cfg.disable_opening_curriculum = True
-    env_cfg.forced_opening_strategy_name = 'OPEN_SHORT_STRADDLE_ATM'
+    env_cfg.forced_opening_strategy_name = 'OPEN_SHORT_STRADDLE'
     env_cfg.forced_historical_symbol = 'SPY'
 
     env_cfg.steps_per_day = 4
@@ -622,6 +623,54 @@ def test_no_runaway_duplication_on_transform():
         return False
     finally:
         env.close()
+
+def test_close_all_action():
+    """
+    A critical test to ensure the CLOSE_ALL action correctly liquidates the
+    entire portfolio and realizes the P&L.
+    """
+    test_name = "test_close_all_action"
+    print(f"\n--- RUNNING: {test_name} ---")
+    
+    # Start with a complex 4-leg position to rigorously test the closing loop.
+    env = create_test_env('OPEN_SHORT_IRON_CONDOR')
+    try:
+        # Step 0: Open the initial position.
+        env.reset(seed=54)
+        env.step(env.actions_to_indices['HOLD'])
+        portfolio_before = env.portfolio_manager.get_portfolio()
+        assert len(portfolio_before) == 4, "Setup failed: Did not open a 4-leg condor."
+
+        # Step 1: Let the market move for one step.
+        timestep_before_close = env.step(env.actions_to_indices['HOLD'])
+        
+        # Capture the total P&L right before closing. This is our ground truth.
+        pnl_before_close = timestep_before_close.info['eval_episode_return']
+        
+        # --- The Real Test: Execute the CLOSE_ALL action ---
+        action_to_take = env.actions_to_indices['CLOSE_ALL']
+        timestep_after_close = env.step(action_to_take)
+
+        # --- Assertions ---
+        # 1. The portfolio must now be empty.
+        portfolio_after = env.portfolio_manager.get_portfolio()
+        assert portfolio_after.empty, \
+            f"CLOSE_ALL failed: Portfolio is not empty. Contains {len(portfolio_after)} legs."
+
+        # 3. The "Sum of Unrealized P&L" must now be zero.
+        pnl_verification = env.portfolio_manager.get_pnl_verification(env.price_manager.current_price, env.iv_bin_index)
+        unrealized_pnl = pnl_verification['unrealized_pnl']
+        assert np.isclose(unrealized_pnl, 0.0, atol=0.01), \
+            f"Unrealized P&L is not zero after CLOSE_ALL. It is {unrealized_pnl:.2f}."
+
+        print(f"--- PASSED: {test_name} ---")
+        return True
+    except Exception:
+        traceback.print_exc()
+        print(f"--- FAILED: {test_name} ---")
+        return False
+    finally:
+        env.close()
 # ==============================================================================
 #                                TEST SUITE RUNNER
 # ==============================================================================
@@ -648,6 +697,7 @@ if __name__ == "__main__":
         test_all_open_actions_are_legal,
         test_dte_decay_logic,
         test_no_runaway_duplication_on_transform,
+        test_close_all_action,
     ]
 
     failures = []
