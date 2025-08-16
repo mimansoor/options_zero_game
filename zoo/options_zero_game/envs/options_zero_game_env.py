@@ -88,7 +88,7 @@ class OptionsZeroGameEnv(gym.Env):
         stop_loss_multiple_of_cost=3.0, # NEW: Added stop loss multiple
         use_stop_loss=True,
         forced_opening_strategy_name=None,
-        disable_opening_curriculum=True,
+        disable_opening_curriculum=False,
         
         # Agent/Framework Config
         ignore_legal_actions=True,
@@ -97,7 +97,6 @@ class OptionsZeroGameEnv(gym.Env):
         otm_long_delta_threshold=0.45, # Disallow buying options with delta < 45
         itm_long_delta_threshold=0.55, # Disallow buying options with delta > 55
         itm_short_delta_threshold=0.55, # Disallow shorting options with delta > 55
-        short_leg_max_offset=3,
 
         strategy_name_to_id={}, # Can be left empty, as it's populated from the main config
     )

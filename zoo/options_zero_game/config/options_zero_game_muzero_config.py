@@ -111,53 +111,69 @@ TRAINING_CURRICULUM = {
     # Goal: Learn to sell premium with a bearish assumption.
     int(2e6): 'OPEN_SHORT_CALL_ATM+5',
 
-    # === Phase 3: Introduction to Risk Management (Credit Spreads) ===
-    # Goal: Learn to hedge a short put by converting it into a Bull Put Spread.
-    int(4e6): 'OPEN_SHORT_VERTICAL_PUT_1',
-
-    # === Phase 4: Counterpart Risk Management ===
-    # Goal: Learn to hedge a short call by converting it into a Bear Call Spread.
-    int(6e6): 'OPEN_SHORT_VERTICAL_CALL_1',
+    # === Phase 2: Counterpart Directional Premium Selling ===
+    # Goal: Learn to sell premium with a bearish assumption.
+    int(3e6): 'OPEN_SHORT_PUT_ATM+5',
 
     # === Phase 5: Selling Volatility (Undefined Risk) ===
     # Goal: Learn a non-directional strategy by selling ATM volatility (Straddles).
-    int(8e6): 'OPEN_SHORT_STRADDLE_ATM',
+    int(4e6): 'OPEN_SHORT_STRADDLE',
+
+    # === Phase 5: Selling Volatility (Undefined Risk) ===
+    # Goal: Learn a non-directional strategy by selling ATM volatility (Straddles).
+    int(5e6): 'OPEN_LONG_STRADDLE',
 
     # === Phase 6: Selling Volatility (Risk Defined) ===
     # Goal: Learn to create a range-bound, positive theta position with defined risk.
-    int(10e6): 'OPEN_SHORT_IRON_CONDOR',
+    int(6e6): 'OPEN_SHORT_IRON_CONDOR',
+
+    # === Phase 6: Selling Volatility (Risk Defined) ===
+    # Goal: Learn to create a range-bound, positive theta position with defined risk.
+    int(7e6): 'OPEN_LONG_IRON_CONDOR',
 
     # === Phase 7: Advanced Range-Bound Strategy ===
     # Goal: Learn a different range-bound profile with a sharper profit peak (Butterflies).
-    int(12e6): 'OPEN_SHORT_CALL_FLY_1',
+    int(8e6): 'OPEN_SHORT_CALL_FLY_2',
+
+    # === Phase 7: Advanced Range-Bound Strategy ===
+    # Goal: Learn a different range-bound profile with a sharper profit peak (Butterflies).
+    int(9e6): 'OPEN_LONG_CALL_FLY_2',
 
     # === Phase 8: Advanced Volatility Selling (Delta-based) ===
     # Goal: Learn the professional method of entering strangles based on delta, not fixed widths.
-    int(14e6): 'OPEN_SHORT_STRANGLE_DELTA_20',
+    int(10e6): 'OPEN_SHORT_STRANGLE_DELTA_15',
+
+    # === Phase 8: Advanced Volatility Selling (Delta-based) ===
+    # Goal: Learn the professional method of entering strangles based on delta, not fixed widths.
+    int(11e6): 'OPEN_LONG_STRANGLE_DELTA_15',
     
     # === Phase 9: Learning to BUY Options (Debit Strategies) ===
     # Goal: Change mindset. Learn to pay theta for a large directional move (Long Calls).
-    int(16e6): 'OPEN_LONG_CALL_ATM+0',
+    int(12e6): 'OPEN_LONG_CALL_ATM+5',
+
+    # === Phase 9: Learning to BUY Options (Debit Strategies) ===
+    # Goal: Change mindset. Learn to pay theta for a large directional move (Long Calls).
+    int(13e6): 'OPEN_LONG_CALL_ATM-5',
 
     # === Phase 10: Learning to BUY Spreads ===
     # Goal: Learn to make a risk-defined directional bet by buying a Bull Call Spread.
-    int(18e6): 'OPEN_BULL_CALL_SPREAD',
+    int(14e6): 'OPEN_BULL_CALL_SPREAD',
 
     # === Phase 11: Learning to BUY Spreads ===
     # Goal: Learn to make a risk-defined directional bet by buying a Bear Call Spread.
-    int(20e6): 'OPEN_BEAR_CALL_SPREAD',
+    int(16e6): 'OPEN_BEAR_CALL_SPREAD',
 
     # === Phase 12: Learning to BUY Spreads ===
     # Goal: Learn to make a risk-defined directional bet by buying a Bull Put Spread.
-    int(22e6): 'OPEN_BULL_PUT_SPREAD',
+    int(18e6): 'OPEN_BULL_PUT_SPREAD',
 
     # === Phase 13: Learning to BUY Spreads ===
     # Goal: Learn to make a risk-defined directional bet by buying a Bear Put Spread.
-    int(22e6): 'OPEN_BEAR_PUT_SPREAD',
+    int(20e6): 'OPEN_BEAR_PUT_SPREAD',
 
     # === Final Phase: Integration and Agent Autonomy ===
     # Goal: Allow the agent to use any of its learned strategies to maximize reward.
-    int(24e6): 'ALL'
+    int(22e6): 'ALL'
 }
 
 # This class will "hide" the integer-keyed dictionary from EasyDict.
