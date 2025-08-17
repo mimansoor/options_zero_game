@@ -1,11 +1,14 @@
 # zoo/options_zero_game/entry/strategy_analyzer.py
-# <<< FINAL VERSION WITH COMPARATIVE ANALYSIS >>>
+# <<< FINAL VERSION WITH AUTOMATED JSON REPORTING >>>
 
 import argparse
-import math
 import copy
-from tqdm import tqdm
+import json
+import os
+from datetime import datetime
+
 import pandas as pd
+from tqdm import tqdm
 
 from lzero.entry import eval_muzero
 from zoo.options_zero_game.config.options_zero_game_muzero_config import main_config, create_config
@@ -18,12 +21,8 @@ def get_valid_strategies() -> list:
     Helper function to get a list of all valid opening strategies.
     This corrected version properly initializes the environment with a config.
     """
-    # --- THE FIX: Create a temporary environment using the main config ---
-    # This ensures the environment has all the necessary parameters to build itself,
-    # including the logic for creating the action space.
     temp_env_cfg = copy.deepcopy(main_config.env)
     temp_env = zoo.options_zero_game.envs.options_zero_game_env.OptionsZeroGameEnv(cfg=temp_env_cfg)
-
     return [name for name in temp_env.actions_to_indices if name.startswith('OPEN_')]
 
 def calculate_statistics(results: list, strategy_name: str) -> dict:
@@ -42,7 +41,7 @@ def calculate_statistics(results: list, strategy_name: str) -> dict:
     avg_profit = sum(wins) / num_wins if num_wins > 0 else 0.0
     avg_loss = sum(losses) / num_losses if num_losses > 0 else 0.0
     
-    expectancy = ((win_rate / 100) * avg_profit) + ((1 - win_rate / 100) * avg_loss)
+    expectancy = ((win_rate / 100) * avg_profit) + ((1 - win_rate / 100) * abs(avg_loss))
     profit_factor = sum(wins) / abs(sum(losses)) if sum(losses) != 0 else float('inf')
 
     max_win_streak, max_loss_streak, current_win_streak, current_loss_streak = 0, 0, 0, 0
@@ -73,8 +72,8 @@ if __name__ == "__main__":
     parser.add_argument(
         '--strategy',
         type=str,
-        default='ALL', # Default to running all strategies
-        choices=valid_strategies + ['ALL'], # Add 'ALL' as a valid choice
+        default='ALL',
+        choices=valid_strategies + ['ALL'],
         help="The specific opening strategy to test, or 'ALL' to run a comparative analysis."
     )
     parser.add_argument('-n', '--episodes', type=int, default=10, help="The number of episodes to run per strategy.")
@@ -88,9 +87,12 @@ if __name__ == "__main__":
     parser.add_argument(
         '--days',
         type=int,
-        default=20, # Default to a fixed 20 days for consistent analysis
+        default=20,
         help="Force a specific episode length in days for the analysis."
     )
+    # --- NEW: Argument to accept a timestamp from the automation script ---
+    parser.add_argument('--timestamp', type=str, default=None, help="A specific timestamp (YYYYMMDD_HHMMSS) to use for the output filename.")
+    
     args = parser.parse_args()
 
     # Determine which strategies to run
@@ -132,7 +134,6 @@ if __name__ == "__main__":
             
             if returns and len(returns[0]) > 0:
                 pnl = returns[0][0]
-                # Duration is still a known limitation
                 all_episode_results.append({'pnl': pnl, 'duration': -1})
         
         # Calculate stats for the completed strategy and store them
@@ -140,7 +141,7 @@ if __name__ == "__main__":
         if strategy_stats:
             all_stats.append(strategy_stats)
 
-    # --- Display the Final Comparative Table ---
+    # --- MODIFIED: Display and Save the Final Comparative Table ---
     if not all_stats:
         print("\nNo data was collected to generate a report.")
     else:
@@ -148,12 +149,28 @@ if __name__ == "__main__":
         print("--- Comparative Strategy Analysis Results ---")
         print("="*80)
         
-        # Use pandas for a clean, professional-looking table
         df = pd.DataFrame(all_stats)
         df.set_index('Strategy', inplace=True)
-        
-        # Format the dataframe for better readability
         pd.options.display.float_format = '{:,.2f}'.format
-        
         print(df)
         print("\n" + "="*80)
+
+        # <<< --- NEW: Save the results to a timestamped JSON file --- >>>
+        
+        # 1. Define the output directory
+        output_dir = "zoo/options_zero_game/visualizer-ui/build/reports"
+        os.makedirs(output_dir, exist_ok=True)
+
+        # 2. Use the provided timestamp if available, otherwise generate a new one.
+        timestamp = args.timestamp if args.timestamp else datetime.now().strftime("%Y%m%d_%H%M%S")
+        
+        filename = f"strategy_report_{timestamp}.json"
+        output_path = os.path.join(output_dir, filename)
+
+        # 3. Convert the list of dictionaries to a JSON string and save
+        try:
+            with open(output_path, 'w') as f:
+                json.dump(all_stats, f, indent=2)
+            print(f"✅ Successfully saved detailed report to: {output_path}")
+        except Exception as e:
+            print(f"❌ Failed to save report. Error: {e}")

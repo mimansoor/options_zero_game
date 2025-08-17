@@ -202,7 +202,7 @@ class CurriculumHolder:
 # This makes the script runnable from anywhere.
 # <<< NEW: Define high-level volatility parameters >>>
 MAX_STRIKE_OFFSET = 40
-AGENT_MAX_OPEN_OFFSET = 10
+AGENT_MAX_OPEN_OFFSET = 2
 ATM_IV = 25.0  # Volatility at the money is 25%
 FAR_OTM_PUT_IV = 50.0 # Volatility for the -30 strike put is 50%
 FAR_OTM_CALL_IV = 20.0 # Volatility for the +30 strike call is 20% (creating a "smirk")

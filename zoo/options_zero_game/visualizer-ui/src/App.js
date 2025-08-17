@@ -1,5 +1,5 @@
 // zoo/options_zero_game/visualizer-ui/src/App.js
-// <<< DEFINITIVE, PROFESSIONAL VISUALIZER VERSION >>>
+// <<< DEFINITIVE VERSION WITH HISTORICAL REPORTING AND MODEL DOWNLOADS >>>
 
 import React, { useState, useEffect } from 'react';
 import './App.css';
@@ -24,12 +24,9 @@ function MetricsDashboard({ stepData }) {
 
   const pnlColor = info.eval_episode_return > 0 ? '#4CAF50' : info.eval_episode_return < 0 ? '#F44336' : 'white';
   const lastChangeColor = info.last_price_change_pct > 0 ? '#4CAF50' : info.last_price_change_pct < 0 ? '#F44336' : 'white';
-
-  // --- THE FIX for "vs Day 0" ---
-  // 1. Calculate PNL percentage change, not price percentage change.
+  
   const pnlChangePct = info.initial_cash ? (info.eval_episode_return / info.initial_cash) * 100 : 0;
   const pnlChangeColor = pnlChangePct > 0 ? '#4CAF50' : pnlChangePct < 0 ? '#F44336' : 'white';
-  // --- END OF FIX ---
 
   return (
     <div className="metrics-dashboard">
@@ -39,7 +36,6 @@ function MetricsDashboard({ stepData }) {
         <h2>EOD Price</h2>
         <p>${info.price ? info.price.toFixed(2) : '0.00'}</p>
         <p style={{ fontSize: '0.8em', color: lastChangeColor }}>
-          {/* This now correctly displays the value calculated in the backend */}
           {info.last_price_change_pct ? info.last_price_change_pct.toFixed(2) : '0.00'}% vs last step
         </p>
       </div>
@@ -47,7 +43,6 @@ function MetricsDashboard({ stepData }) {
         <h2>EOD Total PnL</h2>
         <p style={{ color: pnlColor }}>${info.eval_episode_return ? info.eval_episode_return.toFixed(2) : '0.00'}</p>
         <p style={{ fontSize: '0.8em', color: pnlChangeColor }}>
-          {/* This now correctly displays the PnL percentage change */}
           {pnlChangePct.toFixed(2)}% vs Day 0
         </p>
       </div>
@@ -118,9 +113,7 @@ function PayoffDiagram({ payoffData }) {
     if (!payoffData || !payoffData.expiry_pnl || payoffData.expiry_pnl.length === 0) {
         return <p className="empty-message">Portfolio is empty.</p>;
     }
-
     const { expiry_pnl, current_pnl, spot_price, sigma_levels } = payoffData;
-
     const data = {
         labels: expiry_pnl.map(d => d.price),
         datasets: [
@@ -138,10 +131,8 @@ function PayoffDiagram({ payoffData }) {
             { label: 'Mark-to-Market P&L (T+0)', data: current_pnl.map(d => d.pnl), borderColor: '#2196F3', borderDash: [5, 5], tension: 0.4, pointRadius: 0, }
         ],
     };
-    
     const allPnlValues = [...expiry_pnl.map(d => d.pnl), ...current_pnl.map(d => d.pnl)];
     const minY = Math.min(...allPnlValues); const maxY = Math.max(...allPnlValues); const padding = (maxY - minY) * 0.1;
-
     const options = {
         responsive: true, maintainAspectRatio: false,
         scales: { x: { type: 'linear', ticks: { color: 'white' } }, y: { ticks: { color: 'white' }, min: minY - padding, max: maxY + padding, grid: { color: (c) => c.tick.value === 0 ? 'rgba(255, 255, 255, 0.8)' : 'rgba(255, 255, 255, 0.2)', lineWidth: (c) => c.tick.value === 0 ? 2 : 1, } } },
@@ -159,141 +150,89 @@ function PayoffDiagram({ payoffData }) {
     return <div className="chart-container"><Line options={options} data={data} /></div>;
 }
 
-// --- NEW, UPGRADED AGENT BEHAVIOR CHART ---
 function AgentBehaviorChart({ episodeHistory, historicalContext }) {
   if (!episodeHistory || episodeHistory.length === 0) return null;
-
-  // Combine the historical data with the current episode data for a continuous series
   const combinedPriceData = [...(historicalContext || []), ...episodeHistory.map(step => step.info.price)];
-  
-  // Create labels that show negative steps for the historical context
   const historyLength = historicalContext ? historicalContext.length : 0;
   const labels = Array.from({ length: combinedPriceData.length }, (_, i) => i - historyLength);
-
   const data = {
     labels: labels,
     datasets: [
       {
         label: 'Index Price',
         data: combinedPriceData,
-        // --- NEW: Dynamic styling for the line ---
-        // The historical part will be a lighter, thinner line.
         segment: {
             borderColor: (ctx) => ctx.p0DataIndex < historyLength ? 'rgba(3, 169, 244, 0.5)' : '#03A9F4',
             borderWidth: (ctx) => ctx.p0DataIndex < historyLength ? 1 : 2,
         },
         yAxisID: 'y',
         tension: 0.1,
-        pointRadius: (context) => context.dataIndex < historyLength ? 0 : 2, // No dots on historical part
+        pointRadius: (context) => context.dataIndex < historyLength ? 0 : 2,
       },
     ],
   };
-
   const options = { responsive: true, maintainAspectRatio: false, scales: { x: { ticks: { color: 'white' } }, y: { ticks: { color: 'white' } } }, plugins: { legend: { display: false } } };
   return <div className="chart-container"><Line options={options} data={data} /></div>;
 }
 
 function PortfolioRiskDashboard({ portfolioStats }) {
-  if (!portfolioStats) return <p className="empty-message">Awaiting data...</p>;
+    if (!portfolioStats) return <p className="empty-message">Awaiting data...</p>;
+    const { delta, gamma, theta, vega, max_profit, max_loss, rr_ratio, prob_profit, profit_factor,
+	    highest_realized_profit, lowest_realized_loss, mtm_pnl_high, mtm_pnl_low, net_premium, breakevens } = portfolioStats;
+    const deltaColor = delta > 0 ? '#4CAF50' : delta < 0 ? '#F44336' : 'white';
+    const gammaColor = gamma > 0 ? '#4CAF50' : gamma < 0 ? '#F44336' : 'white';
+    const thetaColor = theta > 0 ? '#4CAF50' : theta < 0 ? '#F44336' : 'white';
+    const vegaColor = vega > 0 ? '#4CAF50' : vega < 0 ? '#F44336' : 'white';
+    const formatRRRatio = (ratio) => {
+        if (!isFinite(ratio)) return '1 : ∞';
+        if (ratio <= 0) return '1 : 0.00';
+        return `1 : ${ratio.toFixed(2)}`;
+    };
+    const premiumValue = net_premium || 0;
+    const premiumColor = premiumValue > 0 ? '#F44336' : premiumValue < 0 ? '#4CAF50' : 'white';
+    const formatBreakevens = (beArray) => {
+        if (!beArray || beArray.length === 0) return 'N/A';
+        return beArray.map(be => `$${be.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2})}`).join(' & ');
+    };
+    return (
+      <div className="risk-dashboard">
+        <div className="risk-item"><span>Portfolio Delta:</span> <p style={{ color: deltaColor }}>{delta.toFixed(2)}</p></div>
+        <div className="risk-item"><span>Portfolio Gamma:</span> <p style={{ color: gammaColor }}>{gamma.toFixed(2)}</p></div>
+        <div className="risk-item"><span>Portfolio Theta:</span> <p style={{ color: thetaColor }}>{theta.toFixed(2)}</p></div>
+        <div className="risk-item"><span>Portfolio Vega:</span> <p style={{ color: vegaColor }}>{vega.toFixed(2)}</p></div>
+        <div className="risk-item"><span>Max Profit:</span> <p style={{ color: '#4CAF50' }}>${max_profit.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2})}</p></div>
+        <div className="risk-item"><span>Max Loss:</span> <p style={{ color: '#F44336' }}>${max_loss.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2})}</p></div>
+        <div className="risk-item"><span>Risk/Reward Ratio:</span> <p>{formatRRRatio(rr_ratio)}</p></div>
+        <div className="risk-item"><span>Prob. of Profit:</span> <p>{(prob_profit * 100).toFixed(2)}%</p></div>
+        <div className="risk-item"><span>Profit Factor:</span> <p style={{ color: '#03A9F4' }}>{isFinite(profit_factor) ? profit_factor.toFixed(2) : '∞'}</p></div>
+        <div className="risk-item"><span>Breakeven(s):</span><p style={{ color: '#FFC107' }}>{formatBreakevens(breakevens)}</p></div>
+        <div className="risk-item"><span>Net Liq. Value:</span><p style={{ color: premiumColor }}>{`${premiumValue < 0 ? '-' : ''}$${Math.abs(premiumValue).toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2})}`}</p></div>
+        <div className="risk-item"><span>Best Trade (P&L):</span><p style={{ color: '#4CAF50' }}>${(highest_realized_profit || 0).toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2})}</p></div>
+        <div className="risk-item"><span>Worst Trade (P&L):</span><p style={{ color: '#F44336' }}>${(lowest_realized_loss || 0).toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2})}</p></div>
+        <div className="risk-item"><span>High-Water Mark (PnL):</span><p style={{ color: '#4CAF50' }}>${(mtm_pnl_high || 0).toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2})}</p></div>
+        <div className="risk-item"><span>Max Drawdown (PnL):</span><p style={{ color: '#F44336' }}>${(mtm_pnl_low || 0).toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2})}</p></div>
+      </div>
+    );
+}
 
-  const { delta, gamma, theta, vega, max_profit, max_loss, rr_ratio, prob_profit, profit_factor,
-	  highest_realized_profit, lowest_realized_loss, mtm_pnl_high, mtm_pnl_low, net_premium, breakevens } = portfolioStats;
-
-  const deltaColor = delta > 0 ? '#4CAF50' : delta < 0 ? '#F44336' : 'white';
-  const gammaColor = gamma > 0 ? '#4CAF50' : gamma < 0 ? '#F44336' : 'white';
-  const thetaColor = theta > 0 ? '#4CAF50' : theta < 0 ? '#F44336' : 'white';
-  const vegaColor = vega > 0 ? '#4CAF50' : vega < 0 ? '#F44336' : 'white';
-
-  // --- THE FIX: A new helper function to format the R:R Ratio ---
-  const formatRRRatio = (ratio) => {
-    // Handle cases where max loss is zero (infinite reward potential)
-    if (!isFinite(ratio)) {
-      return '1 : ∞';
+function StrategyReport({ reportData }) {
+    if (!reportData || reportData.length === 0) {
+        return <p className="empty-message">No strategy data in this report.</p>;
     }
-    // Handle cases where there's no profit potential
-    if (ratio <= 0) {
-      return '1 : 0.00';
-    }
-    // The standard, correct formatting
-    return `1 : ${ratio.toFixed(2)}`;
-  };
-
-  // <<< NEW: Add display logic for Net Premium >>>
-  const premiumValue = net_premium || 0;
-  const premiumColor = premiumValue > 0 ? '#F44336' : premiumValue < 0 ? '#4CAF50' : 'white'; // Debit is red (cost), Credit is green (gain)
-  // A positive value is an asset (can be sold for cash), a negative value is a liability (costs cash to close).
-  const premiumLabel = premiumValue > 0 ? '(Asset)' : premiumValue < 0 ? '(Liability)' : '';
-
-  // <<< NEW: Add a helper function to format the breakevens array >>>
-  const formatBreakevens = (beArray) => {
-    // If the array is missing or empty, show N/A
-    if (!beArray || beArray.length === 0) {
-      return 'N/A';
-    }
-    // Map each breakeven number to a formatted currency string
-    return beArray.map(be => 
-      `$${be.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2})}`
-    ).join(' & '); // Join multiple breakevens with a clear separator
-  };
-
-  return (
-    <div className="risk-dashboard">
-      <div className="risk-item"><span>Portfolio Delta:</span> <p style={{ color: deltaColor }}>{delta.toFixed(2)}</p></div>
-      <div className="risk-item"><span>Portfolio Gamma:</span> <p style={{ color: gammaColor }}>{gamma.toFixed(2)}</p></div>
-      <div className="risk-item"><span>Portfolio Theta:</span> <p style={{ color: thetaColor }}>{theta.toFixed(2)}</p></div>
-      <div className="risk-item"><span>Portfolio Vega:</span> <p style={{ color: vegaColor }}>{vega.toFixed(2)}</p></div>
-      <div className="risk-item"><span>Max Profit:</span> <p style={{ color: '#4CAF50' }}>${max_profit.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2})}</p></div>
-      <div className="risk-item"><span>Max Loss:</span> <p style={{ color: '#F44336' }}>${max_loss.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2})}</p></div>
-      
-      {/* --- Apply the new formatting here --- */}
-      <div className="risk-item"><span>Risk/Reward Ratio:</span> <p>{formatRRRatio(rr_ratio)}</p></div>
-      
-      <div className="risk-item"><span>Prob. of Profit:</span> <p>{(prob_profit * 100).toFixed(2)}%</p></div>
-      <div className="risk-item"><span>Profit Factor:</span> <p style={{ color: '#03A9F4' }}>{isFinite(profit_factor) ? profit_factor.toFixed(2) : '∞'}</p></div>
-      {/* --- NEW: Display the Breakeven Points --- */}
-      <div className="risk-item">
-        <span>Breakeven(s):</span>
-        <p style={{ color: '#FFC107' }}> {/* Use a neutral/info color */}
-          {formatBreakevens(breakevens)}
-        </p>
-      </div>
-      {/* --- NEW: Display Net Liq. Value --- */}
-      <div className="risk-item">
-        {/* <<< MODIFICATION: Change the label text here >>> */}
-        <span>Net Liq. Value:</span>
-        <p style={{ color: premiumColor }}>
-          {/* We now show a signed value, as "liability" is clearer with a negative sign */}
-          {`${premiumValue < 0 ? '-' : ''}$${Math.abs(premiumValue).toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2})}`}
-        </p>
-      </div>
-      {/* --- NEW: Display the Best Win and Worst Loss --- */}
-      <div className="risk-item">
-        <span>Best Trade (P&L):</span>
-        <p style={{ color: '#4CAF50' }}>
-          ${(highest_realized_profit || 0).toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2})}
-        </p>
-      </div>
-      <div className="risk-item">
-        <span>Worst Trade (P&L):</span>
-        <p style={{ color: '#F44336' }}>
-          ${(lowest_realized_loss || 0).toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2})}
-        </p>
-      </div>
-      {/* --- NEW: Display the MtM High-Water Mark and Max Drawdown --- */}
-      <div className="risk-item">
-        <span>High-Water Mark (PnL):</span>
-        <p style={{ color: '#4CAF50' }}>
-          ${(mtm_pnl_high || 0).toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2})}
-        </p>
-      </div>
-      <div className="risk-item">
-        <span>Max Drawdown (PnL):</span>
-        <p style={{ color: '#F44336' }}>
-          ${(mtm_pnl_low || 0).toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2})}
-        </p>
-      </div>
-    </div>
-  );
+    const columns = ["Strategy", "Total_Trades", "Win_Rate_%", "Expectancy_$", "Profit_Factor", "Avg_Win_$", "Avg_Loss_$", "Max_Win_$", "Max_Loss_$", "Win_Streak", "Loss_Streak"];
+    return (
+        <div className="card" style={{ flex: '1 1 100%', marginTop: '20px' }}>
+            <h3>Strategy Performance Report</h3>
+            <table className="info-table">
+                <thead><tr>{columns.map(col => <th key={col}>{col.replace(/_/g, ' ')}</th>)}</tr></thead>
+                <tbody>
+                    {reportData.map((row, index) => (
+                        <tr key={index}>{columns.map(col => (<td key={col}>{typeof row[col] === 'number' ? row[col].toFixed(2) : row[col]}</td>))}</tr>
+                    ))}
+                </tbody>
+            </table>
+        </div>
+    );
 }
 
 // ===================================================================================
@@ -301,90 +240,138 @@ function PortfolioRiskDashboard({ portfolioStats }) {
 // ===================================================================================
 
 function App() {
-  const [replayData, setReplayData] = useState([]);
-  const [historicalContext, setHistoricalContext] = useState([]);
-  const [currentStep, setCurrentStep] = useState(0);
+    const [replayData, setReplayData] = useState(null);
+    const [historicalContext, setHistoricalContext] = useState([]);
+    const [currentStep, setCurrentStep] = useState(0);
+    const [reportHistory, setReportHistory] = useState([]);
+    const [selectedReportFile, setSelectedReportFile] = useState(null);
+    const [selectedReportData, setSelectedReportData] = useState([]);
+    const [isLoadingReport, setIsLoadingReport] = useState(false);
+    const [view, setView] = useState('replayer');
 
-  useEffect(() => {
-    fetch(`/replay_log.json?t=${new Date().getTime()}`)
-      .then(response => response.json())
-      .then(logObject => { // The fetched object now has two keys
-        setHistoricalContext(logObject.historical_context || []);
-        setReplayData(logObject.episode_data || []);
-      })
-      .catch(error => console.error('Error loading replay_log.json:', error));
-  }, []);
+    useEffect(() => {
+        fetch(`/replay_log.json?t=${new Date().getTime()}`)
+            .then(res => res.ok ? res.json() : Promise.reject(res))
+            .then(logObject => {
+                setHistoricalContext(logObject.historical_context || []);
+                setReplayData(logObject.episode_data || []);
+            })
+            .catch(error => console.error('Could not load replay_log.json. This is normal if you haven\'t run an evaluation yet.', error));
+    }, []);
 
-  const goToStep = (step) => setCurrentStep(Math.max(0, Math.min(replayData.length - 1, step)));
-  
-  const stepData = replayData[currentStep];
-  // The history passed to the chart should ONLY be the episode data
-  const episodeHistory = replayData.slice(0, currentStep + 1);
+    useEffect(() => {
+        fetch('/api/history')
+            .then(res => res.json())
+            .then(data => setReportHistory(data))
+            .catch(error => console.error('Error fetching report history:', error));
+    }, []);
 
-  return (
-    <div className="App">
-      <header className="App-header">
-        <h1>Options-Zero-Game Replayer</h1>
-        
-        {replayData.length > 0 && stepData ? (
-          <div className="main-content">
-            <div className="top-bar">
-              {/* Display the total steps from the info dict, not replayData.length */}
-              <h2>Step: {stepData.step} / {stepData.info.total_steps_in_episode} (Day: {stepData.day})</h2>
-              <div className="navigation-buttons">
-                  <button onClick={() => goToStep(currentStep - 1)} disabled={currentStep === 0}>Prev S</button>
-                  <button onClick={() => goToStep(currentStep + 1)} disabled={currentStep === replayData.length - 1}>Next S</button>
-              </div>
-              <input type="range" min="0" max={replayData.length - 1} value={currentStep} onChange={(e) => setCurrentStep(Number(e.target.value))} className="slider" />
-            </div>
-            
-            <MetricsDashboard stepData={stepData} />
+    useEffect(() => {
+        if (!selectedReportFile) return;
+        setIsLoadingReport(true);
+        fetch(`/reports/${selectedReportFile}`)
+            .then(res => res.json())
+            .then(data => {
+                setSelectedReportData(data);
+                setIsLoadingReport(false);
+            })
+            .catch(error => {
+                console.error('Error loading report file:', error);
+                setIsLoadingReport(false);
+            });
+    }, [selectedReportFile]);
 
-            {/* --- NEW, SUPERIOR LAYOUT --- */}
-            
-            {/* 1. A container for the two main charts, arranged side-by-side */}
-            <div className="charts-container">
-              <div className="card chart-card">
-                <h3>Agent Behavior</h3>
-                <AgentBehaviorChart
-                  episodeHistory={episodeHistory}
-                  historicalContext={historicalContext}
-                />
-              </div>
-              <div className="card chart-card">
-                 <h3>Portfolio P&L Diagram</h3>
-                 <PayoffDiagram payoffData={stepData.info.payoff_data} />
-              </div>
-            </div>
+    const goToStep = (step) => setCurrentStep(Math.max(0, Math.min(replayData.length - 1, step)));
+    
+    const stepData = replayData ? replayData[currentStep] : null;
+    const episodeHistory = replayData ? replayData.slice(0, currentStep + 1) : [];
 
-            {/* 2. A container for the info panels below the charts */}
-            <div className="info-panels-container">
-               <div className="card">
-                  <h3>Active Positions</h3>
-                  <ActivePositions portfolio={stepData.portfolio} />
-               </div>
-                 <div className="card">
-                    <h3>Portfolio Risk Profile</h3>
-                    <PortfolioRiskDashboard portfolioStats={stepData.info.portfolio_stats} />
-                 </div>
-               <div className="card">
-                  <h3>Closed Trades Log</h3>
-                  <ClosedTradesLog closedTrades={stepData.info.closed_trades_log} />
-               </div>
-               <div className="card">
-                  <h3>P&L Verification</h3>
-                  <PnlVerification verificationData={stepData.info.pnl_verification} />
-               </div>
-            </div>
+    const getCheckpointFilename = (reportFilename) => {
+        if (!reportFilename) return null;
+        const timestamp = reportFilename.replace('strategy_report_', '').replace('.json', '');
+        return `ckpt_best_${timestamp}.pth.tar`;
+    };
 
-          </div>
-        ) : (
-          <p><i>Loading Replay Data... (If this persists, check console for errors and ensure replay_log.json exists in the build folder)</i></p>
-        )}
-      </header>
-    </div>
-  );
+    return (
+        <div className="App">
+            <header className="App-header">
+                <h1>Options-Zero-Game Visualizer</h1>
+                
+                <div className="navigation-buttons view-toggle">
+                    <button onClick={() => setView('replayer')} disabled={view === 'replayer'}>Episode Replayer</button>
+                    <button onClick={() => setView('history')} disabled={view === 'history'}>Strategy History</button>
+                </div>
+
+                {view === 'replayer' && (
+                    stepData ? (
+                        <div className="main-content">
+                            <div className="top-bar">
+                              <h2>Step: {stepData.step} / {stepData.info.total_steps_in_episode} (Day: {stepData.day})</h2>
+                              <div className="navigation-buttons">
+                                  <button onClick={() => goToStep(currentStep - 1)} disabled={currentStep === 0}>Prev S</button>
+                                  <button onClick={() => goToStep(currentStep + 1)} disabled={currentStep === replayData.length - 1}>Next S</button>
+                              </div>
+                              <input type="range" min="0" max={replayData.length - 1} value={currentStep} onChange={(e) => setCurrentStep(Number(e.target.value))} className="slider" />
+                            </div>
+                            
+                            <MetricsDashboard stepData={stepData} />
+
+                            <div className="charts-container">
+                              <div className="card chart-card">
+                                <h3>Agent Behavior</h3>
+                                <AgentBehaviorChart episodeHistory={episodeHistory} historicalContext={historicalContext} />
+                              </div>
+                              <div className="card chart-card">
+                                 <h3>Portfolio P&L Diagram</h3>
+                                 <PayoffDiagram payoffData={stepData.info.payoff_data} />
+                              </div>
+                            </div>
+
+                            <div className="info-panels-container">
+                               <div className="card">
+                                  <h3>Active Positions</h3>
+                                  <ActivePositions portfolio={stepData.portfolio} />
+                               </div>
+                               <div className="card">
+                                    <h3>Portfolio Risk Profile</h3>
+                                    <PortfolioRiskDashboard portfolioStats={stepData.info.portfolio_stats} />
+                               </div>
+                               <div className="card">
+                                  <h3>Closed Trades Log</h3>
+                                  <ClosedTradesLog closedTrades={stepData.info.closed_trades_log} />
+                               </div>
+                               <div className="card">
+                                  <h3>P&L Verification</h3>
+                                  <PnlVerification verificationData={stepData.info.pnl_verification} />
+                               </div>
+                            </div>
+                        </div>
+                    ) : (
+                        <p><i>Loading Replay Data... (Run an evaluation to generate `replay_log.json`)</i></p>
+                    )
+                )}
+
+                {view === 'history' && (
+                    <div className="main-content">
+                        <h2>Historical Strategy Reports</h2>
+                        <div className="report-selector">
+                            {reportHistory.length > 0 ? reportHistory.map(report => (
+                                <div key={report.filename} className="report-item">
+                                    <button className="report-button" onClick={() => setSelectedReportFile(report.filename)} disabled={selectedReportFile === report.filename}>
+                                        {report.label}
+                                    </button>
+                                    <a href={`/reports/${getCheckpointFilename(report.filename)}`} className="download-link" download>
+                                      Download Model
+                                    </a>
+                                </div>
+                            )) : <p>No historical reports found.</p>}
+                        </div>
+                        {isLoadingReport ? <p>Loading report...</p> : <StrategyReport reportData={selectedReportData} />}
+                    </div>
+                )}
+            </header>
+        </div>
+    );
 }
 
 export default App;
-

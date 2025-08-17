@@ -1,6 +1,6 @@
 #!/bin/bash
 
-SRC="/home/immansoo/options_zero_game/experiments/options_zero_game_muzero_agent_v2.2-Final_ns35_upc500_bs256/ckpt/ckpt_best.pth.tar"
+SRC="/home/immansoo/options_zero_game/experiments/options_zero_game_muzero_agent_v2.2-Final_ns50_upc2000_bs256/ckpt/ckpt_best.pth.tar"
 DEST="/home/immansoo/gdrive/options_zero_game"
 
 while true

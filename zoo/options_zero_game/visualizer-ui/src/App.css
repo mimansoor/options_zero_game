@@ -199,3 +199,56 @@
   margin: 0;
   font-weight: bold;
 }
+
+/* --- NEW STYLES FOR HISTORY VIEW --- */
+
+.view-toggle {
+  margin-bottom: 20px;
+}
+
+.report-selector {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 15px;
+  justify-content: center;
+  margin-bottom: 20px;
+  padding-bottom: 20px;
+  border-bottom: 1px solid #444;
+}
+
+.report-item {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  background-color: #3a3a44;
+  padding: 10px;
+  border-radius: 8px;
+}
+
+.report-button {
+  padding: 8px 16px;
+  background-color: #61dafb;
+  border: none;
+  border-radius: 4px;
+  color: #282c34;
+  font-weight: bold;
+  cursor: pointer;
+  width: 180px; /* Give buttons a consistent width */
+}
+
+.report-button:disabled {
+  background-color: #555;
+  cursor: not-allowed;
+  color: #aaa;
+}
+
+.download-link {
+  font-size: 0.8em;
+  color: #61dafb;
+  text-decoration: none;
+}
+
+.download-link:hover {
+  text-decoration: underline;
+}
