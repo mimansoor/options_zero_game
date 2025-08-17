@@ -32,7 +32,7 @@ if __name__ == "__main__":
 
     # This tells the DI-engine framework to put all logs and other output
     # files for this run into a clean './evaluator' directory.
-    eval_main_config.exp_name = 'evaluator'
+    eval_main_config.exp_name = 'eval/evaluator'
 
     # --- Standard Evaluation Setup ---
     eval_create_config.env.type = 'log_replay'

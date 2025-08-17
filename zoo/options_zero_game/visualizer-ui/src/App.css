@@ -252,3 +252,36 @@
 .download-link:hover {
   text-decoration: underline;
 }
+
+/* --- NEW STYLES FOR SORTABLE TABLE --- */
+
+.table-container {
+  overflow-x: auto; /* Allows horizontal scrolling on small screens */
+}
+
+.info-table.sortable th {
+  cursor: pointer;
+  position: relative;
+  user-select: none; /* Prevents text selection on rapid clicks */
+}
+
+.info-table.sortable th:hover {
+  background-color: #4a4a54;
+}
+
+.sort-indicator {
+  display: inline-block;
+  margin-left: 8px;
+  color: #61dafb; /* Highlight color for active sort */
+  transition: transform 0.2s ease-in-out;
+}
+
+.sort-indicator.descending {
+  transform: rotate(180deg);
+}
+
+.sort-indicator-hidden {
+  display: inline-block;
+  margin-left: 8px;
+  opacity: 0.2; /* Show a faint arrow on non-active columns */
+}

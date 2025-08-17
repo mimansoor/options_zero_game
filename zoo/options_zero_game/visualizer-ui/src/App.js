@@ -216,21 +216,90 @@ function PortfolioRiskDashboard({ portfolioStats }) {
 }
 
 function StrategyReport({ reportData }) {
+    // 1. State to manage the sorting configuration
+    const [sortConfig, setSortConfig] = useState({ key: 'Expectancy_$', direction: 'descending' });
+
+    // 2. A memoized, sorted version of the data.
+    // This ensures we only re-sort when the data or sort config changes, not on every render.
+    const sortedData = React.useMemo(() => {
+        let sortableData = [...reportData]; // Create a mutable copy
+        if (sortConfig !== null) {
+            sortableData.sort((a, b) => {
+                const valA = a[sortConfig.key];
+                const valB = b[sortConfig.key];
+
+                // Robustly handle both numbers and strings
+                if (valA < valB) {
+                    return sortConfig.direction === 'ascending' ? -1 : 1;
+                }
+                if (valA > valB) {
+                    return sortConfig.direction === 'ascending' ? 1 : -1;
+                }
+                return 0;
+            });
+        }
+        return sortableData;
+    }, [reportData, sortConfig]);
+
+    // 3. A function to handle header clicks, updating the sort configuration
+    const requestSort = (key) => {
+        let direction = 'ascending';
+        // If clicking the same column, reverse the direction
+        if (sortConfig && sortConfig.key === key && sortConfig.direction === 'ascending') {
+            direction = 'descending';
+        }
+        setSortConfig({ key, direction });
+    };
+
+    // Helper to get the CSS class for the sort indicator
+    const getSortIndicatorClass = (key) => {
+        if (!sortConfig || sortConfig.key !== key) {
+            return 'sort-indicator-hidden';
+        }
+        return sortConfig.direction === 'ascending' ? 'sort-indicator' : 'sort-indicator descending';
+    };
+
     if (!reportData || reportData.length === 0) {
         return <p className="empty-message">No strategy data in this report.</p>;
     }
-    const columns = ["Strategy", "Total_Trades", "Win_Rate_%", "Expectancy_$", "Profit_Factor", "Avg_Win_$", "Avg_Loss_$", "Max_Win_$", "Max_Loss_$", "Win_Streak", "Loss_Streak"];
+
+    const columns = [
+        "Strategy", "Total_Trades", "Win_Rate_%", "Expectancy_$",
+        "Profit_Factor", "Avg_Win_$", "Avg_Loss_$", "Max_Win_$",
+        "Max_Loss_$", "Win_Streak", "Loss_Streak"
+    ];
+
     return (
         <div className="card" style={{ flex: '1 1 100%', marginTop: '20px' }}>
-            <h3>Strategy Performance Report</h3>
-            <table className="info-table">
-                <thead><tr>{columns.map(col => <th key={col}>{col.replace(/_/g, ' ')}</th>)}</tr></thead>
-                <tbody>
-                    {reportData.map((row, index) => (
-                        <tr key={index}>{columns.map(col => (<td key={col}>{typeof row[col] === 'number' ? row[col].toFixed(2) : row[col]}</td>))}</tr>
-                    ))}
-                </tbody>
-            </table>
+            <h3>Strategy Performance Report (Click Headers to Sort)</h3>
+            <div className="table-container"> {/* Added for potential scrolling on small screens */}
+                <table className="info-table sortable">
+                    <thead>
+                        <tr>
+                            {columns.map(col => (
+                                <th key={col} onClick={() => requestSort(col)}>
+                                    {col.replace(/_/g, ' ')}
+                                    <span className={getSortIndicatorClass(col)}>▲</span>
+                                </th>
+                            ))}
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {/* 4. We now map over the SORTED data, not the original prop */}
+                        {sortedData.map((row, index) => (
+                            <tr key={index}>
+                                {columns.map(col => (
+                                    <td key={col}>
+                                        {/* Special formatting for strategy name to avoid .00 */}
+                                        {col === 'Strategy' ? row[col] :
+                                         typeof row[col] === 'number' ? row[col].toFixed(2) : row[col]}
+                                    </td>
+                                ))}
+                            </tr>
+                        ))}
+                    </tbody>
+                </table>
+            </div>
         </div>
     );
 }

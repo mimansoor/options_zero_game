@@ -130,7 +130,7 @@ if __name__ == "__main__":
             # <<< --- THE FIX IS HERE --- >>>
             # Set a dedicated output directory for all analyzer-related runs.
             # This prevents the script from writing logs into the main training experiment folder.
-            current_main_config.exp_name = 'strategy_analyzer_runs'
+            current_main_config.exp_name = 'strategy_eval/strategy_analyzer_runs'
             
             # <<< --- NEW: The core logic to enforce the data source --- >>>
             if args.symbol:
