@@ -125,7 +125,7 @@ def test_hedge_naked_put():
     """Tests if HEDGE_NAKED_POS correctly converts a naked put into a Bull Put Spread."""
     test_name = "test_hedge_naked_put"
     print(f"\n--- RUNNING: {test_name} ---")
-    env = create_test_env('OPEN_SHORT_PUT_ATM-5')
+    env = create_test_env('OPEN_SHORT_PUT_ATM-2')
     try:
         # Step 0: Reset the environment
         obs_dict = env.reset(seed=42)
@@ -281,7 +281,7 @@ def test_hedge_short_call():
     """Tests hedging a naked SHORT CALL into a Bear Call Spread."""
     test_name = "test_hedge_short_call"
     print(f"\n--- RUNNING: {test_name} ---")
-    env = create_test_env('OPEN_SHORT_CALL_ATM+5')
+    env = create_test_env('OPEN_SHORT_CALL_ATM+2')
     try:
         env.reset(seed=43)
         env.step(env.actions_to_indices['HOLD'])
@@ -311,7 +311,7 @@ def test_hedge_long_put():
     """Tests hedging a naked LONG PUT into a Bear Put Spread."""
     test_name = "test_hedge_long_put"
     print(f"\n--- RUNNING: {test_name} ---")
-    env = create_test_env('OPEN_LONG_PUT_ATM-5')
+    env = create_test_env('OPEN_LONG_PUT_ATM-2')
     try:
         env.reset(seed=44)
         env.step(env.actions_to_indices['HOLD'])
@@ -341,7 +341,7 @@ def test_hedge_long_call():
     """Tests hedging a naked LONG CALL into a Bull Call Spread."""
     test_name = "test_hedge_long_call"
     print(f"\n--- RUNNING: {test_name} ---")
-    env = create_test_env('OPEN_LONG_CALL_ATM+5')
+    env = create_test_env('OPEN_LONG_CALL_ATM+2')
     try:
         env.reset(seed=45)
         env.step(env.actions_to_indices['HOLD'])
