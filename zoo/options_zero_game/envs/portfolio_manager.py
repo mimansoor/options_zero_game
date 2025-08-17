@@ -185,6 +185,50 @@ class PortfolioManager:
             self.SYMMETRIC_ACTION_MAP[action1] = action2
             self.SYMMETRIC_ACTION_MAP[action2] = action1
 
+        # This map connects strategies with the same directional bias but opposite
+        # premium types (debit vs. credit), following the user's elegant logic.
+        self.STRATEGY_TYPE_MAP = {}
+
+        # Define the conceptual base pairings. The logic below will handle all variations.
+        action_pairs = [
+            # --- Directional Pairs ---
+            ('OPEN_LONG_CALL_ATM', 'OPEN_SHORT_PUT_ATM'),
+            ('OPEN_BULL_CALL_SPREAD', 'OPEN_BULL_PUT_SPREAD'),
+            ('OPEN_LONG_PUT_ATM', 'OPEN_SHORT_CALL_ATM'),
+            ('OPEN_BEAR_PUT_SPREAD', 'OPEN_BEAR_CALL_SPREAD'),
+
+            # --- Volatility Pairs (Debit vs. Credit) ---
+            ('OPEN_LONG_STRADDLE', 'OPEN_SHORT_IRON_FLY'),
+            ('OPEN_LONG_STRANGLE_DELTA_', 'OPEN_SHORT_IRON_CONDOR'),
+        ]
+
+        # Programmatically build the full map from the base pairs
+        for base1, base2 in action_pairs:
+            # Handle naked legs with ATM offsets
+            if 'ATM' in base1 and 'ATM' in base2:
+                # Use the agent_max_open_offset from the config for consistency
+                agent_max_open_offset = cfg.get('agent_max_open_offset', 2)
+                for offset in range(-agent_max_open_offset, agent_max_open_offset + 1):
+                    # Create the full action names
+                    action1 = f"{base1}{offset:+d}"
+                    action2 = f"{base2}{offset:+d}"
+                    # Create the two-way mapping
+                    self.STRATEGY_TYPE_MAP[action1] = action2
+                    self.STRATEGY_TYPE_MAP[action2] = action1
+
+            # Handle delta-based strangles vs. iron condors
+            elif 'DELTA' in base1 and 'CONDOR' in base2:
+                for delta in [15, 20, 25, 30]:
+                    action1 = f"{base1}{delta}"
+                    action2 = base2
+                    self.STRATEGY_TYPE_MAP[action1] = action2
+                    self.STRATEGY_TYPE_MAP[action2] = action1
+
+            # Handle simple named strategies (spreads, straddles, etc.)
+            else:
+                self.STRATEGY_TYPE_MAP[base1] = base2
+                self.STRATEGY_TYPE_MAP[base2] = base1
+
     def reset(self):
         """Resets the portfolio to an empty state for a new episode."""
         self.portfolio = pd.DataFrame(columns=self.portfolio_columns).astype(self.portfolio_dtypes)
