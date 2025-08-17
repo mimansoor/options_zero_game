@@ -33,7 +33,7 @@ TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
 
 # 3. Run the strategy analyzer, passing the timestamp to it
 echo "Running strategy analyzer for all strategies using historical data only..."
-python3 zoo/options_zero_game/entry/strategy_analyzer.py --strategy ALL -n 10 --timestamp "$TIMESTAMP" --symbol ANY
+python3 zoo/options_zero_game/entry/strategy_analyzer.py --start_seed 42 --strategy ALL -n 10 --timestamp "$TIMESTAMP" --symbol ANY
 
 echo "Analysis complete. Report and model will be saved with timestamp: $TIMESTAMP"
 

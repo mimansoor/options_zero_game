@@ -126,6 +126,11 @@ if __name__ == "__main__":
         for i in tqdm(range(args.episodes), desc=f"Testing {strategy_name}", leave=False):
             current_main_config = copy.deepcopy(main_config)
             current_create_config = copy.deepcopy(create_config)
+
+            # <<< --- THE FIX IS HERE --- >>>
+            # Set a dedicated output directory for all analyzer-related runs.
+            # This prevents the script from writing logs into the main training experiment folder.
+            current_main_config.exp_name = 'strategy_analyzer_runs'
             
             # <<< --- NEW: The core logic to enforce the data source --- >>>
             if args.symbol:
