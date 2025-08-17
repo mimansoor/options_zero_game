@@ -4,6 +4,7 @@
 import argparse
 import copy
 import json
+import numpy as np
 import os
 from datetime import datetime
 
@@ -64,6 +65,26 @@ def calculate_statistics(results: list, strategy_name: str) -> dict:
         "Win_Streak": max_win_streak,
         "Loss_Streak": max_loss_streak,
     }
+
+def calculate_trader_score(strategy_data):
+    """
+    Calculates a unified 'Trader's Score' for a single strategy.
+    The score balances profitability, efficiency, and consistency.
+    """
+    expectancy = strategy_data.get("Expectancy_$", 0)
+    profit_factor = strategy_data.get("Profit_Factor", 0)
+    win_rate = strategy_data.get("Win_Rate_%", 0)
+
+    # Use the natural logarithm (np.log). We use max(profit_factor, 0.01)
+    # to prevent errors from log(0) or log(negative). A PF below 1 will result
+    # in a negative log, correctly penalizing the score.
+    log_pf = np.log(max(profit_factor, 0.01))
+
+    # The final score multiplies the core profitability by efficiency and consistency.
+    score = expectancy * log_pf * (win_rate / 100)
+
+    # Return a safe value in case of weird math errors (e.g., inf * 0)
+    return score if np.isfinite(score) else -999999
 
 if __name__ == "__main__":
     valid_strategies = get_valid_strategies()
@@ -172,6 +193,9 @@ if __name__ == "__main__":
     if not all_stats:
         print("\nNo data was collected to generate a report.")
     else:
+        for strategy_row in all_stats:
+            strategy_row['Trader_Score'] = calculate_trader_score(strategy_row)
+
         print("\n" + "="*80)
         print("--- Comparative Strategy Analysis Results ---")
         print("="*80)
