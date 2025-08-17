@@ -78,21 +78,23 @@ if __name__ == "__main__":
     )
     parser.add_argument('-n', '--episodes', type=int, default=10, help="The number of episodes to run per strategy.")
     parser.add_argument('--model_path', type=str, default='./best_ckpt/ckpt_best.pth.tar', help="Path to the trained model checkpoint.")
+    
+    # <<< --- THE NEW, MORE POWERFUL --symbol ARGUMENT --- >>>
     parser.add_argument(
         '--symbol',
         type=str,
-        default=None,
-        help="Force evaluation on a specific historical symbol (e.g., 'SPY', 'TSLA'). Defaults to random."
+        default=None, # Default is None, allowing the 'mixed' mode from the config
+        help="Force evaluation on a specific historical symbol (e.g., 'SPY'), or use the special keyword 'ANY' to force the use of random historical data only (disables GARCH)."
     )
+    
+    parser.add_argument('--start_seed', type=int, default=0, help="The starting seed for the episode sequence.")
+    parser.add_argument('--timestamp', type=str, default=None, help="A specific timestamp (YYYYMMDD_HHMMSS) to use for the output filename.")
     parser.add_argument(
         '--days',
         type=int,
         default=20,
         help="Force a specific episode length in days for the analysis."
     )
-    # --- NEW: Argument to accept a timestamp from the automation script ---
-    parser.add_argument('--timestamp', type=str, default=None, help="A specific timestamp (YYYYMMDD_HHMMSS) to use for the output filename.")
-    
     args = parser.parse_args()
 
     # Determine which strategies to run
@@ -103,7 +105,16 @@ if __name__ == "__main__":
         strategies_to_run = [args.strategy]
         print(f"--- Starting Analysis for Strategy: {args.strategy} ---")
     
-    print(f"--- Running for {args.episodes} episodes per strategy ---")
+    # <<< --- NEW: Add a clear printout of the data source being used --- >>>
+    if args.symbol:
+        if args.symbol.upper() == 'ANY':
+            print("--- Data Source: Using RANDOM HISTORICAL symbols only (GARCH disabled) ---")
+        else:
+            print(f"--- Data Source: Using SPECIFIC HISTORICAL symbol: {args.symbol} (GARCH disabled) ---")
+    else:
+        print("--- Data Source: Using default 'mixed' mode (Random GARCH or Historical) ---")
+        
+    print(f"--- Running for {args.episodes} episodes per strategy (Seeds: {args.start_seed} to {args.start_seed + args.episodes - 1}) ---")
 
     all_stats = []
     
@@ -112,21 +123,33 @@ if __name__ == "__main__":
         
         all_episode_results = []
         
-        # Inner loop for running episodes for the current strategy
         for i in tqdm(range(args.episodes), desc=f"Testing {strategy_name}", leave=False):
             current_main_config = copy.deepcopy(main_config)
             current_create_config = copy.deepcopy(create_config)
             
+            # <<< --- NEW: The core logic to enforce the data source --- >>>
+            if args.symbol:
+                # Force the price source to historical for both 'ANY' and specific symbols
+                current_main_config.env.price_source = 'historical'
+                if args.symbol.upper() == 'ANY':
+                    # Explicitly set forced_historical_symbol to None to allow random selection
+                    current_main_config.env.forced_historical_symbol = None
+                else:
+                    # A specific symbol was provided, so force it
+                    current_main_config.env.forced_historical_symbol = args.symbol
+            
+            # --- The rest of the configuration is the same ---
             current_main_config.env.forced_opening_strategy_name = strategy_name
             current_main_config.env.is_eval_mode = True
-            current_main_config.env.forced_historical_symbol = args.symbol
             current_main_config.env.n_evaluator_episode = 1
             current_main_config.env.evaluator_env_num = 1
             current_main_config.env.forced_episode_length = args.days
             
+            current_seed = args.start_seed + i
+            
             _, returns = eval_muzero(
                 [current_main_config, current_create_config],
-                seed=i,
+                seed=current_seed,
                 num_episodes_each_seed=1,
                 print_seed_details=False,
                 model_path=args.model_path
@@ -136,7 +159,6 @@ if __name__ == "__main__":
                 pnl = returns[0][0]
                 all_episode_results.append({'pnl': pnl, 'duration': -1})
         
-        # Calculate stats for the completed strategy and store them
         strategy_stats = calculate_statistics(all_episode_results, strategy_name)
         if strategy_stats:
             all_stats.append(strategy_stats)
