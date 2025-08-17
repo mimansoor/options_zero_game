@@ -726,17 +726,24 @@ class PortfolioManager:
     def _get_total_expiry_pnl_at_price(self, legs_df: pd.DataFrame, price: float) -> float:
         """
         Calculates the total P&L for a given DataFrame of legs at a specific price
-        AT EXPIRATION (using intrinsic value). This is a wrapper around the
-        canonical per-leg P&L function.
+        AT EXPIRATION (using intrinsic value).
         """
         if legs_df.empty:
             return self.realized_pnl
 
-        # Sum the P&L of each leg, ensuring we call the helper with at_expiry=True
-        unrealized_pnl = sum(
-            self._get_pnl_for_leg_at_price(leg, price, at_expiry=True)
-            for _, leg in legs_df.iterrows()
-        )
+        unrealized_pnl = 0.0
+        for _, leg in legs_df.iterrows():
+            # --- We put the simple, fast intrinsic value logic directly here ---
+            is_call = leg['type'] == 'call'
+            pnl_multiplier = 1 if leg['direction'] == 'long' else -1
+            
+            if is_call:
+                intrinsic_value = max(0.0, price - leg['strike_price'])
+            else: # Put
+                intrinsic_value = max(0.0, leg['strike_price'] - price)
+            
+            pnl_per_share = intrinsic_value - leg['entry_premium']
+            unrealized_pnl += pnl_per_share * pnl_multiplier * self.lot_size
         
         return self.realized_pnl + unrealized_pnl
 
