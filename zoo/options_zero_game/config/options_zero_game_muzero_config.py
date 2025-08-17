@@ -119,43 +119,43 @@ TRAINING_CURRICULUM = {
 
     # === Phase 1: Foundational Premium Selling (Directional) ===
     # Goal: Learn to sell premium with a bullish assumption (theta decay).
-    int(1e5): 'OPEN_SHORT_PUT_ATM-1',
+    int(1e3): 'OPEN_SHORT_PUT_ATM-1',
 
     # === Phase 1: Foundational Premium Selling (Directional) ===
     # Goal: Learn to sell premium with a bullish assumption (theta decay).
-    int(2e5): 'OPEN_SHORT_PUT_ATM',
+    int(2e3): 'OPEN_SHORT_PUT_ATM',
 
     # === Phase 1: Foundational Premium Selling (Directional) ===
     # Goal: Learn to sell premium with a bullish assumption (theta decay).
-    int(3e5): 'OPEN_SHORT_PUT_ATM+1',
+    int(3e3): 'OPEN_SHORT_PUT_ATM+1',
 
     # === Phase 1: Foundational Premium Selling (Directional) ===
     # Goal: Learn to sell premium with a bullish assumption (theta decay).
-    int(4e5): 'OPEN_SHORT_PUT_ATM+2',
+    int(4e3): 'OPEN_SHORT_PUT_ATM+2',
 
     # === Phase 1: Foundational Premium Selling (Directional) ===
     # Goal: Learn to sell premium with a bullish assumption (theta decay).
-    int(1e6): 'OPEN_SHORT_CALL_ATM-2',
+    int(1e3): 'OPEN_SHORT_CALL_ATM-2',
 
     # === Phase 1: Foundational Premium Selling (Directional) ===
     # Goal: Learn to sell premium with a bullish assumption (theta decay).
-    int(1e6+1e5): 'OPEN_SHORT_CALL_ATM-1',
+    int(1e3+1e2): 'OPEN_SHORT_CALL_ATM-1',
 
     # === Phase 1: Foundational Premium Selling (Directional) ===
     # Goal: Learn to sell premium with a bullish assumption (theta decay).
-    int(1e6+2e5): 'OPEN_SHORT_CALL_ATM',
+    int(1e3+2e2): 'OPEN_SHORT_CALL_ATM',
 
     # === Phase 1: Foundational Premium Selling (Directional) ===
     # Goal: Learn to sell premium with a bullish assumption (theta decay).
-    int(1e6+3e5): 'OPEN_SHORT_CALL_ATM+1',
+    int(1e3+3e2): 'OPEN_SHORT_CALL_ATM+1',
 
     # === Phase 2: Counterpart Directional Premium Selling ===
     # Goal: Learn to sell premium with a bearish assumption.
-    int(2e6): 'OPEN_SHORT_CALL_ATM+2',
+    int(2e3): 'OPEN_SHORT_CALL_ATM+2',
 
     # === Phase 5: Selling Volatility (Undefined Risk) ===
     # Goal: Learn a non-directional strategy by selling ATM volatility (Straddles).
-    int(3e6): 'OPEN_SHORT_STRADDLE',
+    int(3e3): 'OPEN_SHORT_STRADDLE',
 
     # === Phase 5: Selling Volatility (Undefined Risk) ===
     # Goal: Learn a non-directional strategy by selling ATM volatility (Straddles).
