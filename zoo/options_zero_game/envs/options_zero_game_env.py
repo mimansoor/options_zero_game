@@ -464,6 +464,8 @@ class OptionsZeroGameEnv(gym.Env):
         elif action_name == 'CONVERT_TO_BULL_PUT_SPREAD': pm.convert_to_bull_put_spread(price, iv_idx, step)
         elif action_name == 'CONVERT_TO_BEAR_CALL_SPREAD': pm.convert_to_bear_call_spread(price, iv_idx, step)
         elif action_name == 'CONVERT_TO_BEAR_PUT_SPREAD': pm.convert_to_bear_put_spread(price, iv_idx, step)
+        elif action_name == 'CONVERT_TO_CALL_CONDOR': pm.convert_to_condor('call', price, iv_idx, step)
+        elif action_name == 'CONVERT_TO_PUT_CONDOR': pm.convert_to_condor('put', price, iv_idx, step)
 
     def _advance_market_and_get_outcome(self, equity_before: float, action_taken: str) -> BaseEnvTimestep:
         """
@@ -867,6 +869,10 @@ class OptionsZeroGameEnv(gym.Env):
         actions['OPEN_BULL_PUT_SPREAD'] = i; i+=1
         actions['OPEN_BEAR_PUT_SPREAD'] = i; i+=1
 
+        # <<< --- ADD THE NEW CONDOR CONVERSION ACTIONS HERE --- >>>
+        actions['CONVERT_TO_CALL_CONDOR'] = i; i+=1
+        actions['CONVERT_TO_PUT_CONDOR'] = i; i+=1
+
         # --- NEW: Strategy Morphing Actions ---
         actions['CONVERT_TO_IRON_CONDOR'] = i; i+=1
         actions['CONVERT_TO_IRON_FLY'] = i; i+=1
@@ -890,6 +896,10 @@ class OptionsZeroGameEnv(gym.Env):
         for d in ['LONG', 'SHORT']:
             actions[f'OPEN_{d}_IRON_FLY'] = i; i+=1
             actions[f'OPEN_{d}_IRON_CONDOR'] = i; i+=1
+
+            # <<< --- ADD THE NEW CONDOR ACTIONS HERE --- >>>
+            for t in ['CALL', 'PUT']:
+                actions[f'OPEN_{d}_{t}_CONDOR'] = i; i+=1
 
         for w in [1, 2]:
             for t in ['CALL', 'PUT']:
@@ -997,6 +1007,10 @@ class OptionsZeroGameEnv(gym.Env):
             fly_id = s_map.get('SHORT_IRON_FLY')
             call_fly_ids = {s_map.get('LONG_CALL_FLY_1'), s_map.get('SHORT_CALL_FLY_1'), s_map.get('LONG_CALL_FLY_2'), s_map.get('SHORT_CALL_FLY_2')}
             put_fly_ids = {s_map.get('LONG_PUT_FLY_1'), s_map.get('SHORT_PUT_FLY_1'), s_map.get('LONG_PUT_FLY_2'), s_map.get('SHORT_PUT_FLY_2')}
+            spread_ids = {
+                s_map.get('BULL_CALL_SPREAD'), s_map.get('BEAR_CALL_SPREAD'),
+                s_map.get('BULL_PUT_SPREAD'), s_map.get('BEAR_PUT_SPREAD')
+            }
 
             # Rule: Strangle -> Iron Condor
             if current_strategy_id in strangle_ids:
@@ -1044,6 +1058,16 @@ class OptionsZeroGameEnv(gym.Env):
                 # A put butterfly can be decomposed into a Bull Put or a Bear Put spread.
                 self._set_if_exists(action_mask, 'CONVERT_TO_BULL_PUT_SPREAD')
                 self._set_if_exists(action_mask, 'CONVERT_TO_BEAR_PUT_SPREAD')
+
+            elif current_strategy_id in spread_ids:
+                # This conversion adds 2 legs, so we must have enough space.
+                if len(portfolio_df) <= self.portfolio_manager.max_positions - 2:
+                    # Determine the option type from the existing legs.
+                    option_type = portfolio_df.iloc[0]['type']
+                    if option_type == 'call':
+                        self._set_if_exists(action_mask, 'CONVERT_TO_CALL_CONDOR')
+                    else: # put
+                        self._set_if_exists(action_mask, 'CONVERT_TO_PUT_CONDOR')
         
         return action_mask
 

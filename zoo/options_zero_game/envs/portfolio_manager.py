@@ -2,6 +2,7 @@
 import pandas as pd
 import numpy as np
 import math
+import traceback
 from numba import jit
 from typing import Dict, List, Any, Tuple, Callable
 from .black_scholes_manager import BlackScholesManager, _numba_cdf, _numba_black_scholes
@@ -363,38 +364,43 @@ class PortfolioManager:
         option_type = parts[1].lower()
 
         # --- 2. Attempt to Find the Ideal Spread ---
+        # We need to tell the solver whether this is a credit or debit spread
+        is_credit_spread = 'BULL_PUT' in direction_name or 'BEAR_CALL' in direction_name
         found_legs = self._find_best_available_spread(
-            option_type, direction_name, current_price, iv_bin_index, days_to_expiry
+            option_type, direction_name, current_price, iv_bin_index, days_to_expiry,
+            is_credit_spread
         )
 
         # --- 3. THE FIX: Implement a Robust Fallback ---
         if not found_legs:
-            print(f"DEBUG: Tiered R:R solver failed for {action_name}. Using fixed-width fallback.")
-            
-            atm_strike = self.market_rules_manager.get_atm_price(current_price)
-            # Use a sensible, medium width for the fallback (e.g., 2 strikes)
-            wing_offset = self.strike_distance * 2 
-
-            # Determine the strikes based on the strategy
-            if direction_name in ['BULL_CALL', 'BEAR_PUT']:
-                anchor_strike = atm_strike
-                wing_strike = atm_strike + wing_offset if option_type == 'call' else atm_strike - wing_offset
-            else: # BEAR_CALL or BULL_PUT
-                anchor_strike = atm_strike
-                wing_strike = atm_strike - wing_offset if option_type == 'put' else atm_strike + wing_offset
-
-            # Determine the directions of the legs
+            # ...
+            wing_offset = self.strike_distance * 2
             is_credit_spread = 'BULL_PUT' in direction_name or 'BEAR_CALL' in direction_name
             anchor_direction = 'short' if is_credit_spread else 'long'
             wing_direction = 'long' if is_credit_spread else 'short'
-
-            fallback_legs_def = [
-                {'type': option_type, 'direction': anchor_direction, 'strike_price': anchor_strike, 'days_to_expiry': days_to_expiry},
-                {'type': option_type, 'direction': wing_direction, 'strike_price': wing_strike, 'days_to_expiry': days_to_expiry}
-            ]
             
-            # Price the fallback legs
-            found_legs = self._price_legs(fallback_legs_def, current_price, iv_bin_index)
+            # --- THE FINAL, CORRECTED STRIKE LOGIC ---
+            if direction_name == 'BULL_CALL_SPREAD':
+                anchor_strike = atm_strike - wing_offset # Long leg
+                wing_strike = atm_strike # Short leg
+            elif direction_name == 'BEAR_CALL_SPREAD':
+                anchor_strike = atm_strike # Short leg
+                wing_strike = atm_strike + wing_offset # Long leg
+            elif direction_name == 'BULL_PUT_SPREAD':
+                anchor_strike = atm_strike # Short leg
+                wing_strike = atm_strike - wing_offset # Long leg
+            elif direction_name == 'BEAR_PUT_SPREAD':
+                anchor_strike = atm_strike + wing_offset # Long leg
+                wing_strike = atm_strike # Short leg
+            
+            # This logic remains the same
+            fallback_legs_def = [
+                {'type': option_type, 'direction': anchor_direction, 'strike_price': anchor_strike},
+                {'type': option_type, 'direction': wing_direction, 'strike_price': wing_strike}
+            ]
+            for leg in fallback_legs_def: leg['days_to_expiry'] = days_to_expiry
+
+            found_legs = self._price_legs(fallback_legs_def, current_price, iv_bin_index, check_short_rule=is_credit_spread)
 
         # --- 4. Finalize and Execute the Trade ---
         # This block now runs for BOTH the ideal spread OR the fallback spread.
@@ -483,6 +489,7 @@ class PortfolioManager:
 
     def get_portfolio(self) -> pd.DataFrame:
         """Public API to get the portfolio state."""
+        print(f"DEBUG: length of portfolio now: {len(self.portfolio)}")
         return self.portfolio
 
     def open_strategy(self, action_name: str, current_price: float, iv_bin_index: int, current_step: int, days_to_expiry: float):
@@ -492,6 +499,8 @@ class PortfolioManager:
         # Route by most complex/specific keywords first to avoid misrouting
         if 'SPREAD' in action_name:
             self.open_best_available_vertical(action_name, current_price, iv_bin_index, current_step, days_to_expiry)
+        elif 'CONDOR' in action_name and 'IRON' not in action_name:
+            self._open_condor(action_name, current_price, iv_bin_index, current_step, days_to_expiry)
         elif 'FLY' in action_name and 'IRON' not in action_name:
             self._open_butterfly(action_name, current_price, iv_bin_index, current_step, days_to_expiry)
         elif 'IRON_CONDOR' in action_name:
@@ -1347,31 +1356,47 @@ class PortfolioManager:
     def _price_legs(self, legs: List[Dict], current_price: float, iv_bin_index: int, check_short_rule: bool = False) -> List[Dict] or None:
         """
         Calculates the entry premium for a list of legs.
-        MODIFIED: Can now optionally check if a new short leg's premium is above a minimum threshold.
-        If the check is enabled and fails, the function returns None.
+        MODIFIED: Now with extensive debugging prints.
         """
+        # <<< --- DEBUG PRINT 1: Entry Point --- >>>
+        #print(f"\n[DEBUG] --- Entering _price_legs ---")
+        #print(f"[DEBUG] check_short_rule = {check_short_rule}")
+        #print(f"[DEBUG] Legs to price ({len(legs)} total):")
+        #for leg in legs:
+            #print(f"  -> {leg}")
+
         atm_price = self.market_rules_manager.get_atm_price(current_price)
-        for leg in legs:
-            offset = round((leg['strike_price'] - atm_price) / self.strike_distance)
-            vol = self.iv_calculator(offset, leg['type'])
-            greeks = self.bs_manager.get_all_greeks_and_price(current_price, leg['strike_price'], leg['days_to_expiry'], vol, leg['type'] == 'call')
+        priced_legs = []
+        for i, leg in enumerate(legs):
+            try:
+                offset = round((leg['strike_price'] - atm_price) / self.strike_distance)
+                vol = self.iv_calculator(offset, leg['type'])
+                greeks = self.bs_manager.get_all_greeks_and_price(current_price, leg['strike_price'], leg['days_to_expiry'], vol, leg['type'] == 'call')
+                
+                is_opening_a_long_position = (leg['direction'] == 'long')
+                entry_premium = self.bs_manager.get_price_with_spread(greeks['price'], is_buy=is_opening_a_long_position, bid_ask_spread_pct=self.bid_ask_spread_pct)
 
-            # First, check if the rule should be applied at all for this call.
-            if check_short_rule:
-                # If we are opening a SHORT position...
-                if leg['direction'] == 'short':
-                    # Calculate the premium we would receive (the "bid" price)
-                    premium_received = self.bs_manager.get_price_with_spread(greeks['price'], is_buy=False, bid_ask_spread_pct=self.bid_ask_spread_pct)
-                    
-                    # ...and if that premium is below the minimum threshold...
-                    if premium_received < self.close_short_leg_on_profit_threshold:
-                        # ...then this trade is illegal. Abort the entire pricing operation.
-                        return None # Signal failure
+                # <<< --- DEBUG PRINT 2: Pricing Details --- >>>
+                #print(f"[DEBUG] Leg {i+1}: {leg['direction']} {leg['type']} @ {leg['strike_price']:.2f} | Calculated Premium = {entry_premium:.4f}")
 
-            # If the rule is off or passes, assign the final entry premium.
-            leg['entry_premium'] = self.bs_manager.get_price_with_spread(greeks['price'], is_buy=(leg['direction'] == 'long'), bid_ask_spread_pct=self.bid_ask_spread_pct)
+                if check_short_rule and not is_opening_a_long_position:
+                    if entry_premium < self.close_short_leg_on_profit_threshold:
+                        # <<< --- DEBUG PRINT 3: Failure Point (Rule) --- >>>
+                        #print(f"[DEBUG] !!! RULE VIOLATION: Short leg premium {entry_premium:.4f} is below threshold {self.close_short_leg_on_profit_threshold}. Aborting.")
+                        return None
+
+                new_leg = leg.copy()
+                new_leg['entry_premium'] = entry_premium
+                priced_legs.append(new_leg)
+            except Exception as e:
+                # <<< --- DEBUG PRINT 4: Failure Point (Exception) --- >>>
+                print(f"[DEBUG] !!! EXCEPTION during pricing leg {i+1}: {e}")
+                traceback.print_exc()
+                return None
         
-        return legs
+        # <<< --- DEBUG PRINT 5: Success Point --- >>>
+        #print(f"[DEBUG] --- _price_legs successful. Returning {len(priced_legs)} legs. ---")
+        return priced_legs
 
     def _prepare_legs_for_numba(self, legs: List[Dict]) -> np.ndarray:
         """
@@ -1639,6 +1664,65 @@ class PortfolioManager:
         pnl['strategy_id'] = self.strategy_name_to_id.get(action_name, -1)
         self._execute_trades(legs, pnl)
 
+    def _open_condor(self, action_name: str, current_price: float, iv_bin_index: int, current_step: int, days_to_expiry: float):
+        """Opens a four-leg Call or Put Condor with extensive debugging."""
+        # <<< --- DEBUG PRINT 6: Entry Point --- >>>
+        #print(f"\n[DEBUG] --- Entering _open_condor ---")
+        #print(f"[DEBUG] Action: {action_name}")
+
+        if len(self.portfolio) > self.max_positions - 4:
+            print("[DEBUG] Aborting: Portfolio is too full.")
+            return
+
+        parts = action_name.split('_')
+        direction = parts[1].lower()
+        option_type = parts[2].lower()
+
+        atm_price = self.market_rules_manager.get_atm_price(current_price)
+        
+        s1 = atm_price - (2 * self.strike_distance)
+        s2 = atm_price - (1 * self.strike_distance)
+        s3 = atm_price + (1 * self.strike_distance)
+        s4 = atm_price + (2 * self.strike_distance)
+
+        # <<< --- DEBUG PRINT 7: Strike Calculation --- >>>
+        #print(f"[DEBUG] ATM: {atm_price:.2f}, Strike Distance: {self.strike_distance}")
+        #print(f"[DEBUG] Calculated Strikes: s1={s1:.2f}, s2={s2:.2f}, s3={s3:.2f}, s4={s4:.2f}")
+
+        if s1 <= 0:
+            print(f"[DEBUG] Aborting: Invalid strike price calculated (s1={s1}).")
+            return
+
+        # ... (leg definition logic is unchanged) ...
+        body_direction = 'long' if direction == 'long' else 'short'
+        wing_direction = 'short' if direction == 'long' else 'long'
+        legs_def = [
+            {'type': option_type, 'direction': wing_direction, 'strike_price': s1},
+            {'type': option_type, 'direction': body_direction, 'strike_price': s2},
+            {'type': option_type, 'direction': body_direction, 'strike_price': s3},
+            {'type': option_type, 'direction': wing_direction, 'strike_price': s4}
+        ]
+        
+        for leg in legs_def:
+            leg['entry_step'] = current_step
+            leg['days_to_expiry'] = days_to_expiry
+        
+        should_check_rule = (direction == 'short')
+        
+        #print(f"[DEBUG] Calling _price_legs with should_check_rule={should_check_rule}")
+        priced_legs = self._price_legs(legs_def, current_price, iv_bin_index, check_short_rule=should_check_rule)
+        
+        if not priced_legs:
+            # <<< --- DEBUG PRINT 8: Failure Point --- >>>
+            print("[DEBUG] !!! ABORTING _open_condor because _price_legs returned None.")
+            return
+
+        #print("[DEBUG] _open_condor proceeding to calculate PnL and execute trades.")
+        pnl_profile = self._calculate_universal_risk_profile(priced_legs, self.realized_pnl)
+        pnl_profile['strategy_id'] = self.strategy_name_to_id.get(action_name, -1)
+        self._execute_trades(priced_legs, pnl_profile)
+        #print(f"[DEBUG] --- _open_condor finished successfully. --- {len(self.portfolio)}")
+
     def _open_iron_fly(self, action_name: str, current_price: float, iv_bin_index: int, current_step: int, days_to_expiry: float):
         """
         Opens an Iron Fly with a tiered, dynamic search for the optimal wing width.
@@ -1722,7 +1806,8 @@ class PortfolioManager:
 
     def _find_best_available_spread(
         self, option_type: str, direction_name: str,
-        current_price: float, iv_bin_index: int, days_to_expiry: float
+        current_price: float, iv_bin_index: int, days_to_expiry: float,
+        is_credit_spread: bool
     ) -> List[Dict] or None:
         """
         A tiered solver that searches for the best possible vertical spread.
@@ -1774,7 +1859,7 @@ class PortfolioManager:
                 for leg in candidate_legs_def: leg['days_to_expiry'] = days_to_expiry
 
                 # Price the legs to get their entry premiums
-                priced_legs = self._price_legs(candidate_legs_def, current_price, iv_bin_index)
+                priced_legs = self._price_legs(candidate_legs_def, current_price, iv_bin_index, check_short_rule=is_credit_spread)
                 
                 # Calculate the net premium received or paid for the spread
                 net_premium = sum(
@@ -1850,7 +1935,11 @@ class PortfolioManager:
             ]
 
             candidate_legs = body_legs_def + wing_legs_def
-            priced_legs = self._price_legs(candidate_legs, current_price, iv_bin_index)
+            # A butterfly's direction is defined by its body. LONG direction means SHORT body legs.
+            # However, the overall position is a DEBIT trade, so we should NOT check the rule.
+            # The simplest way is to check the action_name directly.
+            should_check_rule = ('SHORT' in action_name)
+            priced_legs = self._price_legs(candidate_legs, current_price, iv_bin_index, should_check_rule)
 
             # Calculate the net debit (cost) of this candidate butterfly
             net_debit = sum(
@@ -1901,11 +1990,94 @@ class PortfolioManager:
             {'type': 'put', 'direction': 'long', 'strike_price': strike_long_put, 'entry_step': current_step, 'days_to_expiry': days_to_expiry},
             {'type': 'call', 'direction': 'long', 'strike_price': strike_long_call, 'entry_step': current_step, 'days_to_expiry': days_to_expiry}
         ]
-        priced_wings = self._price_legs(new_wing_legs_def, current_price, iv_bin_index)
+
+        # A short strangle converts to a SHORT iron condor (credit trade), so we check the rule.
+        priced_wings = self._price_legs(new_wing_legs_def, current_price, iv_bin_index, check_short_rule=True)
+        if not priced_wings: return
+
         final_condor_legs = original_legs + priced_wings
         
         pnl_profile = self._calculate_universal_risk_profile(final_condor_legs, self.realized_pnl)
+
         pnl_profile['strategy_id'] = self.strategy_name_to_id.get('OPEN_SHORT_IRON_CONDOR')
+        
+        self.portfolio = self.portfolio[self.portfolio['creation_id'] != original_creation_id].reset_index(drop=True)
+        self._execute_trades(final_condor_legs, pnl_profile)
+
+    def convert_to_condor(self, option_type: str, current_price: float, iv_bin_index: int, current_step: int):
+        """
+        Converts an existing 2-leg vertical spread into a 4-leg Condor by adding
+        a corresponding spread on the other side.
+        """
+        # --- 1. Guard Clauses: Ensure the action is legal ---
+        if len(self.portfolio) != 2: return
+        if not all(self.portfolio['type'] == option_type): return
+        if len(self.portfolio['direction'].unique()) != 2: return
+        
+        # Check if there are enough available slots for the 2 new legs.
+        if len(self.portfolio) > self.max_positions - 2:
+            return
+
+        # --- 2. Setup and Leg Identification ---
+        original_legs = self.portfolio.to_dict(orient='records')
+        original_creation_id = original_legs[0]['creation_id']
+        days_to_expiry = original_legs[0]['days_to_expiry']
+        
+        strikes = sorted([leg['strike_price'] for leg in original_legs])
+        lower_strike, upper_strike = strikes[0], strikes[1]
+        
+        lower_strike_leg_direction = next(leg['direction'] for leg in original_legs if leg['strike_price'] == lower_strike)
+        upper_strike_leg_direction = next(leg['direction'] for leg in original_legs if leg['strike_price'] == upper_strike)
+
+        is_bull_spread = False
+        if option_type == 'call':
+            if lower_strike_leg_direction == 'long' and upper_strike_leg_direction == 'short':
+                is_bull_spread = True
+        else: # put
+            if upper_strike_leg_direction == 'short' and lower_strike_leg_direction == 'long':
+                is_bull_spread = True
+        
+        # --- 3. Define the New Legs to be Added ---
+        spread_width = upper_strike - lower_strike
+        new_legs_def = []
+        if is_bull_spread:
+            new_lower_strike = upper_strike + self.strike_distance
+            new_upper_strike = new_lower_strike + spread_width
+            
+            short_dir = 'short' if option_type == 'call' else 'long'
+            long_dir = 'long' if option_type == 'call' else 'short'
+            
+            new_legs_def = [
+                {'type': option_type, 'direction': short_dir, 'strike_price': new_lower_strike},
+                {'type': option_type, 'direction': long_dir, 'strike_price': new_upper_strike}
+            ]
+        else: # is_bear_spread
+            new_upper_strike = lower_strike - self.strike_distance
+            new_lower_strike = new_upper_strike - spread_width
+            if new_lower_strike <= 0: return
+
+            long_dir = 'long' if option_type == 'call' else 'short'
+            short_dir = 'short' if option_type == 'call' else 'long'
+
+            new_legs_def = [
+                {'type': option_type, 'direction': long_dir, 'strike_price': new_lower_strike},
+                {'type': option_type, 'direction': short_dir, 'strike_price': new_upper_strike}
+            ]
+
+        # --- 4. Price, Assemble, and Execute ---
+        for leg in new_legs_def:
+            leg.update({'entry_step': current_step, 'days_to_expiry': days_to_expiry})
+        
+        priced_new_legs = self._price_legs(new_legs_def, current_price, iv_bin_index)
+        if not priced_new_legs: return
+
+        final_condor_legs = original_legs + priced_new_legs
+        
+        final_direction = 'SHORT' if original_legs[0]['strategy_max_loss'] < 0 else 'LONG'
+        final_strategy_name = f'OPEN_{final_direction}_{option_type.upper()}_CONDOR'
+        
+        pnl_profile = self._calculate_universal_risk_profile(final_condor_legs, self.realized_pnl)
+        pnl_profile['strategy_id'] = self.strategy_name_to_id.get(final_strategy_name, -1)
         
         self.portfolio = self.portfolio[self.portfolio['creation_id'] != original_creation_id].reset_index(drop=True)
         self._execute_trades(final_condor_legs, pnl_profile)
@@ -1948,7 +2120,11 @@ class PortfolioManager:
             {'type': 'put', 'direction': 'long', 'strike_price': strike_long_put, 'entry_step': current_step, 'days_to_expiry': days_to_expiry},
             {'type': 'call', 'direction': 'long', 'strike_price': strike_long_call, 'entry_step': current_step, 'days_to_expiry': days_to_expiry}
         ]
-        priced_wings = self._price_legs(new_wing_legs_def, current_price, iv_bin_index)
+
+        # A short straddle converts to a SHORT iron fly (credit trade), so we check the rule.
+        priced_wings = self._price_legs(new_wing_legs_def, current_price, iv_bin_index, check_short_rule=True)
+        if not priced_wings: return
+        
         final_fly_legs = original_legs + priced_wings
         
         # --- 5. Calculate Unified Profile and Atomically Update Portfolio ---
@@ -2041,7 +2217,6 @@ class PortfolioManager:
         self._execute_trades(legs_to_keep, pnl_profile)
 
     def debug_print_portfolio(self, current_price: float, step: int, day: int, action_taken: str):
-        return
         """
         Prints a detailed, human-readable snapshot of the current portfolio state,
         including all stored data and live calculated values for each leg.

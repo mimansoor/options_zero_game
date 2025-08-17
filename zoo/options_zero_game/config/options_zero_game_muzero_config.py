@@ -241,9 +241,21 @@ TRAINING_CURRICULUM = {
     # Goal: Learn to make a risk-defined directional bet by buying a Bear Put Spread.
     int(16e6): 'OPEN_BEAR_PUT_SPREAD',
 
+    # Goal: Learn to make a risk-defined directional bet by sellnig a call condor Spread.
+    int(17e6): 'OPEN_SHORT_CALL_CONDOR',
+
+    # Goal: Learn to make a risk-defined directional bet by sellnig a put condor Spread.
+    int(18e6): 'OPEN_SHORT_PUT_CONDOR',
+
+    # Goal: Learn to make a risk-defined directional bet by sellnig a call condor Spread.
+    int(19e6): 'OPEN_LONG_CALL_CONDOR',
+
+    # Goal: Learn to make a risk-defined directional bet by sellnig a put condor Spread.
+    int(20e6): 'OPEN_LONG_PUT_CONDOR',
+
     # === Final Phase: Integration and Agent Autonomy ===
     # Goal: Allow the agent to use any of its learned strategies to maximize reward.
-    int(17e6): 'ALL'
+    int(21e6): 'ALL'
 }
 
 # This class will "hide" the integer-keyed dictionary from EasyDict.
@@ -317,6 +329,13 @@ for direction in ['LONG', 'SHORT']:
 for direction in ['BULL', 'BEAR']:
     for opt_type in ['CALL', 'PUT']:
         internal_name = f'{direction}_{opt_type}_SPREAD'
+        strategy_name_to_id[internal_name] = next_id; next_id += 1
+        strategy_name_to_id[f'OPEN_{internal_name}'] = strategy_name_to_id[internal_name]
+
+# This ensures that Condor strategies have a valid ID.
+for direction in ['LONG', 'SHORT']:
+    for opt_type in ['CALL', 'PUT']:
+        internal_name = f'{direction}_{opt_type}_CONDOR'
         strategy_name_to_id[internal_name] = next_id; next_id += 1
         strategy_name_to_id[f'OPEN_{internal_name}'] = strategy_name_to_id[internal_name]
 

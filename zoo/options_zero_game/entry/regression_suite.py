@@ -30,6 +30,153 @@ def create_test_env(forced_opening_strategy: str):
 #                            INDIVIDUAL TEST CASES
 # ==============================================================================
 
+# ==============================================================================
+#                      CONDOR STRATEGY TEST CASES
+# ==============================================================================
+
+def test_open_short_call_condor():
+    """Tests if OPEN_SHORT_CALL_CONDOR correctly opens a 4-leg position."""
+    test_name = "test_open_short_call_condor"
+    print(f"\n--- RUNNING: {test_name} ---")
+    env = create_test_env('OPEN_SHORT_CALL_CONDOR')
+    try:
+        env.reset(seed=55)
+        env.step(env.actions_to_indices['HOLD'])
+
+        portfolio_after = env.portfolio_manager.get_portfolio()
+        stats = env.portfolio_manager.get_raw_portfolio_stats(env.price_manager.current_price, env.iv_bin_index)
+
+        assert len(portfolio_after) == 4, "Did not open 4 legs."
+        assert all(portfolio_after['type'] == 'call'), "Legs are not all calls."
+        assert portfolio_after['direction'].value_counts()['short'] == 2, "Did not open 2 short body legs."
+        assert portfolio_after['direction'].value_counts()['long'] == 2, "Did not open 2 long wing legs."
+        assert stats['max_loss'] > -env.portfolio_manager.undefined_risk_cap, "Risk is not defined."
+        assert portfolio_after.iloc[0]['strategy_id'] == env.strategy_name_to_id['OPEN_SHORT_CALL_CONDOR'], "Incorrect strategy ID."
+
+        print(f"--- PASSED: {test_name} ---")
+        return True
+    except Exception:
+        traceback.print_exc()
+        print(f"--- FAILED: {test_name} ---")
+        return False
+    finally:
+        env.close()
+
+def test_open_long_call_condor():
+    """Tests if OPEN_LONG_CALL_CONDOR correctly opens a 4-leg position."""
+    test_name = "test_open_long_call_condor"
+    print(f"\n--- RUNNING: {test_name} ---")
+    env = create_test_env('OPEN_LONG_CALL_CONDOR')
+    try:
+        env.reset(seed=56)
+        env.step(env.actions_to_indices['HOLD'])
+
+        portfolio_after = env.portfolio_manager.get_portfolio()
+        assert len(portfolio_after) == 4, f"Did not open {len(portfolio_after)} legs."
+        stats = env.portfolio_manager.get_raw_portfolio_stats(env.price_manager.current_price, env.iv_bin_index)
+
+        assert all(portfolio_after['type'] == 'call'), "Legs are not all puts."
+        assert portfolio_after['direction'].value_counts()['long'] == 2, "Did not open 2 long body legs."
+        assert portfolio_after['direction'].value_counts()['short'] == 2, "Did not open 2 short wing legs."
+        assert stats['max_loss'] > -env.portfolio_manager.undefined_risk_cap, "Risk is not defined."
+        assert portfolio_after.iloc[0]['strategy_id'] == env.strategy_name_to_id['OPEN_LONG_CALL_CONDOR'], "Incorrect strategy ID."
+
+        print(f"--- PASSED: {test_name} ---")
+        return True
+    except Exception:
+        traceback.print_exc()
+        print(f"--- FAILED: {test_name} ---")
+        return False
+    finally:
+        env.close()
+
+def test_open_long_put_condor():
+    """Tests if OPEN_LONG_PUT_CONDOR correctly opens a 4-leg position."""
+    test_name = "test_open_long_put_condor"
+    print(f"\n--- RUNNING: {test_name} ---")
+    env = create_test_env('OPEN_LONG_PUT_CONDOR')
+    try:
+        env.reset(seed=56)
+        pm = env.portfolio_manager
+        env.step(env.actions_to_indices['HOLD'])
+
+        portfolio_after = pm.portfolio
+        assert len(portfolio_after) == 4, f"Did not open {len(portfolio_after)} legs."
+        stats = env.portfolio_manager.get_raw_portfolio_stats(env.price_manager.current_price, env.iv_bin_index)
+
+        assert all(portfolio_after['type'] == 'put'), "Legs are not all puts."
+        assert portfolio_after['direction'].value_counts()['long'] == 2, "Did not open 2 long body legs."
+        assert portfolio_after['direction'].value_counts()['short'] == 2, "Did not open 2 short wing legs."
+        assert stats['max_loss'] > -env.portfolio_manager.undefined_risk_cap, "Risk is not defined."
+        assert portfolio_after.iloc[0]['strategy_id'] == env.strategy_name_to_id['OPEN_LONG_PUT_CONDOR'], "Incorrect strategy ID."
+
+        print(f"--- PASSED: {test_name} ---")
+        return True
+    except Exception:
+        traceback.print_exc()
+        print(f"--- FAILED: {test_name} ---")
+        return False
+    finally:
+        env.close()
+
+def test_convert_bull_call_spread_to_condor():
+    """Tests if CONVERT_TO_CALL_CONDOR correctly expands a Bull Call Spread."""
+    test_name = "test_convert_bull_call_spread_to_condor"
+    print(f"\n--- RUNNING: {test_name} ---")
+    env = create_test_env('OPEN_BULL_CALL_SPREAD')
+    try:
+        # Step 1: Open the initial 2-leg spread
+        env.reset(seed=57)
+        env.step(env.actions_to_indices['HOLD'])
+        assert len(env.portfolio_manager.get_portfolio()) == 2, "Setup failed: Did not open a 2-leg spread."
+
+        # Step 2: Execute the conversion
+        env.step(env.actions_to_indices['CONVERT_TO_CALL_CONDOR'])
+
+        portfolio_after = env.portfolio_manager.get_portfolio()
+        assert len(portfolio_after) == 4, "Conversion failed: Expected 4 legs."
+        assert all(portfolio_after['type'] == 'call'), "Final position is not all calls."
+        # A Bull Call Spread is a debit trade. Adding a wider credit spread results in a net SHORT Condor.
+        assert portfolio_after.iloc[0]['strategy_id'] == env.strategy_name_to_id['OPEN_SHORT_CALL_CONDOR'], "Incorrect final strategy ID."
+
+        print(f"--- PASSED: {test_name} ---")
+        return True
+    except Exception:
+        traceback.print_exc()
+        print(f"--- FAILED: {test_name} ---")
+        return False
+    finally:
+        env.close()
+
+def test_convert_bear_put_spread_to_condor():
+    """Tests if CONVERT_TO_PUT_CONDOR correctly expands a Bear Put Spread."""
+    test_name = "test_convert_bear_put_spread_to_condor"
+    print(f"\n--- RUNNING: {test_name} ---")
+    env = create_test_env('OPEN_BEAR_PUT_SPREAD')
+    try:
+        # Step 1: Open the initial 2-leg spread
+        env.reset(seed=58)
+        env.step(env.actions_to_indices['HOLD'])
+        assert len(env.portfolio_manager.get_portfolio()) == 2, "Setup failed: Did not open a 2-leg spread."
+
+        # Step 2: Execute the conversion
+        env.step(env.actions_to_indices['CONVERT_TO_PUT_CONDOR'])
+
+        portfolio_after = env.portfolio_manager.get_portfolio()
+        assert len(portfolio_after) == 4, "Conversion failed: Expected 4 legs."
+        assert all(portfolio_after['type'] == 'put'), "Final position is not all puts."
+        # A Bear Put Spread is a debit trade. Adding a wider credit spread results in a net SHORT Condor.
+        assert portfolio_after.iloc[0]['strategy_id'] == env.strategy_name_to_id['OPEN_SHORT_PUT_CONDOR'], "Incorrect final strategy ID."
+
+        print(f"--- PASSED: {test_name} ---")
+        return True
+    except Exception:
+        traceback.print_exc()
+        print(f"--- FAILED: {test_name} ---")
+        return False
+    finally:
+        env.close()
+
 def test_greeks_and_risk_validation():
     test_name = "test_greeks_and_risk_validation"
     print(f"\n--- RUNNING: {test_name} ---")
@@ -793,7 +940,11 @@ if __name__ == "__main__":
         test_dte_decay_logic,
         test_no_runaway_duplication_on_transform,
         test_close_all_action,
-         test_greeks_and_risk_validation,
+        test_greeks_and_risk_validation,
+        test_open_short_call_condor,
+        test_open_long_call_condor,
+        test_convert_bull_call_spread_to_condor,
+        test_convert_bear_put_spread_to_condor,
     ]
 
     failures = []
