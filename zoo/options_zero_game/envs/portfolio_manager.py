@@ -7,46 +7,78 @@ from typing import Dict, List, Any, Tuple, Callable
 from .black_scholes_manager import BlackScholesManager, _numba_cdf, _numba_black_scholes
 from .market_rules_manager import MarketRulesManager
 
-# <<< STEP 2: CREATE THE STANDALONE, JIT-COMPILED FUNCTION >>>
-# This function lives OUTSIDE the PortfolioManager class.
+# <<< --- NEW: THE CANONICAL NUMBA P&L CALCULATOR (INNER FUNCTION) --- >>>
 @jit(nopython=True)
-def _numba_calculate_risk_profile(legs_array, realized_pnl, start_price, lot_size, strike_distance, bs_func):
+def _numba_get_pnl_for_leg(leg_data, price, at_expiry, lot_size, risk_free_rate, bid_ask_spread_pct, bs_func):
     """
-    A high-performance, Numba-JIT-compiled version of the risk profile simulation.
-    Operates only on NumPy arrays and primitive types.
+    The single, canonical, high-performance function for calculating the P&L of one
+    option leg at a specific underlying price.
     """
-    # --- 1. Simulation Setup ---
+    # Unpack the leg data from the numpy array
+    strike_price = leg_data[0]
+    entry_premium = leg_data[1]
+    is_call = leg_data[2] == 1
+    pnl_multiplier = 1.0 if leg_data[3] == 1 else -1.0
+    days_to_expiry = leg_data[5]
+
+    current_value = 0.0
+    if at_expiry:
+        # --- Expiry P&L (Intrinsic Value) ---
+        if is_call:
+            current_value = max(0.0, price - strike_price)
+        else: # Put
+            current_value = max(0.0, strike_price - price)
+    else:
+        # --- T+0 P&L (Black-Scholes) ---
+        # THE CRITICAL FIX: Convert days to annual time for Black-Scholes
+        T_annual = days_to_expiry / 365.25
+        # We can use a simplified vol for the simulation
+        vol = 0.25 
+        
+        mid_price = bs_func(price, strike_price, T_annual, risk_free_rate, vol, is_call)
+        
+        # Apply bid-ask spread to get the closing price
+        is_closing_a_short = pnl_multiplier == -1.0
+        if is_closing_a_short: # We must buy to close
+            current_value = mid_price * (1 + bid_ask_spread_pct)
+        else: # We sell to close
+            current_value = mid_price * (1 - bid_ask_spread_pct)
+
+    pnl_per_share = current_value - entry_premium
+    return pnl_per_share * pnl_multiplier * lot_size
+
+# <<< --- NEW: THE NUMBA SIMULATION ENGINE (OUTER FUNCTION) --- >>>
+@jit(nopython=True)
+def _numba_run_pnl_simulation(legs_array, realized_pnl, start_price, lot_size, risk_free_rate, bid_ask_spread_pct):
+    """
+    Runs the full 500-point P&L simulation at EXPIRATION by calling the
+    canonical per-leg P&L function.
+    """
     sim_low = start_price * 0.25
     sim_high = start_price * 2.5
     price_range = np.linspace(sim_low, sim_high, 500)
-    
-    pnl_values = np.empty(len(price_range), dtype=np.float32)
-    breakevens = [] # Numba can handle simple lists that grow
 
-    # --- 2. The Main Simulation Loop ---
-    pnl_prev = 0.0 # Will be calculated on first iteration
+    pnl_values = np.empty(len(price_range), dtype=np.float32)
+    breakevens = []
+
+    pnl_prev = 0.0
     for i in range(len(price_range)):
         price_curr = price_range[i]
         unrealized_pnl = 0.0
-        
-        # Inner loop over each leg
+
         for j in range(len(legs_array)):
             leg = legs_array[j]
-            pnl_mult = 1.0 if leg[3] == 1 else -1.0 # direction_code
-            
-            # We can't use the IV calculator directly, so we use a simplified vol proxy.
-            # A more advanced version could pass the whole IV curve as an array.
-            vol = 0.25 # A reasonable average IV for the simulation
-            
-            # Call the passed-in Black-Scholes function
-            premium = bs_func(price_curr, leg[0], leg[5], 0.0, vol, leg[2] == 1)
-            
-            leg_pnl = premium - leg[1] # current_prem - entry_prem
-            unrealized_pnl += leg_pnl * pnl_mult
-            
-        total_pnl = (unrealized_pnl * lot_size) + realized_pnl
+            # Call the inner function to get P&L for this leg at this price
+            unrealized_pnl += _numba_get_pnl_for_leg(
+                leg, price_curr, at_expiry=True, lot_size=lot_size,
+                risk_free_rate=risk_free_rate, bid_ask_spread_pct=bid_ask_spread_pct,
+                bs_func=_numba_black_scholes # Pass the BS function pointer
+            )
+
+        total_pnl = unrealized_pnl + realized_pnl
         pnl_values[i] = total_pnl
-        
+
+        # ... (breakeven calculation logic remains the same) ...
         if i > 0:
             if np.sign(total_pnl) != np.sign(pnl_prev):
                 price_prev = price_range[i-1]
@@ -54,17 +86,16 @@ def _numba_calculate_risk_profile(legs_array, realized_pnl, start_price, lot_siz
                 breakevens.append(be)
         pnl_prev = total_pnl
 
-    # --- 3. Calculate Final Metrics ---
     max_profit = np.max(pnl_values)
     max_loss = np.min(pnl_values)
-    
+
     sum_wins = np.sum(pnl_values[pnl_values > 0])
     sum_losses = np.abs(np.sum(pnl_values[pnl_values <= 0]))
-    
+
     profit_factor = 999.0
     if sum_losses > 1e-6:
         profit_factor = sum_wins / sum_losses
-    
+
     return max_profit, max_loss, profit_factor, breakevens
 
 class PortfolioManager:
@@ -470,21 +501,17 @@ class PortfolioManager:
             vec[current_pos_idx + pos_idx_map['IS_HEDGED']] = 1.0 if pos['is_hedged'] else 0.0
            
     def get_total_pnl(self, current_price: float, iv_bin_index: int) -> float:
+        """
+        Calculates the total Mark-to-Market P&L of the portfolio.
+        """
         if self.portfolio.empty:
             return self.realized_pnl
-        
-        def pnl_calculator(row):
-            is_call = row['type'] == 'call'
-            atm_price = self.market_rules_manager.get_atm_price(current_price)
-            offset = round((row['strike_price'] - atm_price) / self.strike_distance)
-            vol = self.iv_calculator(offset, row['type'])
-            greeks = self.bs_manager.get_all_greeks_and_price(current_price, row['strike_price'], row['days_to_expiry'], vol, is_call)
-            
-            current_premium = self.bs_manager.get_price_with_spread(greeks['price'], row['direction'] == 'short', self.bid_ask_spread_pct)
-            price_diff = current_premium - row['entry_premium']
-            return price_diff * self.lot_size * (1 if row['direction'] == 'long' else -1)
 
-        unrealized_pnl = self.portfolio.apply(pnl_calculator, axis=1).sum()
+        unrealized_pnl = sum(
+            self._get_t0_pnl_for_leg(leg, current_price)
+            for _, leg in self.portfolio.iterrows()
+        )
+        
         return self.realized_pnl + unrealized_pnl
 
     def get_current_equity(self, current_price: float, iv_bin_index: int) -> float:
@@ -696,6 +723,48 @@ class PortfolioManager:
         }
 
     # --- Private Methods ---
+    def _get_total_expiry_pnl_at_price(self, legs_df: pd.DataFrame, price: float) -> float:
+        """
+        Calculates the total P&L for a given DataFrame of legs at a specific price
+        AT EXPIRATION (using intrinsic value). This is a wrapper around the
+        canonical per-leg P&L function.
+        """
+        if legs_df.empty:
+            return self.realized_pnl
+
+        # Sum the P&L of each leg, ensuring we call the helper with at_expiry=True
+        unrealized_pnl = sum(
+            self._get_pnl_for_leg_at_price(leg, price, at_expiry=True)
+            for _, leg in legs_df.iterrows()
+        )
+        
+        return self.realized_pnl + unrealized_pnl
+
+    # The name is now specific, and the dead code is removed.
+    def _get_t0_pnl_for_leg(self, leg: pd.Series, price: float) -> float:
+        """
+        The single, canonical function for calculating the current Mark-to-Market (T+0)
+        P&L of one option leg using the full-fidelity Black-Scholes model.
+        """
+        is_call = leg['type'] == 'call'
+        pnl_multiplier = 1 if leg['direction'] == 'long' else -1
+
+        # This function ONLY calculates T+0 P&L
+        atm_price = self.market_rules_manager.get_atm_price(price)
+        offset = round((leg['strike_price'] - atm_price) / self.strike_distance)
+        vol = self.iv_calculator(offset, leg['type'])
+        
+        greeks = self.bs_manager.get_all_greeks_and_price(
+            price, leg['strike_price'], leg['days_to_expiry'], vol, is_call
+        )
+        
+        current_value = self.bs_manager.get_price_with_spread(
+            greeks['price'], is_buy=(leg['direction'] == 'short'), bid_ask_spread_pct=self.bid_ask_spread_pct
+        )
+
+        pnl_per_share = current_value - leg['entry_premium']
+        return pnl_per_share * pnl_multiplier * self.lot_size
+
     # --- HELPER METHOD FOR "DE-MORPHING" ACTIONS ---
     def _process_leg_closures(self, legs_to_close: pd.DataFrame, current_price: float, current_step: int):
         """A helper to correctly process P&L and receipts for a set of closing legs."""
@@ -984,16 +1053,7 @@ class PortfolioManager:
                 'rr_ratio': 0.0, 'prob_profit': 1.0 if is_profitable else 0.0
             }
 
-        # Local helper for P&L calculation (now includes realized_pnl)
-        def _get_total_pnl_at_price(price, trade_legs, realized_pnl):
-            unrealized_pnl = 0.0
-            for _, leg in trade_legs.iterrows():
-                pnl_mult = 1 if leg['direction'] == 'long' else -1
-                leg_pnl = max(0, price - leg['strike_price']) if leg['type'] == 'call' else max(0, leg['strike_price'] - price)
-                unrealized_pnl += (leg_pnl - leg['entry_premium']) * pnl_mult
-            return (unrealized_pnl * self.lot_size) + realized_pnl
-
-        # --- 2. Get Risk Profile from Universal Engine ---
+       # --- 2. Get Risk Profile from Universal Engine ---
         portfolio_legs_as_dict = self.portfolio.to_dict(orient='records')
         risk_profile = self._calculate_universal_risk_profile(portfolio_legs_as_dict, self.realized_pnl)
         
@@ -1025,13 +1085,13 @@ class PortfolioManager:
             be = breakevens[0]
             test_price = be + (self.strike_distance * 0.1) 
             
-            if _get_total_pnl_at_price(test_price, self.portfolio, self.realized_pnl) > 0:
+            if self._get_total_expiry_pnl_at_price(self.portfolio, test_price) > 0:
                 greeks = self.bs_manager.get_all_greeks_and_price(current_price, be, days_to_expiry, vol, is_call=True)
                 total_pop = _numba_cdf(greeks['d2'])
             else:
                 greeks = self.bs_manager.get_all_greeks_and_price(current_price, be, days_to_expiry, vol, is_call=False)
                 total_pop = _numba_cdf(-greeks['d2'])
-        
+       
         else: # Two or more breakevens
             boundaries = [-np.inf] + breakevens + [np.inf]
             
@@ -1041,7 +1101,7 @@ class PortfolioManager:
                 test_price = (lower_b + upper_b) / 2 if -np.inf < lower_b and np.inf > upper_b else \
                              (upper_b - self.strike_distance if lower_b == -np.inf else lower_b + self.strike_distance)
                 
-                if _get_total_pnl_at_price(test_price, self.portfolio, self.realized_pnl) > 0:
+                if self._get_total_expiry_pnl_at_price(self.portfolio, test_price) > 0:
                     greeks_upper = self.bs_manager.get_all_greeks_and_price(current_price, upper_b, days_to_expiry, vol, False) if upper_b != np.inf else None
                     prob_below_upper = _numba_cdf(-greeks_upper['d2']) if greeks_upper else 1.0
 
@@ -1308,14 +1368,14 @@ class PortfolioManager:
         # [strike, entry_premium, type_code, direction_code, creation_id, days_to_expiry]
         legs_array = self._prepare_legs_for_numba(legs)
 
-        # --- 3. Call the High-Performance JIT Function ---
-        max_profit, max_loss, profit_factor, breakevens = _numba_calculate_risk_profile(
+        # --- C. Call the High-Performance JIT Simulation Engine ---
+        max_profit, max_loss, profit_factor, breakevens = _numba_run_pnl_simulation(
             legs_array,
             realized_pnl,
             self.start_price,
             self.lot_size,
-            self.strike_distance,
-            _numba_black_scholes
+            self.bs_manager.risk_free_rate, # Pass in required BS params
+            self.bid_ask_spread_pct
         )
 
         # --- 4. Package the Results ---
