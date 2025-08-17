@@ -5,6 +5,10 @@ import gymnasium as gym
 import numpy as np
 import copy
 import traceback
+import pandas as pd
+
+# --- The Independent, Ground-Truth Validation Library ---
+from py_vollib_vectorized import price_dataframe
 
 from zoo.options_zero_game.config.options_zero_game_muzero_config import main_config
 import zoo.options_zero_game.envs.options_zero_game_env
@@ -25,6 +29,97 @@ def create_test_env(forced_opening_strategy: str):
 # ==============================================================================
 #                            INDIVIDUAL TEST CASES
 # ==============================================================================
+
+def test_greeks_and_risk_validation():
+    test_name = "test_greeks_and_risk_validation"
+    print(f"\n--- RUNNING: {test_name} ---")
+    
+    env_cfg = copy.deepcopy(main_config.env)
+    env_cfg.is_eval_mode = True
+    env_cfg.disable_opening_curriculum = True
+    env_cfg.price_source = 'garch'
+    env_cfg.market_regimes = [{'name': 'Validation_Regime','mu': 0,'omega': 0,'alpha': 0,'beta': 1,'atm_iv': 20.0,'far_otm_put_iv': 30.0,'far_otm_call_iv': 15.0}]
+    env_cfg.forced_opening_strategy_name = 'OPEN_SHORT_IRON_CONDOR'
+    env = gym.make('OptionsZeroGame-v0', cfg=env_cfg)
+
+    try:
+        env.reset(seed=1337)
+        env.iv_bin_index = 0
+        timestep = env.step(env.actions_to_indices['HOLD'])
+        portfolio_df = env.portfolio_manager.get_portfolio()
+        assert len(portfolio_df) == 4
+        current_price = env.price_manager.current_price
+        risk_free_rate = env.bs_manager.risk_free_rate
+
+        print("\n--- Validating Max Profit / Max Loss ---")
+        lot_size = env.portfolio_manager.lot_size
+        brokerage_per_leg = env.portfolio_manager.brokerage_per_leg
+        net_credit = abs(env.portfolio_manager.initial_net_premium * lot_size)
+        total_brokerage = len(portfolio_df) * brokerage_per_leg
+        theoretical_max_profit = net_credit - total_brokerage
+        call_legs = portfolio_df[portfolio_df['type'] == 'call']
+        put_legs = portfolio_df[portfolio_df['type'] == 'put']
+        call_spread_width = abs(call_legs['strike_price'].max() - call_legs['strike_price'].min())
+        put_spread_width = abs(put_legs['strike_price'].max() - put_legs['strike_price'].min())
+        max_spread_width = max(call_spread_width, put_spread_width)
+        theoretical_max_loss = (max_spread_width * lot_size) - net_credit + total_brokerage
+        portfolio_stats = env.portfolio_manager.get_raw_portfolio_stats(current_price, env.iv_bin_index)
+        assert np.isclose(portfolio_stats['max_profit'], theoretical_max_profit)
+        assert np.isclose(portfolio_stats['max_loss'], -theoretical_max_loss)
+        print("  - PASSED: Max Profit and Max Loss are correct.")
+
+        print("\n--- Validating Per-Leg and Portfolio Greeks ---")
+        validation_df = pd.DataFrame()
+        validation_df['Flag'] = ['c' if t == 'call' else 'p' for t in portfolio_df['type']]
+        validation_df['S'] = current_price
+        validation_df['K'] = portfolio_df['strike_price']
+        validation_df['t'] = portfolio_df['days_to_expiry'] / 365.25
+        validation_df['r'] = risk_free_rate
+        validation_df['sigma'] = np.array([
+            env.market_rules_manager.get_implied_volatility(
+                round((leg['strike_price'] - env.market_rules_manager.get_atm_price(current_price)) / env.strike_distance),
+                leg['type'], env.iv_bin_index
+            ) for _, leg in portfolio_df.iterrows()
+        ])
+
+        price_dataframe(validation_df, flag_col='Flag', strike_col='K', underlying_price_col='S',
+                        annualized_tte_col='t', riskfree_rate_col='r', sigma_col='sigma', 
+                        model='black_scholes', inplace=True)
+
+        for i, leg in portfolio_df.iterrows():
+            greeks_env = env.bs_manager.get_all_greeks_and_price(
+                current_price, leg['strike_price'], leg['days_to_expiry'], validation_df.loc[i, 'sigma'], leg['type'] == 'call'
+            )
+            truth_delta = validation_df.loc[i, 'delta']
+            truth_gamma = validation_df.loc[i, 'gamma']
+            truth_theta = validation_df.loc[i, 'theta']
+            truth_vega = validation_df.loc[i, 'vega']
+
+            rtol = 0.05 # 5% relative tolerance
+            assert np.isclose(greeks_env['delta'], truth_delta, rtol=rtol)
+            assert np.isclose(greeks_env['gamma'], truth_gamma, rtol=rtol)
+            assert np.isclose(greeks_env['theta'], truth_theta, rtol=rtol)
+            assert np.isclose(greeks_env['vega'], truth_vega, rtol=rtol)
+        
+        print("  - PASSED: All per-leg Greek calculations are correct.")
+        
+        print("\n--- Validating Aggregated Portfolio Greeks ---")
+        pnl_multipliers = np.array([1 if d == 'long' else -1 for d in portfolio_df['direction']])
+        truth_portfolio_delta = np.sum(validation_df['delta'].to_numpy() * pnl_multipliers * lot_size)
+        
+        # <<< --- THE FINAL FIX: Use a reasonable ABSOLUTE tolerance for the sum --- >>>
+        assert np.isclose(portfolio_stats['delta'], truth_portfolio_delta, atol=1.0)
+        
+        print(f"  - PASSED: Portfolio Delta is correct (Env: {portfolio_stats['delta']:.2f})")
+        
+        print(f"\n--- PASSED: {test_name} ---")
+        return True
+    except Exception:
+        traceback.print_exc()
+        print(f"--- FAILED: {test_name} ---")
+        return False
+    finally:
+        env.close()
 
 def test_hedge_naked_put():
     """Tests if HEDGE_NAKED_POS correctly converts a naked put into a Bull Put Spread."""
@@ -698,6 +793,7 @@ if __name__ == "__main__":
         test_dte_decay_logic,
         test_no_runaway_duplication_on_transform,
         test_close_all_action,
+         test_greeks_and_risk_validation,
     ]
 
     failures = []
