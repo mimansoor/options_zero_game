@@ -10,13 +10,23 @@ from zoo.options_zero_game.envs.utils import generate_dynamic_iv_skew_table
 # ==============================================================
 #                 Static Parameters
 # ==============================================================
-collector_env_num = 32
-n_episode = 32
-evaluator_env_num = 16
+# ==============================================================
+#                 Optimized Static Parameters
+# ==============================================================
+# Utilize the strong CPU, but avoid over-subscription. Matched to n_episode.
+collector_env_num = 20
+# Collect one episode per environment worker before sending data.
+n_episode = 20
+# Evaluation can also be parallelized, but is less critical for training speed.
+evaluator_env_num = 10
+# Kept at 256, a good balance for 8GB VRAM. Reduce to 128 if you see CUDA memory errors.
 batch_size = 256
-num_simulations = 35
-update_per_collect = 500
-replay_ratio = 0.25
+# Increased for higher quality moves. The RTX 2070 can handle this.
+num_simulations = 50
+# Significantly increased to keep the GPU busy and improve sample efficiency.
+update_per_collect = 2000
+# This results in a much healthier replay_ratio. (2000 / (20 episodes * ~40 steps)) = ~2.5
+replay_ratio = 2.5
 max_env_step = int(7e8)
 reanalyze_ratio = 0.
 
@@ -366,7 +376,7 @@ options_zero_game_muzero_config = dict(
         threshold_training_steps_for_final_temperature=int(1e5),
         piecewise_decay_lr_scheduler=False,
         optim_type='Adam',
-        learning_rate=3e-3,
+        learning_rate=3e-4,  # This is 0.0003
         weight_decay=1e-4,
         num_simulations=num_simulations,
         reanalyze_ratio=reanalyze_ratio,
