@@ -1145,7 +1145,6 @@ class PortfolioManager:
 
     def hedge_delta_with_atm_option(self, current_price: float, iv_bin_index: int, current_step: int, days_to_expiry: float):
         if len(self.portfolio) >= self.max_positions: return
-        print(f"DEBUG: came in hedge_delta_with_atm_option")
 
         stats = self.get_raw_portfolio_stats(current_price, iv_bin_index)
         current_delta = stats['delta']
