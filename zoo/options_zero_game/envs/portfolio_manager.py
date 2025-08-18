@@ -1905,23 +1905,24 @@ class PortfolioManager:
         """
         Opens a three-strike butterfly with a dynamic width. It searches for the
         wing width that results in a net debit (cost) closest to a predefined
-        target cost.
+        target cost. This version is hardened against pricing failures.
         """
         if len(self.portfolio) > self.max_positions - 4:
             return
 
         parts = action_name.split('_')
-        direction, option_type = parts[1], parts[2].lower()
+        direction, option_type = parts[1].lower(), parts[2].lower()
 
         # --- 1. Setup the Search ---
         atm_price = self.market_rules_manager.get_atm_price(current_price)
-        # The target cost in dollars
         target_cost = atm_price * self.butterfly_target_cost_pct
 
-        wing_direction = 'long' if direction == 'LONG' else 'short'
-        body_direction = 'short' if direction == 'LONG' else 'long'
+        wing_direction = 'long' if direction == 'long' else 'short'
+        body_direction = 'short' if direction == 'long' else 'long'
+        
+        # A SHORT butterfly is a CREDIT trade, so we must check the short premium rule.
+        should_check_rule = (direction == 'short')
 
-        # The body of the butterfly is always at the money
         body_legs_def = [
             {'type': option_type, 'direction': body_direction, 'strike_price': atm_price, 'days_to_expiry': days_to_expiry},
             {'type': option_type, 'direction': body_direction, 'strike_price': atm_price, 'days_to_expiry': days_to_expiry}
@@ -1930,8 +1931,8 @@ class PortfolioManager:
         best_legs_found = None
         smallest_cost_diff = float('inf')
 
-        # --- 2. Search Loop: Widen the wings until we find the best fit ---
-        max_search_width = 20 # Search up to 20 strikes away for the wings
+        # --- 2. Search Loop ---
+        max_search_width = 20
         for i in range(1, max_search_width + 1):
             wing_width = i * self.strike_distance
             strike_lower = atm_price - wing_width
@@ -1939,30 +1940,34 @@ class PortfolioManager:
 
             if strike_lower <= 0: continue
 
-            # Define the candidate wings
             wing_legs_def = [
                 {'type': option_type, 'direction': wing_direction, 'strike_price': strike_lower, 'days_to_expiry': days_to_expiry},
                 {'type': option_type, 'direction': wing_direction, 'strike_price': strike_upper, 'days_to_expiry': days_to_expiry}
             ]
 
-            candidate_legs = body_legs_def + wing_legs_def
-            # A butterfly's direction is defined by its body. LONG direction means SHORT body legs.
-            # However, the overall position is a DEBIT trade, so we should NOT check the rule.
-            # The simplest way is to check the action_name directly.
-            should_check_rule = ('SHORT' in action_name)
-            priced_legs = self._price_legs(candidate_legs, current_price, iv_bin_index, should_check_rule)
+            candidate_legs_def = body_legs_def + wing_legs_def
+            
+            # <<< --- THE DEFINITIVE FIX IS HERE --- >>>
+            priced_legs = self._price_legs(candidate_legs_def, current_price, iv_bin_index, check_short_rule=should_check_rule)
+            
+            # CRITICAL: If pricing failed for this candidate, skip to the next width.
+            if not priced_legs:
+                continue
 
-            # Calculate the net debit (cost) of this candidate butterfly
-            net_debit = sum(
+            net_premium = sum(
                 leg['entry_premium'] * (1 if leg['direction'] == 'long' else -1)
                 for leg in priced_legs
             )
 
-            # We only care about debit trades (this is a long butterfly)
-            if net_debit <= 0: continue
+            # For a LONG butterfly (debit trade), we only care about positive net premiums (costs)
+            if direction == 'long' and net_premium <= 0:
+                continue
+            
+            # For a SHORT butterfly (credit trade), we only care about negative net premiums (credits)
+            if direction == 'short' and net_premium >= 0:
+                continue
 
-            # Check if this width is a better fit than our previous best
-            cost_diff = abs(net_debit - target_cost)
+            cost_diff = abs(abs(net_premium) - target_cost)
             if cost_diff < smallest_cost_diff:
                 smallest_cost_diff = cost_diff
                 best_legs_found = priced_legs
@@ -1976,8 +1981,8 @@ class PortfolioManager:
             pnl_profile['strategy_id'] = self.strategy_name_to_id.get(action_name, -1)
             self._execute_trades(best_legs_found, pnl_profile)
         else:
+            # This is the debug print you saw. It is now correctly the final step before exiting.
             print(f"DEBUG: no suitable legs for butterfly were found for {action_name}")
-        # If no suitable legs were found, do nothing.
 
     def convert_to_iron_condor(self, current_price: float, iv_bin_index: int, current_step: int):
         """Adds long wings to a short strangle using the atomic transformation pattern."""
