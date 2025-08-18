@@ -352,7 +352,7 @@ class OptionsZeroGameEnv(gym.Env):
         # 1. Get the state before any changes.
         equity_before = self.portfolio_manager.get_current_equity(self.price_manager.current_price, self.iv_bin_index)
 
-        # --- MODIFIED: The new 3-way augmentation logic on Step 0 ---
+        # --- MODIFIED (Corrected): The new 3-way augmentation logic on Step 0 ---
         action_name = self.indices_to_actions[action]
         original_action_name = action_name # Keep a copy for the log
 
@@ -367,15 +367,21 @@ class OptionsZeroGameEnv(gym.Env):
             
             if mirrored_action_name:
                 mirrored_action_index = self.actions_to_indices.get(mirrored_action_name)
-                # Only use the mirror if the resulting action is valid
-                if mirrored_action_index is not None:
+                
+                # First, get the true, up-to-the-moment action mask.
+                true_action_mask = self._get_true_action_mask()
+
+                # Only use the mirror if the resulting action is both valid AND LEGAL.
+                if mirrored_action_index is not None and true_action_mask[mirrored_action_index] == 1:
                     action = mirrored_action_index # Override the agent's choice
-       
+                # If the mirror is illegal, we do nothing and proceed with the agent's original action.
+
         # 2. Execute the agent's action on the current state.
         self._take_action_on_state(action)
         
         # 3. Advance the market and get the final outcome.
-        return self._advance_market_and_get_outcome(equity_before, action_name)
+        # We still log the original action name so we know what the agent intended.
+        return self._advance_market_and_get_outcome(equity_before, original_action_name)
 
     def _get_dynamic_iv(self, offset: int, option_type: str) -> float:
         """
