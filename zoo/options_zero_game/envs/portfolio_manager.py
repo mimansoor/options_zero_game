@@ -501,7 +501,6 @@ class PortfolioManager:
 
     def get_portfolio(self) -> pd.DataFrame:
         """Public API to get the portfolio state."""
-        print(f"DEBUG: length of portfolio now: {len(self.portfolio)}")
         return self.portfolio
 
     def open_strategy(self, action_name: str, current_price: float, iv_bin_index: int, current_step: int, days_to_expiry: float):
