@@ -110,6 +110,7 @@ class PortfolioManager:
                  iv_calculator_func: Callable,
                  strategy_name_to_id: Dict):
         # Config
+        self.cfg = cfg
         self.initial_cash = cfg['initial_cash']
         self.lot_size = cfg['lot_size']
         self.bid_ask_spread_pct = cfg['bid_ask_spread_pct']
@@ -245,6 +246,33 @@ class PortfolioManager:
         self.lowest_realized_loss = 0.0
 
     # --- Public Methods (called by the main environment) ---
+    def get_raw_greeks_for_legs(self, legs: List[Dict], current_price: float, iv_bin_index: int) -> Dict:
+        """
+        A helper method for testing that calculates the raw, un-normalized, aggregated
+        Greeks for an arbitrary list of leg dictionaries under specific market conditions.
+        """
+        total_delta, total_gamma, total_theta, total_vega = 0.0, 0.0, 0.0, 0.0
+        if not legs:
+            return {'delta': 0.0, 'gamma': 0.0, 'theta': 0.0, 'vega': 0.0}
+
+        atm_price = self.market_rules_manager.get_atm_price(current_price)
+        for pos in legs:
+            direction_multiplier = 1 if pos['direction'] == 'long' else -1
+            is_call = pos['type'] == 'call'
+            offset = round((pos['strike_price'] - atm_price) / self.strike_distance)
+            vol = self.iv_calculator(offset, pos['type'])
+            
+            greeks = self.bs_manager.get_all_greeks_and_price(
+                current_price, pos['strike_price'], pos['days_to_expiry'], vol, is_call
+            )
+            
+            total_delta += greeks['delta'] * self.lot_size * direction_multiplier
+            total_gamma += greeks['gamma'] * (self.lot_size**2 * current_price**2 / 100) * direction_multiplier
+            total_theta += greeks['theta'] * self.lot_size * direction_multiplier
+            total_vega += greeks['vega'] * self.lot_size * direction_multiplier
+            
+        return {'delta': total_delta, 'gamma': total_gamma, 'theta': total_theta, 'vega': total_vega}
+
     def add_hedge(self, position_index: int, current_price: float, iv_bin_index: int, current_step: int):
         """
         Adds a protective leg to a specified un-hedged leg, creating a new
@@ -471,8 +499,10 @@ class PortfolioManager:
         """Routes any 'OPEN_' action to the correct specialized private method."""
         if len(self.portfolio) >= self.max_positions: return
 
+        disable_solver = self.cfg.get('disable_spread_solver', False)
+
         # Route by most complex/specific keywords first to avoid misrouting
-        if 'SPREAD' in action_name:
+        if 'SPREAD' in action_name and not disable_solver:
             self.open_best_available_vertical(action_name, current_price, iv_bin_index, current_step, days_to_expiry)
         elif 'CONDOR' in action_name and 'IRON' not in action_name:
             self._open_condor(action_name, current_price, iv_bin_index, current_step, days_to_expiry)
@@ -1113,6 +1143,42 @@ class PortfolioManager:
                 kind='mergesort'
             ).reset_index(drop=True)
 
+    def hedge_delta_with_atm_option(self, current_price: float, iv_bin_index: int, current_step: int, days_to_expiry: float):
+        if len(self.portfolio) >= self.max_positions: return
+        print(f"DEBUG: came in hedge_delta_with_atm_option")
+
+        stats = self.get_raw_portfolio_stats(current_price, iv_bin_index)
+        current_delta = stats['delta']
+
+        hedge_leg_def = None
+        atm_strike = self.market_rules_manager.get_atm_price(current_price)
+        
+        if current_delta < -1:
+            hedge_leg_def = [{'type': 'call', 'direction': 'long', 'strike_price': atm_strike}]
+        elif current_delta > 1:
+            hedge_leg_def = [{'type': 'put', 'direction': 'long', 'strike_price': atm_strike}]
+        else: return
+
+        for leg in hedge_leg_def:
+            leg.update({'entry_step': current_step, 'days_to_expiry': days_to_expiry})
+        
+        priced_legs = self._price_legs(hedge_leg_def, current_price, iv_bin_index)
+        if not priced_legs: return
+
+        pnl_profile = self._calculate_universal_risk_profile(priced_legs, self.realized_pnl)
+        
+        direction_str = priced_legs[0]['direction'].upper()
+        type_str = priced_legs[0]['type'].upper()
+        # The ID for a naked leg strategy is its simple internal name (e.g., "LONG_CALL")
+        internal_strategy_name = f"{direction_str}_{type_str}"
+        
+        strategy_id = self.strategy_name_to_id.get(internal_strategy_name)
+        
+        assert strategy_id is not None, f"FATAL: Could not find strategy ID for hedge key: '{internal_strategy_name}'"
+        pnl_profile['strategy_id'] = strategy_id
+        
+        self._execute_trades(priced_legs, pnl_profile)
+     
     def render(self, current_price: float, current_step: int, iv_bin_index: int, steps_per_day: int):
         total_pnl = self.get_total_pnl(current_price, iv_bin_index)
         day = current_step // steps_per_day + 1

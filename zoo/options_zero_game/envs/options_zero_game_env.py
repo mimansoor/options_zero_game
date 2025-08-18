@@ -9,6 +9,7 @@ import time
 
 import gymnasium as gym
 import numpy as np
+import pandas as pd
 from easydict import EasyDict
 from gymnasium import spaces
 from gymnasium.utils import seeding
@@ -89,6 +90,8 @@ class OptionsZeroGameEnv(gym.Env):
         use_stop_loss=True,
         forced_opening_strategy_name=None,
         disable_opening_curriculum=True,
+
+        disable_spread_solver=False,
         
         # Agent/Framework Config
         ignore_legal_actions=True,
@@ -115,6 +118,8 @@ class OptionsZeroGameEnv(gym.Env):
         self.is_eval_mode = self._cfg.get('is_eval_mode', False)
 
         self.np_random, _ = seeding.np_random(None)
+
+        self.disable_spread_solver = self._cfg.get('disable_spread_solver', False)
 
         # This dictionary is passed in the config and is needed by both the
         # environment (for the action mask) and the portfolio manager.
@@ -449,6 +454,41 @@ class OptionsZeroGameEnv(gym.Env):
             )
         elif final_action_name.startswith('CONVERT_TO_'):
             self._route_convert_action(final_action_name)
+        # <<< --- NEW: Routing for Advanced Delta Management --- >>>
+        elif final_action_name == 'HEDGE_DELTA_WITH_ATM_OPTION':
+            current_day = self.current_step // self._cfg.steps_per_day
+            days_to_expiry_float = (self.episode_time_to_expiry - current_day) * (self.TOTAL_DAYS_IN_WEEK / self.TRADING_DAYS_IN_WEEK)
+            self.portfolio_manager.hedge_delta_with_atm_option(self.price_manager.current_price, self.iv_bin_index, self.current_step, days_to_expiry_float)
+        
+        elif 'DELTA_BY_SHIFTING_LEG' in final_action_name:
+            parts = final_action_name.split('_')
+            change_direction = 'increase' if parts[0] == 'INCREASE' else 'decrease'
+            leg_index = int(parts[-1])
+            
+            if not (0 <= leg_index < len(self.portfolio_manager.get_portfolio())): return
+            leg = self.portfolio_manager.get_portfolio().iloc[leg_index]
+            
+            leg_type = leg['type']
+            leg_dir = leg['direction']
+            shift_dir = ""
+
+            # --- THE FINAL, VERIFIABLY CORRECT LOGIC ---
+            # This logic is verbose but explicit and directly implements the rules of option greeks.
+
+            if change_direction == 'increase':
+                if leg_type == 'call' and leg_dir == 'long': shift_dir = 'DOWN'
+                elif leg_type == 'call' and leg_dir == 'short': shift_dir = 'UP'
+                elif leg_type == 'put' and leg_dir == 'long': shift_dir = 'UP'
+                elif leg_type == 'put' and leg_dir == 'short': shift_dir = 'UP'
+            else: # 'decrease'
+                if leg_type == 'call' and leg_dir == 'long': shift_dir = 'UP'
+                elif leg_type == 'call' and leg_dir == 'short': shift_dir = 'DOWN'
+                elif leg_type == 'put' and leg_dir == 'long': shift_dir = 'DOWN'
+                elif leg_type == 'put' and leg_dir == 'short': shift_dir = 'DOWN'
+            
+            if shift_dir:
+                resolved_action_name = f"SHIFT_{shift_dir}_POS_{leg_index}"
+                self.portfolio_manager.shift_position(resolved_action_name, self.price_manager.current_price, self.iv_bin_index, self.current_step)
 
         # 4. Sort the portfolio and take the crucial snapshot.
         self.portfolio_manager.sort_portfolio()
@@ -906,6 +946,9 @@ class OptionsZeroGameEnv(gym.Env):
                 for d in ['LONG', 'SHORT']:
                     actions[f'OPEN_{d}_{t}_FLY_{w}'] = i; i+=1
 
+        # <<< --- NEW PORTFOLIO-LEVEL HEDGE ACTION --- >>>
+        actions['HEDGE_DELTA_WITH_ATM_OPTION'] = i; i+=1
+
         for j in range(self._cfg.max_positions):
             actions[f'CLOSE_POSITION_{j}'] = i; i+=1
 
@@ -920,6 +963,11 @@ class OptionsZeroGameEnv(gym.Env):
         # New actions to hedge an existing naked position.
         for j in range(self._cfg.max_positions):
             actions[f'HEDGE_NAKED_POS_{j}'] = i; i+=1
+
+        # <<< --- NEW PER-LEG DELTA SHIFT ACTIONS --- >>>
+        for j in range(self._cfg.max_positions):
+            actions[f'INCREASE_DELTA_BY_SHIFTING_LEG_{j}'] = i; i+=1
+            actions[f'DECREASE_DELTA_BY_SHIFTING_LEG_{j}'] = i; i+=1
 
         actions['CLOSE_ALL'] = i
         return actions
@@ -994,6 +1042,14 @@ class OptionsZeroGameEnv(gym.Env):
             if original_pos['strike_price'] != atm_price:
                 self._set_shift_to_atm_if_no_conflict(action_mask, i, original_pos, atm_price)
 
+            # <<< --- NEW: Legality for Delta Shifting Actions --- >>>
+            # Check if increasing delta is possible for this leg
+            if self._is_delta_shift_possible(original_pos, 'increase'):
+                self._set_if_exists(action_mask, f'INCREASE_DELTA_BY_SHIFTING_LEG_{i}')
+            # Check if decreasing delta is possible for this leg
+            if self._is_delta_shift_possible(original_pos, 'decrease'):
+                self._set_if_exists(action_mask, f'DECREASE_DELTA_BY_SHIFTING_LEG_{i}')
+
         # --- 3. Whole-Portfolio Transformation Actions ---
         if not portfolio_df.empty:
             current_strategy_id = portfolio_df.iloc[0]['strategy_id']
@@ -1054,7 +1110,38 @@ class OptionsZeroGameEnv(gym.Env):
                 else: # put
                     self._set_if_exists(action_mask, 'CONVERT_TO_PUT_CONDOR')
 
+        # <<< --- NEW: Legality for HEDGE_DELTA action --- >>>
+        # Legal if delta is non-neutral AND there is an empty slot for the new leg
+        # --- 4. Portfolio-Level Delta Management ---
+        greeks = self.portfolio_manager.get_portfolio_greeks(self.price_manager.current_price, self.iv_bin_index)
+        if abs(greeks['delta_norm']) > self.delta_neutral_threshold and len(portfolio_df) < self._cfg.max_positions:
+            self._set_if_exists(action_mask, 'HEDGE_DELTA_WITH_ATM_OPTION')
+
         return action_mask
+
+    # <<< --- NEW HELPER FUNCTION for the action mask --- >>>
+    def _is_delta_shift_possible(self, leg_data: pd.Series, direction: str) -> bool:
+        """
+        Determines if a leg can be shifted to achieve a desired delta change.
+        """
+        leg_type = leg_data['type']
+        leg_dir = leg_data['direction']
+        
+        if direction == 'increase': # To increase delta, you want a more positive (or less negative) value
+            # Move towards ITM for longs, away from ITM for shorts
+            if (leg_type == 'call' and leg_dir == 'long') or (leg_type == 'put' and leg_dir == 'short'):
+                return True # SHIFT_DOWN is possible
+            elif (leg_type == 'put' and leg_dir == 'long') or (leg_type == 'call' and leg_dir == 'short'):
+                return True # SHIFT_UP is possible
+        
+        elif direction == 'decrease': # To decrease delta, you want a more negative (or less positive) value
+            # Move away from ITM for longs, towards ITM for shorts
+            if (leg_type == 'call' and leg_dir == 'long') or (leg_type == 'put' and leg_dir == 'short'):
+                return True # SHIFT_UP is possible
+            elif (leg_type == 'put' and leg_dir == 'long') or (leg_type == 'call' and leg_dir == 'short'):
+                return True # SHIFT_DOWN is possible
+        
+        return False
 
     def _set_shift_if_no_conflict(self, action_mask, i, original_pos, direction):
         """Set SHIFT_UP or SHIFT_DOWN if no strike conflict."""

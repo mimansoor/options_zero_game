@@ -16,19 +16,174 @@ import zoo.options_zero_game.envs.options_zero_game_env
 # ==============================================================================
 #                            TEST HELPER FUNCTIONS
 # ==============================================================================
-
 def create_test_env(forced_opening_strategy: str):
     """A helper function to create a clean environment for a specific test case."""
     env_cfg = copy.deepcopy(main_config.env)
     env_cfg.is_eval_mode = True
     env_cfg.disable_opening_curriculum = True
     env_cfg.forced_opening_strategy_name = forced_opening_strategy
-    env_cfg.forced_historical_symbol = 'SPY' # Use a fixed, reliable symbol
+    env_cfg.forced_historical_symbol = 'SPY'
+    
+    # <<< --- THE FIX --- >>>
+    # For single-leg tests, disable the complex vertical spread solver 
+    # to ensure the EXACT naked leg we ask for is opened.
+    if 'SPREAD' not in forced_opening_strategy:
+        env_cfg.disable_spread_solver = True # We will need to add this new config parameter
+
     return gym.make('OptionsZeroGame-v0', cfg=env_cfg)
 
 # ==============================================================================
 #                            INDIVIDUAL TEST CASES
 # ==============================================================================
+
+# ==============================================================================
+#                 ADVANCED DELTA MANAGEMENT TEST CASES
+# ==============================================================================
+
+def test_hedge_delta_with_atm_option():
+    """
+    Tests if HEDGE_DELTA adds a new leg that correctly reduces net delta.
+    This version dynamically waits for the action to become legal.
+    """
+    test_name = "test_hedge_delta_with_atm_option"
+    print(f"\n--- RUNNING: {test_name} ---")
+    env = create_test_env('OPEN_SHORT_CALL_ATM-2')
+    try:
+        # Step 1: Open the initial position
+        env.reset(seed=59)
+        timestep = env.step(env.actions_to_indices['HOLD'])
+        assert len(env.portfolio_manager.get_portfolio()) == 1, "Setup failed: Did not open initial leg."
+
+        # <<< --- THE NEW DYNAMIC WAITING LOOP --- >>>
+        max_wait_steps = 50  # Safety break to prevent infinite loops
+        hedge_action_index = env.actions_to_indices['HEDGE_DELTA_WITH_ATM_OPTION']
+        
+        print("[TEST_DEBUG] Waiting for HEDGE_DELTA action to become legal...")
+        for i in range(max_wait_steps):
+            action_mask = timestep.obs['action_mask']
+            
+            # Check if the hedge action is now legal
+            if action_mask[hedge_action_index] == 1:
+                print(f"[TEST_DEBUG] Hedge action became legal after {i+1} market steps.")
+                break  # Exit the loop, we are ready to test
+            
+            # If not legal, advance the market one more step and get the new state
+            timestep = env.step(env.actions_to_indices['HOLD'])
+        else:
+            # This 'else' block runs only if the 'for' loop completes without a 'break'.
+            # This means the action never became legal.
+            stats = env.portfolio_manager.get_raw_portfolio_stats(env.price_manager.current_price, env.iv_bin_index)
+            assert False, f"Hedge action did not become legal within {max_wait_steps} steps. Final delta_norm: {stats['delta'] / (4*75):.4f}"
+
+        # Step 2: Now that the action is legal, record the "before" state
+        portfolio_before = env.portfolio_manager.get_portfolio().to_dict('records')
+        
+        # Step 3: Execute the hedge action
+        env.step(hedge_action_index)
+        
+        # --- Assertions ---
+        portfolio_after = env.portfolio_manager.get_portfolio()
+        assert len(portfolio_after) == 2, f"Hedge failed: Expected 2 total legs, but found {len(portfolio_after)}."
+        
+        assert portfolio_after['direction'].value_counts()['long'] == 1, "Hedge failed: Did not add a long leg."
+        
+        # Apples-to-apples delta comparison
+        current_price = env.price_manager.current_price
+        iv_bin_index = env.iv_bin_index
+        stats_after = env.portfolio_manager.get_raw_portfolio_stats(current_price, iv_bin_index)
+        delta_after = stats_after['delta']
+        
+        hypothetical_stats_before = env.portfolio_manager.get_raw_greeks_for_legs(portfolio_before, current_price, iv_bin_index)
+        hypothetical_delta_before = hypothetical_stats_before['delta']
+        
+        assert abs(delta_after) < abs(hypothetical_delta_before), f"Hedge failed: Delta did not move towards zero. Before: {hypothetical_delta_before:.2f}, After: {delta_after:.2f}"
+
+        print(f"--- PASSED: {test_name} ---")
+        return True
+    except Exception:
+        traceback.print_exc()
+        print(f"--- FAILED: {test_name} ---")
+        return False
+    finally:
+        env.close()
+
+def test_increase_delta_by_shifting_leg():
+    """Tests if INCREASE_DELTA_BY_SHIFTING_LEG correctly resolves and has the right effect."""
+    test_name = "test_increase_delta_by_shifting_leg"
+    print(f"\n--- RUNNING: {test_name} ---")
+    env = create_test_env('OPEN_SHORT_PUT_ATM-2')
+    try:
+        env.reset(seed=60)
+        env.step(env.actions_to_indices['HOLD'])
+        portfolio_before = env.portfolio_manager.get_portfolio().to_dict('records')
+        original_strike = portfolio_before[0]['strike_price']
+        
+        action_to_take = env.actions_to_indices['INCREASE_DELTA_BY_SHIFTING_LEG_0']
+        env.step(action_to_take)
+        
+        portfolio_after = env.portfolio_manager.get_portfolio()
+        assert len(portfolio_after) == 1, "Shift failed: Number of legs changed."
+        assert portfolio_after.iloc[0]['strike_price'] > original_strike, "Shift failed: Strike did not move up."
+
+        # --- Apples-to-Apples Comparison ---
+        current_price = env.price_manager.current_price
+        iv_bin_index = env.iv_bin_index
+        
+        stats_after = env.portfolio_manager.get_raw_portfolio_stats(current_price, iv_bin_index)
+        delta_after = stats_after['delta']
+        
+        hypothetical_stats_before = env.portfolio_manager.get_raw_greeks_for_legs(portfolio_before, current_price, iv_bin_index)
+        hypothetical_delta_before = hypothetical_stats_before['delta']
+        
+        assert delta_after > hypothetical_delta_before, f"Shift failed: Delta did not increase. Before: {hypothetical_delta_before:.2f}, After: {delta_after:.2f}"
+
+        print(f"--- PASSED: {test_name} ---")
+        return True
+    except Exception:
+        traceback.print_exc()
+        print(f"--- FAILED: {test_name} ---")
+        return False
+    finally:
+        env.close()
+
+def test_decrease_delta_by_shifting_leg():
+    """Tests if DECREASE_DELTA_BY_SHIFTING_LEG correctly resolves and has the right effect."""
+    test_name = "test_decrease_delta_by_shifting_leg"
+    print(f"\n--- RUNNING: {test_name} ---")
+    env = create_test_env('OPEN_SHORT_PUT_ATM-2')
+    try:
+        env.reset(seed=61)
+        env.step(env.actions_to_indices['HOLD'])
+        portfolio_before = env.portfolio_manager.get_portfolio().to_dict('records')
+        original_strike = portfolio_before[0]['strike_price']
+        
+        action_to_take = env.actions_to_indices['DECREASE_DELTA_BY_SHIFTING_LEG_0']
+        env.step(action_to_take)
+        
+        portfolio_after = env.portfolio_manager.get_portfolio()
+        assert len(portfolio_after) == 1, "Shift failed: Number of legs changed."
+        assert portfolio_after.iloc[0]['strike_price'] < original_strike, "Shift failed: Strike did not move down."
+
+        # --- Apples-to-Apples Comparison ---
+        current_price = env.price_manager.current_price
+        iv_bin_index = env.iv_bin_index
+        
+        stats_after = env.portfolio_manager.get_raw_portfolio_stats(current_price, iv_bin_index)
+        delta_after = stats_after['delta']
+        
+        hypothetical_stats_before = env.portfolio_manager.get_raw_greeks_for_legs(portfolio_before, current_price, iv_bin_index)
+        hypothetical_delta_before = hypothetical_stats_before['delta']
+        
+        assert delta_after < hypothetical_delta_before, f"Shift failed: Delta did not decrease. Before: {hypothetical_delta_before:.2f}, After: {delta_after:.2f}"
+
+        print(f"--- PASSED: {test_name} ---")
+        return True
+    except Exception:
+        traceback.print_exc()
+        print(f"--- FAILED: {test_name} ---")
+        return False
+    finally:
+        env.close()
 
 # ==============================================================================
 #                      CONDOR STRATEGY TEST CASES
@@ -945,6 +1100,9 @@ if __name__ == "__main__":
         test_open_long_call_condor,
         test_convert_bull_call_spread_to_condor,
         test_convert_bear_put_spread_to_condor,
+        test_hedge_delta_with_atm_option,
+        test_increase_delta_by_shifting_leg,
+        test_decrease_delta_by_shifting_leg,
     ]
 
     failures = []
