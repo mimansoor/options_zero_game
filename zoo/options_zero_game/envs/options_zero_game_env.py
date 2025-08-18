@@ -443,10 +443,6 @@ class OptionsZeroGameEnv(gym.Env):
         elif final_action_name.startswith('SHIFT_'):
             if 'ATM' in final_action_name: self.portfolio_manager.shift_to_atm(final_action_name, self.price_manager.current_price, self.iv_bin_index, self.current_step)
             else: self.portfolio_manager.shift_position(final_action_name, self.price_manager.current_price, self.iv_bin_index, self.current_step)
-        elif final_action_name == 'ADJUST_TO_DELTA_NEUTRAL':
-            self.portfolio_manager.adjust_to_delta_neutral(
-                self.price_manager.current_price, self.iv_bin_index, self.current_step
-            )
         elif final_action_name.startswith('HEDGE_NAKED_POS_'):
             self.portfolio_manager.add_hedge(int(final_action_name.split('_')[-1]),
                 self.price_manager.current_price, self.iv_bin_index, self.current_step
@@ -889,8 +885,6 @@ class OptionsZeroGameEnv(gym.Env):
         actions['CONVERT_TO_BULL_PUT_SPREAD'] = i; i+=1
         actions['CONVERT_TO_BEAR_PUT_SPREAD'] = i; i+=1
 
-        actions['ADJUST_TO_DELTA_NEUTRAL'] = i; i+=1
-
         for d in ['LONG', 'SHORT']:
             actions[f'OPEN_{d}_STRADDLE'] = i; i+=1
 
@@ -1060,11 +1054,6 @@ class OptionsZeroGameEnv(gym.Env):
                 else: # put
                     self._set_if_exists(action_mask, 'CONVERT_TO_PUT_CONDOR')
 
-        # --- 4. Delta-Neutral Adjustment Action ---
-        greeks = self.portfolio_manager.get_portfolio_greeks(self.price_manager.current_price, self.iv_bin_index)
-        if abs(greeks['delta_norm']) > self.delta_neutral_threshold:
-            self._set_if_exists(action_mask, 'ADJUST_TO_DELTA_NEUTRAL')
-        
         return action_mask
 
     def _set_shift_if_no_conflict(self, action_mask, i, original_pos, direction):

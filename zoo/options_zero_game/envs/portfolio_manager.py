@@ -316,42 +316,6 @@ class PortfolioManager:
         except (ValueError, IndexError) as e:
             print(f"Warning: Could not parse HEDGE action '{action_name}'. Error: {e}")
 
-    # ==============================================================================
-    #                      DYNAMIC DELTA-NEUTRAL ADJUSTMENT
-    # ==============================================================================
-
-    def adjust_to_delta_neutral(self, current_price: float, iv_bin_index: int, current_step: int):
-        """
-        Executes the delta-neutral adjustment. It finds the optimal new strikes,
-        closes all current positions, and opens the new, optimized ones as a
-        single atomic transaction.
-        """
-        # 1. Find the best new strikes using the solver
-        new_legs_definition = self._find_delta_neutral_strikes(current_price, iv_bin_index)
-
-        if not new_legs_definition:
-            # This can happen if the current position is already the most neutral one.
-            return
-
-        # 2. Get metadata from the old position to preserve it
-        original_strategy_id = self.portfolio.iloc[0]['strategy_id']
-        days_to_expiry = self.portfolio.iloc[0]['days_to_expiry']
-        
-        # 3. Atomically replace the old position with the new one
-        self.close_all_positions(current_price, iv_bin_index, current_step)
-        
-        for leg in new_legs_definition:
-            leg['entry_step'] = current_step
-            leg['days_to_expiry'] = days_to_expiry
-        
-        priced_new_legs = self._price_legs(new_legs_definition, current_price, iv_bin_index)
-        
-        # We must use the updated realized_pnl from the close_all operation
-        pnl_profile = self._calculate_universal_risk_profile(priced_new_legs, self.realized_pnl)
-        pnl_profile['strategy_id'] = original_strategy_id
-        
-        self._execute_trades(priced_new_legs, pnl_profile)
-
     def open_best_available_vertical(self, action_name: str, current_price: float, iv_bin_index: int, current_step: int, days_to_expiry: float):
         """
         Public method to execute the opening of a vertical spread.

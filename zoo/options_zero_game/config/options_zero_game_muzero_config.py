@@ -310,11 +310,6 @@ options_zero_game_muzero_config = dict(
         # A value of 0.05 means we add 5% to the predicted IV.
         volatility_premium_abs=0.05,
 
-        # The normalized delta threshold at which the ADJUST_TO_DELTA_NEUTRAL action becomes available.
-        # A value of 0.1 means the action is legal if the portfolio's net delta
-        # is more than 10% of the maximum possible delta.
-        delta_neutral_threshold=0.1,
-
         # The target net debit for a butterfly as a percentage of the ATM strike.
         # 0.01 means we are trying to pay ~1% of the stock price for the butterfly.
         butterfly_target_cost_pct=0.01, 
