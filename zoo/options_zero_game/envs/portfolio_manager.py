@@ -373,33 +373,45 @@ class PortfolioManager:
 
         # --- 3. THE FIX: Implement a Robust Fallback ---
         if not found_legs:
-            # ...
-            wing_offset = self.strike_distance * 2
+            # This print is helpful for knowing when the main solver fails
+            # print(f"DEBUG: Tiered R:R solver failed for {action_name}. Using fixed-width fallback.")
+            
+            atm_strike = self.market_rules_manager.get_atm_price(current_price)
+            wing_offset = self.strike_distance * 2 
+
             is_credit_spread = 'BULL_PUT' in direction_name or 'BEAR_CALL' in direction_name
             anchor_direction = 'short' if is_credit_spread else 'long'
             wing_direction = 'long' if is_credit_spread else 'short'
             
-            # --- THE FINAL, CORRECTED STRIKE LOGIC ---
+            # This new structure is exhaustive and handles all cases correctly.
             if direction_name == 'BULL_CALL_SPREAD':
-                anchor_strike = atm_strike - wing_offset # Long leg
-                wing_strike = atm_strike # Short leg
+                # Debit Spread: Long the lower strike, Short the higher
+                anchor_strike = atm_strike
+                wing_strike = atm_strike + wing_offset
             elif direction_name == 'BEAR_CALL_SPREAD':
-                anchor_strike = atm_strike # Short leg
-                wing_strike = atm_strike + wing_offset # Long leg
+                # Credit Spread: Short the lower strike, Long the higher
+                anchor_strike = atm_strike
+                wing_strike = atm_strike + wing_offset
             elif direction_name == 'BULL_PUT_SPREAD':
-                anchor_strike = atm_strike # Short leg
-                wing_strike = atm_strike - wing_offset # Long leg
+                # Credit Spread: Short the higher strike, Long the lower
+                anchor_strike = atm_strike
+                wing_strike = atm_strike - wing_offset
             elif direction_name == 'BEAR_PUT_SPREAD':
-                anchor_strike = atm_strike + wing_offset # Long leg
-                wing_strike = atm_strike # Short leg
-            
-            # This logic remains the same
-            fallback_legs_def = [
-                {'type': option_type, 'direction': anchor_direction, 'strike_price': anchor_strike},
-                {'type': option_type, 'direction': wing_direction, 'strike_price': wing_strike}
-            ]
-            for leg in fallback_legs_def: leg['days_to_expiry'] = days_to_expiry
+                # Debit Spread: Long the higher strike, Short the lower
+                anchor_strike = atm_strike
+                wing_strike = atm_strike - wing_offset
+            else:
+                # This is a critical failsafe. If the action_name is somehow invalid,
+                # we must abort to prevent a crash.
+                print(f"FATAL WARNING: Invalid direction_name '{direction_name}' in open_best_available_vertical. Aborting.")
+                return # Abort the function entirely
 
+            fallback_legs_def = [
+                {'type': option_type, 'direction': anchor_direction, 'strike_price': anchor_strike, 'days_to_expiry': days_to_expiry},
+                {'type': option_type, 'direction': wing_direction, 'strike_price': wing_strike, 'days_to_expiry': days_to_expiry}
+            ]
+            
+            # Price the fallback legs with the correct rule
             found_legs = self._price_legs(fallback_legs_def, current_price, iv_bin_index, check_short_rule=is_credit_spread)
 
         # --- 4. Finalize and Execute the Trade ---
@@ -2217,6 +2229,7 @@ class PortfolioManager:
         self._execute_trades(legs_to_keep, pnl_profile)
 
     def debug_print_portfolio(self, current_price: float, step: int, day: int, action_taken: str):
+        return
         """
         Prints a detailed, human-readable snapshot of the current portfolio state,
         including all stored data and live calculated values for each leg.
