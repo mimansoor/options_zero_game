@@ -951,7 +951,6 @@ class OptionsZeroGameEnv(gym.Env):
         # Rule 3: Empty portfolio
         return self._get_empty_portfolio_mask()
 
-
     # ----------------- HELPER METHODS -----------------
 
     def _apply_forced_strategy(self, action_mask: np.ndarray) -> bool:
@@ -979,101 +978,92 @@ class OptionsZeroGameEnv(gym.Env):
         return False # Did not handle the state
 
     def _get_non_empty_portfolio_mask(self) -> np.ndarray:
-        """Handles Rule 2: Logic for when the portfolio is not empty."""
+        """
+        Computes the action mask for when the portfolio has one or more positions.
+        This function enables all valid management and conversion actions while
+        disabling all 'OPEN_*' actions.
+        """
         action_mask = np.zeros(self.action_space_size, dtype=np.int8)
         portfolio_df = self.portfolio_manager.portfolio
         
-        # --- Basic actions (unchanged) ---
+        # --- 1. Universal Management Actions ---
         action_mask[self.actions_to_indices['HOLD']] = 1
         action_mask[self.actions_to_indices['CLOSE_ALL']] = 1
 
-        # --- Management Actions (unchanged) ---
+        # --- 2. Per-Leg Management Actions ---
         atm_price = self.market_rules_manager.get_atm_price(self.price_manager.current_price)
         for i, original_pos in portfolio_df.iterrows():
             self._set_if_exists(action_mask, f'CLOSE_POSITION_{i}')
-            if not original_pos['is_hedged']:
-                self._set_if_exists(action_mask, f'HEDGE_NAKED_POS_{i}')
+            if not original_pos['is_hedged']: self._set_if_exists(action_mask, f'HEDGE_NAKED_POS_{i}')
             self._set_shift_if_no_conflict(action_mask, i, original_pos, direction="UP")
             self._set_shift_if_no_conflict(action_mask, i, original_pos, direction="DOWN")
             if original_pos['strike_price'] != atm_price:
                 self._set_shift_to_atm_if_no_conflict(action_mask, i, original_pos, atm_price)
 
+        # --- 3. Whole-Portfolio Transformation Actions ---
         if not portfolio_df.empty:
             current_strategy_id = portfolio_df.iloc[0]['strategy_id']
-            
-            # Use self.strategy_name_to_id for all lookups to ensure consistency.
+            option_type = portfolio_df.iloc[0]['type']
             s_map = self.strategy_name_to_id 
 
-            strangle_ids = {
-                s_map.get('SHORT_STRANGLE_DELTA_15'), s_map.get('SHORT_STRANGLE_DELTA_20'),
-                s_map.get('SHORT_STRANGLE_DELTA_25'), s_map.get('SHORT_STRANGLE_DELTA_30'),
-            }
+            # Define sets of strategy IDs for easy checking
+            strangle_ids = {s_map.get(f'OPEN_{d}_STRANGLE_DELTA_{delta}') for d in ['LONG', 'SHORT'] for delta in [15, 20, 25, 30]}
             straddle_id = s_map.get('SHORT_STRADDLE')
-            condor_id = s_map.get('SHORT_IRON_CONDOR')
+            
+            # <<< --- THE CORRECTED LOGIC: A Comprehensive Set for All Condors --- >>>
+            iron_condor_ids = {s_map.get(f'OPEN_{d}_IRON_CONDOR') for d in ['LONG', 'SHORT']}
+            call_condor_ids = {s_map.get(f'OPEN_{d}_CALL_CONDOR') for d in ['LONG', 'SHORT']}
+            put_condor_ids = {s_map.get(f'OPEN_{d}_PUT_CONDOR') for d in ['LONG', 'SHORT']}
+            
             fly_id = s_map.get('SHORT_IRON_FLY')
-            call_fly_ids = {s_map.get('LONG_CALL_FLY_1'), s_map.get('SHORT_CALL_FLY_1'), s_map.get('LONG_CALL_FLY_2'), s_map.get('SHORT_CALL_FLY_2')}
-            put_fly_ids = {s_map.get('LONG_PUT_FLY_1'), s_map.get('SHORT_PUT_FLY_1'), s_map.get('LONG_PUT_FLY_2'), s_map.get('SHORT_PUT_FLY_2')}
-            spread_ids = {
-                s_map.get('BULL_CALL_SPREAD'), s_map.get('BEAR_CALL_SPREAD'),
-                s_map.get('BULL_PUT_SPREAD'), s_map.get('BEAR_PUT_SPREAD')
-            }
+            call_fly_ids = {s_map.get(f'OPEN_{d}_CALL_FLY_{w}') for d in ['LONG', 'SHORT'] for w in [1, 2]}
+            put_fly_ids = {s_map.get(f'OPEN_{d}_PUT_FLY_{w}') for d in ['LONG', 'SHORT'] for w in [1, 2]}
+            spread_ids = {s_map.get(f'OPEN_{d}_{t}_SPREAD') for d in ['BULL', 'BEAR'] for t in ['CALL', 'PUT']}
 
-            # Rule: Strangle -> Iron Condor
-            if current_strategy_id in strangle_ids:
-                if len(portfolio_df) <= self.portfolio_manager.max_positions - 2:
-                    self._set_if_exists(action_mask, 'CONVERT_TO_IRON_CONDOR')
+            # a) Strangle -> Iron Condor
+            if current_strategy_id in strangle_ids and len(portfolio_df) <= self._cfg.max_positions - 2:
+                self._set_if_exists(action_mask, 'CONVERT_TO_IRON_CONDOR')
+            
+            # b) Straddle -> Iron Fly
+            elif current_strategy_id == straddle_id and len(portfolio_df) <= self._cfg.max_positions - 2:
+                self._set_if_exists(action_mask, 'CONVERT_TO_IRON_FLY')
+            
+            # <<< --- THE CORRECTED LOGIC: Nuanced Conversion Rules for Condors --- >>>
+            elif current_strategy_id in iron_condor_ids:
+                self._set_if_exists(action_mask, 'CONVERT_TO_STRANGLE') # Only Iron Condors can become Strangles
+                self._set_if_exists(action_mask, 'CONVERT_TO_BULL_PUT_SPREAD')
+                self._set_if_exists(action_mask, 'CONVERT_TO_BEAR_CALL_SPREAD')
+            
+            elif current_strategy_id in call_condor_ids:
+                self._set_if_exists(action_mask, 'CONVERT_TO_BULL_CALL_SPREAD')
+                self._set_if_exists(action_mask, 'CONVERT_TO_BEAR_CALL_SPREAD')
 
-            # Rule: Straddle -> Iron Fly
-            if current_strategy_id == straddle_id:
-                if len(portfolio_df) <= self.portfolio_manager.max_positions - 2:
-                    self._set_if_exists(action_mask, 'CONVERT_TO_IRON_FLY')
-
-            # Rule: Iron Condor -> Strangle
-            if current_strategy_id == condor_id:
-                self._set_if_exists(action_mask, 'CONVERT_TO_STRANGLE')
-
-            # Rule: Iron Fly -> Straddle
-            if current_strategy_id == fly_id:
+            elif current_strategy_id in put_condor_ids:
+                self._set_if_exists(action_mask, 'CONVERT_TO_BULL_PUT_SPREAD')
+                self._set_if_exists(action_mask, 'CONVERT_TO_BEAR_PUT_SPREAD')
+            
+            # d) Rules for Butterflies and Spreads (unchanged but placed correctly in the logic flow)
+            elif current_strategy_id == fly_id:
                 self._set_if_exists(action_mask, 'CONVERT_TO_STRADDLE')
-
-            # --- NEW: Logic for converting Condors/Flies to Verticals ---
-            if current_strategy_id == condor_id or current_strategy_id == fly_id:
-                put_legs = portfolio_df[portfolio_df['type'] == 'put']
-                call_legs = portfolio_df[portfolio_df['type'] == 'call']
-
-                if not put_legs.empty and not call_legs.empty:
-                    # Find the midpoint of each spread
-                    put_spread_midpoint = put_legs['strike_price'].mean()
-                    call_spread_midpoint = call_legs['strike_price'].mean()
-                    
-                    current_price = self.price_manager.current_price
-                    
-                    # If price is closer to the put side, the call side is the winner to close
-                    if abs(current_price - put_spread_midpoint) < abs(current_price - call_spread_midpoint):
-                        self._set_if_exists(action_mask, 'CONVERT_TO_BULL_PUT_SPREAD')
-                    else: # Otherwise, the put side is the winner to close
-                        self._set_if_exists(action_mask, 'CONVERT_TO_BEAR_CALL_SPREAD')
-
-            # <<< NEW: Logic for converting Butterflies to Verticals >>>
+            
             elif current_strategy_id in call_fly_ids:
-                # A call butterfly can be decomposed into a Bull Call or a Bear Call spread.
                 self._set_if_exists(action_mask, 'CONVERT_TO_BULL_CALL_SPREAD')
                 self._set_if_exists(action_mask, 'CONVERT_TO_BEAR_CALL_SPREAD')
 
             elif current_strategy_id in put_fly_ids:
-                # A put butterfly can be decomposed into a Bull Put or a Bear Put spread.
                 self._set_if_exists(action_mask, 'CONVERT_TO_BULL_PUT_SPREAD')
                 self._set_if_exists(action_mask, 'CONVERT_TO_BEAR_PUT_SPREAD')
 
-            elif current_strategy_id in spread_ids:
-                # This conversion adds 2 legs, so we must have enough space.
-                if len(portfolio_df) <= self.portfolio_manager.max_positions - 2:
-                    # Determine the option type from the existing legs.
-                    option_type = portfolio_df.iloc[0]['type']
-                    if option_type == 'call':
-                        self._set_if_exists(action_mask, 'CONVERT_TO_CALL_CONDOR')
-                    else: # put
-                        self._set_if_exists(action_mask, 'CONVERT_TO_PUT_CONDOR')
+            elif current_strategy_id in spread_ids and len(portfolio_df) <= self._cfg.max_positions - 2:
+                if option_type == 'call':
+                    self._set_if_exists(action_mask, 'CONVERT_TO_CALL_CONDOR')
+                else: # put
+                    self._set_if_exists(action_mask, 'CONVERT_TO_PUT_CONDOR')
+
+        # --- 4. Delta-Neutral Adjustment Action ---
+        greeks = self.portfolio_manager.get_portfolio_greeks(self.price_manager.current_price, self.iv_bin_index)
+        if abs(greeks['delta_norm']) > self.delta_neutral_threshold:
+            self._set_if_exists(action_mask, 'ADJUST_TO_DELTA_NEUTRAL')
         
         return action_mask
 
@@ -1199,11 +1189,15 @@ class OptionsZeroGameEnv(gym.Env):
     def _apply_opening_curriculum(self, final_mask: np.ndarray) -> np.ndarray:
         """Randomly choose a strategy family for Step 0 training."""
         strategy_families = {
-            "SINGLE_LEG": lambda name: 'ATM' in name and 'STRADDLE' not in name and 'STRANGLE' not in name,
+            # <<< --- THE CORRECTED LOGIC IS HERE --- >>>
+            # This is a more robust way to identify single legs. It positively
+            # checks for the unique substrings of single leg actions.
+            "SINGLE_LEG": lambda name: '_CALL_ATM' in name or '_PUT_ATM' in name,
+            
             "STRADDLE": lambda name: 'STRADDLE' in name,
             "STRANGLE": lambda name: 'STRANGLE' in name,
             "SPREAD": lambda name: 'SPREAD' in name,
-            "IRON_FLY_CONDOR": lambda name: 'IRON' in name,
+            "IRON_FLY_AND_CONDORS": lambda name: 'IRON' in name or 'CONDOR' in name,
             "BUTTERFLY": lambda name: 'FLY' in name and 'IRON' not in name,
         }
 

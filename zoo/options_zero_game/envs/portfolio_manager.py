@@ -338,7 +338,7 @@ class PortfolioManager:
         days_to_expiry = self.portfolio.iloc[0]['days_to_expiry']
         
         # 3. Atomically replace the old position with the new one
-        self.close_all_positions(current_price, iv_bin_index)
+        self.close_all_positions(current_price, iv_bin_index, current_step)
         
         for leg in new_legs_definition:
             leg['entry_step'] = current_step

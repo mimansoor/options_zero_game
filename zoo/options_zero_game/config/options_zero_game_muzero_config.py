@@ -113,149 +113,54 @@ UNIFIED_REGIMES = [
 # Each phase focuses on a core strategy for 2 million steps before moving to the next.
 
 TRAINING_CURRICULUM = {
-    # === Phase 1: Foundational Premium Selling (Directional) ===
-    # Goal: Learn to sell premium with a bullish assumption (theta decay).
+    # === Phase 1: Master Naked Puts (Bullish Premium Selling) ===
+    # Give the agent 1 million steps to learn this core concept.
     0: 'OPEN_SHORT_PUT_ATM-2',
+    int(2e5): 'OPEN_SHORT_PUT_ATM-1',
+    int(4e5): 'OPEN_SHORT_PUT_ATM+0',
+    int(6e5): 'OPEN_SHORT_PUT_ATM+1',
+    int(8e5): 'OPEN_SHORT_PUT_ATM+2',
 
-    # === Phase 1: Foundational Premium Selling (Directional) ===
-    # Goal: Learn to sell premium with a bullish assumption (theta decay).
-    int(1e2): 'OPEN_SHORT_PUT_ATM-1',
+    # === Phase 2: Master Naked Calls (Bearish Premium Selling) ===
+    # Another 1 million steps for the opposite side.
+    int(1e6): 'OPEN_SHORT_CALL_ATM-2',
+    int(1.2e6): 'OPEN_SHORT_CALL_ATM-1',
+    int(1.4e6): 'OPEN_SHORT_CALL_ATM+0',
+    int(1.6e6): 'OPEN_SHORT_CALL_ATM+1',
+    int(1.8e6): 'OPEN_SHORT_CALL_ATM+2',
 
-    # === Phase 1: Foundational Premium Selling (Directional) ===
-    # Goal: Learn to sell premium with a bullish assumption (theta decay).
-    int(2e2): 'OPEN_SHORT_PUT_ATM+0',
+    # === Phase 3: Master Volatility Selling (Undefined Risk) ===
+    # Now that it knows calls and puts, learn to combine them.
+    int(2e6): 'OPEN_SHORT_STRADDLE',
+    int(3e6): 'OPEN_SHORT_STRANGLE_DELTA_15', # Introduce delta-based strangles early
 
-    # === Phase 1: Foundational Premium Selling (Directional) ===
-    # Goal: Learn to sell premium with a bullish assumption (theta decay).
-    int(3e2): 'OPEN_SHORT_PUT_ATM+1',
-
-    # === Phase 1: Foundational Premium Selling (Directional) ===
-    # Goal: Learn to sell premium with a bullish assumption (theta decay).
-    int(4e2): 'OPEN_SHORT_PUT_ATM+2',
-
-    # === Phase 1: Foundational Premium Selling (Directional) ===
-    # Goal: Learn to sell premium with a bullish assumption (theta decay).
-    int(5e2): 'OPEN_SHORT_CALL_ATM-2',
-
-    # === Phase 1: Foundational Premium Selling (Directional) ===
-    # Goal: Learn to sell premium with a bullish assumption (theta decay).
-    int(6e2): 'OPEN_SHORT_CALL_ATM-1',
-
-    # === Phase 1: Foundational Premium Selling (Directional) ===
-    # Goal: Learn to sell premium with a bullish assumption (theta decay).
-    int(7e2): 'OPEN_SHORT_CALL_ATM+0',
-
-    # === Phase 1: Foundational Premium Selling (Directional) ===
-    # Goal: Learn to sell premium with a bullish assumption (theta decay).
-    int(8e2): 'OPEN_SHORT_CALL_ATM+1',
-
-    # === Phase 2: Counterpart Directional Premium Selling ===
-    # Goal: Learn to sell premium with a bearish assumption.
-    int(9e2): 'OPEN_SHORT_CALL_ATM+2',
-
-    # === Phase 5: Selling Volatility (Undefined Risk) ===
-    # Goal: Learn a non-directional strategy by selling ATM volatility (Straddles).
-    int(10e2): 'OPEN_SHORT_STRADDLE',
-
-    # === Phase 5: Selling Volatility (Undefined Risk) ===
-    # Goal: Learn a non-directional strategy by selling ATM volatility (Straddles).
+    # === Phase 4: Master Volatility Buying (Undefined Risk) ===
     int(4e6): 'OPEN_LONG_STRADDLE',
-
-    # === Phase 6: Selling Volatility (Risk Defined) ===
-    # Goal: Learn to create a range-bound, positive theta position with defined risk.
-    int(5e6): 'OPEN_SHORT_IRON_CONDOR',
-
-    # === Phase 6: Selling Volatility (Risk Defined) ===
-    # Goal: Learn to create a range-bound, positive theta position with defined risk.
-    int(6e6): 'OPEN_LONG_IRON_CONDOR',
-
-    # === Phase 7: Advanced Range-Bound Strategy ===
-    # Goal: Learn a different range-bound profile with a sharper profit peak (Butterflies).
-    int(7e6): 'OPEN_SHORT_CALL_FLY_2',
-
-    # === Phase 7: Advanced Range-Bound Strategy ===
-    # Goal: Learn a different range-bound profile with a sharper profit peak (Butterflies).
-    int(8e6): 'OPEN_LONG_CALL_FLY_2',
-
-    # === Phase 8: Advanced Volatility Selling (Delta-based) ===
-    # Goal: Learn the professional method of entering strangles based on delta, not fixed widths.
-    int(9e6): 'OPEN_SHORT_STRANGLE_DELTA_15',
-
-    # === Phase 8: Advanced Volatility Selling (Delta-based) ===
-    # Goal: Learn the professional method of entering strangles based on delta, not fixed widths.
-    int(10e6): 'OPEN_LONG_STRANGLE_DELTA_15',
+    int(5e6): 'OPEN_LONG_STRANGLE_DELTA_15',
     
-    # === Phase 9: Learning to BUY Options (Debit Strategies) ===
-    # Goal: Change mindset. Learn to pay theta for a large directional move (Long Calls).
-    int(11e6): 'OPEN_LONG_CALL_ATM-2',
+    # === Phase 5: Learn Risk-Defined Volatility Selling ===
+    int(6e6): 'OPEN_SHORT_IRON_CONDOR',
+    int(7e6): 'OPEN_SHORT_CALL_CONDOR',
+    int(8e6): 'OPEN_SHORT_PUT_CONDOR',
+    int(9e6): 'OPEN_SHORT_CALL_FLY_2', # Butterflies are a good follow-up
 
-    # === Phase 9: Learning to BUY Options (Debit Strategies) ===
-    # Goal: Change mindset. Learn to pay theta for a large directional move (Long Calls).
-    int(12e6): 'OPEN_LONG_CALL_ATM-1',
+    # === Phase 6: Learn Risk-Defined Volatility Buying ===
+    int(10e6): 'OPEN_LONG_IRON_CONDOR',
+    int(11e6): 'OPEN_LONG_CALL_CONDOR',
+    int(12e6): 'OPEN_LONG_PUT_CONDOR',
+    int(13e6): 'OPEN_LONG_CALL_FLY_2',
 
-    # === Phase 9: Learning to BUY Options (Debit Strategies) ===
-    # Goal: Change mindset. Learn to pay theta for a large directional move (Long Calls).
-    int(13e6): 'OPEN_LONG_CALL_ATM+0',
-
-    # === Phase 9: Learning to BUY Options (Debit Strategies) ===
-    # Goal: Change mindset. Learn to pay theta for a large directional move (Long Calls).
-    int(14e6): 'OPEN_LONG_CALL_ATM+1',
-
-    # === Phase 9: Learning to BUY Options (Debit Strategies) ===
-    # Goal: Change mindset. Learn to pay theta for a large directional move (Long Calls).
-    int(15e6): 'OPEN_LONG_CALL_ATM+2',
-
-    # === Phase 9: Learning to BUY Options (Debit Strategies) ===
-    # Goal: Change mindset. Learn to pay theta for a large directional move (Long Calls).
-    int(16e6): 'OPEN_LONG_PUT_ATM-2',
-
-    # === Phase 9: Learning to BUY Options (Debit Strategies) ===
-    # Goal: Change mindset. Learn to pay theta for a large directional move (Long Calls).
-    int(17e6): 'OPEN_LONG_PUT_ATM-1',
-
-    # === Phase 9: Learning to BUY Options (Debit Strategies) ===
-    # Goal: Change mindset. Learn to pay theta for a large directional move (Long Calls).
-    int(18e6): 'OPEN_LONG_PUT_ATM+0',
-
-    # === Phase 9: Learning to BUY Options (Debit Strategies) ===
-    # Goal: Change mindset. Learn to pay theta for a large directional move (Long Calls).
-    int(19e6): 'OPEN_LONG_PUT_ATM+1',
-
-    # === Phase 9: Learning to BUY Options (Debit Strategies) ===
-    # Goal: Change mindset. Learn to pay theta for a large directional move (Long Calls).
-    int(20e6): 'OPEN_LONG_PUT_ATM+2',
-
-    # === Phase 10: Learning to BUY Spreads ===
-    # Goal: Learn to make a risk-defined directional bet by buying a Bull Call Spread.
-    int(21e6): 'OPEN_BULL_CALL_SPREAD',
-
-    # === Phase 11: Learning to BUY Spreads ===
-    # Goal: Learn to make a risk-defined directional bet by buying a Bear Call Spread.
-    int(22e6): 'OPEN_BEAR_CALL_SPREAD',
-
-    # === Phase 12: Learning to BUY Spreads ===
-    # Goal: Learn to make a risk-defined directional bet by buying a Bull Put Spread.
-    int(23e6): 'OPEN_BULL_PUT_SPREAD',
-
-    # === Phase 13: Learning to BUY Spreads ===
-    # Goal: Learn to make a risk-defined directional bet by buying a Bear Put Spread.
-    int(24e6): 'OPEN_BEAR_PUT_SPREAD',
-
-    # Goal: Learn to make a risk-defined directional bet by sellnig a call condor Spread.
-    int(25e6): 'OPEN_SHORT_CALL_CONDOR',
-
-    # Goal: Learn to make a risk-defined directional bet by sellnig a put condor Spread.
-    int(26e6): 'OPEN_SHORT_PUT_CONDOR',
-
-    # Goal: Learn to make a risk-defined directional bet by sellnig a call condor Spread.
-    int(27e6): 'OPEN_LONG_CALL_CONDOR',
-
-    # Goal: Learn to make a risk-defined directional bet by sellnig a put condor Spread.
-    int(28e6): 'OPEN_LONG_PUT_CONDOR',
+    # === Phase 7: Master Debit Spreads (Directional Buying) ===
+    int(14e6): 'OPEN_BULL_CALL_SPREAD',
+    int(15e6): 'OPEN_BEAR_PUT_SPREAD',
+    
+    # === Phase 8: Master Credit Spreads (Directional Selling) ===
+    int(16e6): 'OPEN_BULL_PUT_SPREAD',
+    int(17e6): 'OPEN_BEAR_CALL_SPREAD',
 
     # === Final Phase: Integration and Agent Autonomy ===
-    # Goal: Allow the agent to use any of its learned strategies to maximize reward.
-    int(29e6): 'ALL'
+    # Allow the agent to use any of its learned strategies to maximize reward.
+    int(18e6): 'ALL'
 }
 
 # This class will "hide" the integer-keyed dictionary from EasyDict.
