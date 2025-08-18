@@ -231,49 +231,73 @@ class PriceActionManager:
 
     def _generate_historical_price_path(self):
         forced_symbol = self._cfg.get('forced_historical_symbol')
-        if forced_symbol:
-            # Check if the requested symbol is valid
-            if forced_symbol in self._available_tickers:
-                selected_ticker = forced_symbol
-                print(f"(INFO) Using forced historical symbol: {selected_ticker}")
-            else:
-                # Fallback if the requested symbol doesn't exist in the cache
-                print(f"(WARNING) Forced symbol '{forced_symbol}' not found. Choosing a random ticker instead.")
-                selected_ticker = random.choice(self._available_tickers)
-        else:
-            selected_ticker = random.choice(self._available_tickers)
-
-        file_path = os.path.join(self.historical_data_path, f"{selected_ticker}.csv")
-        data = pd.read_csv(file_path, index_col='Date', parse_dates=True)
-        data.rename(columns={data.columns[0]: 'Close'}, inplace=True)
-
-        if len(data) < self.total_steps + 1:
-            raise ValueError(f"Historical data for {selected_ticker} is too short.")
-
-        start_index = random.randint(0, len(data) - self.total_steps - 1)
-
-        # 1. Capture the price data *before* the episode starts, safely handling edge cases.
-        context_start_index = max(0, start_index - 30)
-        context_segment = data['Close'].iloc[context_start_index:start_index]
         
-        # 2. Slice the main episode data.
-        price_segment = data['Close'].iloc[start_index:start_index + self.total_steps + 1]
-        
-        raw_start_price = price_segment.iloc[0]
-        if raw_start_price > 1e-4:
-            normalization_factor = self.start_price_config / raw_start_price
-            self.price_path = (price_segment * normalization_factor).to_numpy(dtype=np.float32)
-            # 3. Normalize the historical context with the SAME factor for a continuous chart.
-            self.historical_context_path = (context_segment * normalization_factor).to_numpy(dtype=np.float32)
-        else:
-            raise ValueError(f"Corrupt data for {selected_ticker} (start price <= 0).")
+        # <<< --- NEW: Add a failsafe loop --- >>>
+        # Try up to 5 times to find a valid historical data segment.
+        for _ in range(5):
+            try:
+                if forced_symbol:
+                    if forced_symbol in self._available_tickers:
+                        selected_ticker = forced_symbol
+                    else:
+                        print(f"(WARNING) Forced symbol '{forced_symbol}' not found. Choosing random ticker.")
+                        selected_ticker = random.choice(self._available_tickers)
+                else:
+                    selected_ticker = random.choice(self._available_tickers)
 
-        self.start_price = self.price_path[0]
-        self.current_regime_name = f"Historical: {selected_ticker}"
-        log_returns = np.log(self.price_path[1:] / self.price_path[:-1])
-        annualized_vol = np.std(log_returns) * np.sqrt(252 * self.steps_per_day)
-        self.episode_iv_anchor = annualized_vol if np.isfinite(annualized_vol) else 0.2
-        self.trend = np.mean(log_returns) * (252 * self.steps_per_day)
+                file_path = os.path.join(self.historical_data_path, f"{selected_ticker}.csv")
+                data = pd.read_csv(file_path, index_col='Date', parse_dates=True)
+                data.rename(columns={data.columns[0]: 'Close'}, inplace=True)
+
+                # <<< --- NEW: More Robust Data Length Check --- >>>
+                required_length = self.total_steps + 1
+                if len(data) < required_length:
+                    # Don't raise an error, just log a warning and try another ticker
+                    print(f"(WARNING) Historical data for {selected_ticker} is too short ({len(data)} rows), needs {required_length}. Trying another ticker.")
+                    continue # Go to the next iteration of the for loop
+
+                # <<< --- NEW: Safer Index Calculation --- >>>
+                max_start_index = len(data) - required_length
+                # Ensure the upper bound of randint is not negative
+                if max_start_index < 0:
+                    print(f"(WARNING) Logic error for {selected_ticker}: max_start_index is negative. Trying another ticker.")
+                    continue
+                
+                start_index = random.randint(0, max_start_index)
+                
+                context_start_index = max(0, start_index - 30)
+                context_segment = data['Close'].iloc[context_start_index:start_index]
+                
+                price_segment = data['Close'].iloc[start_index : start_index + required_length]
+                
+                raw_start_price = price_segment.iloc[0]
+                if raw_start_price > 1e-4:
+                    normalization_factor = self.start_price_config / raw_start_price
+                    self.price_path = (price_segment * normalization_factor).to_numpy(dtype=np.float32)
+                    self.historical_context_path = (context_segment * normalization_factor).to_numpy(dtype=np.float32)
+                else:
+                    # This could be another source of silent failure
+                    print(f"(WARNING) Corrupt data for {selected_ticker} (start price <= 0). Trying another ticker.")
+                    continue
+
+                self.start_price = self.price_path[0]
+                self.current_regime_name = f"Historical: {selected_ticker}"
+                log_returns = np.log(self.price_path[1:] / self.price_path[:-1])
+                annualized_vol = np.std(log_returns) * np.sqrt(252 * self.steps_per_day)
+                self.episode_iv_anchor = annualized_vol if np.isfinite(annualized_vol) else 0.2
+                self.trend = np.mean(log_returns) * (252 * self.steps_per_day)
+
+                # If we successfully reach this point, break out of the retry loop
+                return
+
+            except Exception as e:
+                # Catch any other unexpected errors during file processing
+                print(f"(WARNING) Unexpected error processing {selected_ticker}: {e}. Trying another ticker.")
+                continue
+        
+        # If the loop finishes without returning, it means we failed 5 times.
+        # This is the final failsafe from the original code.
+        raise ValueError("Failed to generate a valid historical price path after 5 attempts.")
 
     def _generate_garch_price_path(self):
         """
