@@ -7,6 +7,9 @@ import json
 import numpy as np
 import os
 from datetime import datetime
+# <<< --- NEW: Add the shutil import for robust directory deletion --- >>>
+import shutil
+import glob
 
 import pandas as pd
 from tqdm import tqdm
@@ -95,49 +98,53 @@ if __name__ == "__main__":
         type=str,
         default='ALL',
         choices=valid_strategies + ['ALL'],
-        help="The specific opening strategy to test, or 'ALL' to run a comparative analysis."
+        help="The specific opening strategy to test, or 'ALL' to run all."
+    )
+    # <<< --- NEW: Add the --tail argument --- >>>
+    parser.add_argument(
+        '--tail',
+        type=int,
+        default=0, # A default of 0 means the feature is off by default
+        help="Run only the last N opening strategies from the master list. A non-zero value overrides --strategy ALL."
     )
     parser.add_argument('-n', '--episodes', type=int, default=10, help="The number of episodes to run per strategy.")
     parser.add_argument('--model_path', type=str, default='./best_ckpt/ckpt_best.pth.tar', help="Path to the trained model checkpoint.")
-    
-    # <<< --- THE NEW, MORE POWERFUL --symbol ARGUMENT --- >>>
     parser.add_argument(
         '--symbol',
         type=str,
-        default=None, # Default is None, allowing the 'mixed' mode from the config
-        help="Force evaluation on a specific historical symbol (e.g., 'SPY'), or use the special keyword 'ANY' to force the use of random historical data only (disables GARCH)."
+        default=None,
+        help="Force evaluation on a specific historical symbol (e.g., 'SPY'), or use 'ANY' to force random historical data."
     )
-    
     parser.add_argument('--start_seed', type=int, default=0, help="The starting seed for the episode sequence.")
     parser.add_argument('--timestamp', type=str, default=None, help="A specific timestamp (YYYYMMDD_HHMMSS) to use for the output filename.")
-    parser.add_argument(
-        '--days',
-        type=int,
-        default=20,
-        help="Force a specific episode length in days for the analysis."
-    )
+    parser.add_argument('--days', type=int, default=20, help="Force a specific episode length in days for the analysis.")
     args = parser.parse_args()
 
-    # Determine which strategies to run
-    if args.strategy == 'ALL':
+    # <<< --- NEW: More robust logic to determine which strategies to run --- >>>
+    strategies_to_run = []
+    if args.strategy != 'ALL':
+        # Highest priority: If a specific strategy is named, run only that one.
+        strategies_to_run = [args.strategy]
+        print(f"--- Starting Analysis for SPECIFIC Strategy: {args.strategy} ---")
+    elif args.tail > 0:
+        # Second priority: If --tail is used, run the last N strategies.
+        # Python's list slicing handles cases where tail > len(valid_strategies) gracefully.
+        strategies_to_run = valid_strategies[-args.tail:]
+        print(f"--- Starting Analysis for the LAST {len(strategies_to_run)} Strategies ---")
+    else:
+        # Default case: Run all strategies.
         strategies_to_run = valid_strategies
         print(f"--- Starting Comparative Analysis for ALL {len(strategies_to_run)} Strategies ---")
-    else:
-        strategies_to_run = [args.strategy]
-        print(f"--- Starting Analysis for Strategy: {args.strategy} ---")
-    
-    # <<< --- NEW: Add a clear printout of the data source being used --- >>>
-    if args.symbol:
-        if args.symbol.upper() == 'ANY':
-            print("--- Data Source: Using RANDOM HISTORICAL symbols only (GARCH disabled) ---")
-        else:
-            print(f"--- Data Source: Using SPECIFIC HISTORICAL symbol: {args.symbol} (GARCH disabled) ---")
-    else:
-        print("--- Data Source: Using default 'mixed' mode (Random GARCH or Historical) ---")
-        
-    print(f"--- Running for {args.episodes} episodes per strategy (Seeds: {args.start_seed} to {args.start_seed + args.episodes - 1}) ---")
 
     all_stats = []
+    ANALYZER_RUN_DIR_PREFIX = 'strategy_eval/strategy_analyzer_runs'
+    # <<< --- NEW: Initial cleanup before the entire analysis starts --- >>>
+    # This cleans up any leftover directories from a previously failed run.
+    print("Performing initial cleanup of old analyzer directories...")
+    for dir_path in glob.glob(f"{ANALYZER_RUN_DIR_PREFIX}*"):
+        if os.path.isdir(dir_path):
+            shutil.rmtree(dir_path)
+    print("Initial cleanup complete.")
     
     # --- The Main Analysis Loop ---
     for strategy_name in tqdm(strategies_to_run, desc="Overall Progress"):
@@ -188,6 +195,16 @@ if __name__ == "__main__":
         strategy_stats = calculate_statistics(all_episode_results, strategy_name)
         if strategy_stats:
             all_stats.append(strategy_stats)
+
+        # <<< --- THE CORRECTED Per-Strategy Cleanup Logic --- >>>
+        # After analyzing a strategy, find all directories matching the prefix and delete them.
+        try:
+            dirs_to_delete = glob.glob(f"{ANALYZER_RUN_DIR_PREFIX}*")
+            for dir_path in dirs_to_delete:
+                if os.path.isdir(dir_path):
+                    shutil.rmtree(dir_path)
+        except OSError as e:
+            print(f"Warning: Could not clean up directories matching prefix. Error: {e}")
 
     # --- MODIFIED: Display and Save the Final Comparative Table ---
     if not all_stats:

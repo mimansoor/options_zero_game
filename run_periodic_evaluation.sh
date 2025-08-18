@@ -55,4 +55,10 @@ else
     echo "WARNING: Could not find checkpoint at $BEST_CKPT_DEST to archive."
 fi
 
+# <<< --- NEW: Clean up the temporary directory after a SUCCESSFUL run --- >>>
+# 7. Clean up the analysis run directory for housekeeping.
+echo "Cleaning up temporary analysis directory: $ANALYZER_RUN_DIR"
+rm -rf "$ANALYZER_RUN_DIR"
+echo "Housekeeping complete."
+
 echo "--- [$(date)] Evaluation Finished ---"
