@@ -8,7 +8,7 @@ do
     echo "$(date '+%Y-%m-%d %H:%M:%S') - Syncing..."
     rsync -u "$SRC" "$DEST"
 
-    echo "Waiting 30 minutes..."
-    sleep 1800
+    echo "Waiting 1 hour..."
+    sleep 3600
 done
 
