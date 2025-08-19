@@ -7,7 +7,6 @@ def generate_dynamic_iv_skew_table(max_offset: int, atm_iv: float, far_otm_put_i
     Generates a realistic, dynamic IV skew table using a quadratic curve.
     This creates a "volatility smirk" where OTM puts have the highest IV.
     """
-    # ... (the code for this function is correct and does not need to change) ...
     A = np.array([
         [max_offset**2, -max_offset, 1],
         [0, 0, 1],
