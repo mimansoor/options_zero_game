@@ -496,10 +496,9 @@ class OptionsZeroGameEnv(gym.Env):
                 resolved_action_name = f"SHIFT_{shift_dir}_POS_{leg_index}"
                 self.portfolio_manager.shift_position(resolved_action_name, self.price_manager.current_price, self.iv_bin_index, self.current_step)
 
-        # <<< --- NEW: Routing for the MIN_DELTA roll action --- >>>
-        elif final_action_name.startswith('ROLL_LEG_TO_MIN_DELTA_'):
+        elif final_action_name.startswith('HEDGE_PORTFOLIO_BY_ROLLING_LEG_'):
             leg_index = int(final_action_name.split('_')[-1])
-            self.portfolio_manager.roll_leg_to_min_delta(leg_index, self.price_manager.current_price, self.iv_bin_index, self.current_step)
+            self.portfolio_manager.hedge_portfolio_by_rolling_leg(leg_index, self.price_manager.current_price, self.iv_bin_index, self.current_step)
 
         # 4. Sort the portfolio and take the crucial snapshot.
         self.portfolio_manager.sort_portfolio()
@@ -982,7 +981,7 @@ class OptionsZeroGameEnv(gym.Env):
 
         # <<< --- NEW: Add the powerful risk-shedding roll action --- >>>
         for j in range(self._cfg.max_positions):
-            actions[f'ROLL_LEG_TO_MIN_DELTA_{j}'] = i; i+=1
+            actions[f'HEDGE_PORTFOLIO_BY_ROLLING_LEG_{j}'] = i; i+=1
 
         actions['CLOSE_ALL'] = i
         return actions
@@ -1065,13 +1064,6 @@ class OptionsZeroGameEnv(gym.Env):
             if self._is_delta_shift_possible(original_pos, 'decrease'):
                 self._set_if_exists(action_mask, f'DECREASE_DELTA_BY_SHIFTING_LEG_{i}')
 
-            # <<< --- NEW: Legality for the MIN_DELTA roll --- >>>
-            # We need the raw delta of the leg to check the threshold
-            leg_greeks = self.portfolio_manager.get_raw_greeks_for_legs([original_pos.to_dict()], self.price_manager.current_price, self.iv_bin_index)
-            # Only allow this aggressive action if the leg's delta is significant (e.g., > 10)
-            if abs(leg_greeks['delta']) > 10.0:
-                self._set_if_exists(action_mask, f'ROLL_LEG_TO_MIN_DELTA_{i}')
-
         # --- 3. Whole-Portfolio Transformation Actions ---
         if not portfolio_df.empty:
             current_strategy_id = portfolio_df.iloc[0]['strategy_id']
@@ -1138,6 +1130,12 @@ class OptionsZeroGameEnv(gym.Env):
         greeks = self.portfolio_manager.get_portfolio_greeks(self.price_manager.current_price, self.iv_bin_index)
         if abs(greeks['delta_norm']) > self.delta_neutral_threshold and len(portfolio_df) < self._cfg.max_positions:
             self._set_if_exists(action_mask, 'HEDGE_DELTA_WITH_ATM_OPTION')
+
+        # Legality for HEDGE_PORTFOLIO_BY_ROLLING_LEG_*
+        # We also use the same portfolio-level delta check for this action.
+        if abs(greeks['delta_norm']) > self.delta_neutral_threshold:
+            for i in range(len(portfolio_df)):
+                 self._set_if_exists(action_mask, f'HEDGE_PORTFOLIO_BY_ROLLING_LEG_{i}')
 
         return action_mask
 

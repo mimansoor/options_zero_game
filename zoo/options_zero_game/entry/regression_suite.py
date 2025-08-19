@@ -35,61 +35,65 @@ def create_test_env(forced_opening_strategy: str):
 # ==============================================================================
 #                            INDIVIDUAL TEST CASES
 # ==============================================================================
-def test_roll_leg_to_min_delta():
+def test_hedge_portfolio_by_rolling_leg():
     """
-    Tests if ROLL_LEG_TO_MIN_DELTA correctly finds the optimal OTM strike
-    and moves the leg, resulting in a drastically reduced absolute delta.
-    This version dynamically waits for the action to become legal.
+    Tests if HEDGE_PORTFOLIO_BY_ROLLING_LEG correctly finds and executes a
+    roll that brings the overall portfolio delta closer to zero. This test is
+    resilient to stochastic market movements.
     """
-    test_name = "test_roll_leg_to_min_delta"
+    test_name = "test_hedge_portfolio_by_rolling_leg"
     print(f"\n--- RUNNING: {test_name} ---")
-    env = create_test_env('OPEN_SHORT_CALL_ATM-2') # Start with an ITM call
+    # Start with a short strangle, as it's a good candidate for delta adjustments.
+    env = create_test_env('OPEN_SHORT_STRANGLE_DELTA_20')
     try:
         # Step 1: Open the position
-        env.reset(seed=62)
+        env.reset(seed=63)
         timestep = env.step(env.actions_to_indices['HOLD'])
-        assert len(env.portfolio_manager.get_portfolio()) == 1, "Setup failed: Did not open initial leg."
+        assert len(env.portfolio_manager.get_portfolio()) == 2, "Setup failed: Did not open initial 2-leg position."
 
-        # <<< --- THE NEW DYNAMIC WAITING LOOP --- >>>
+        # Step 2: Dynamically wait for a significant delta imbalance to occur
         max_wait_steps = 50
-        roll_action_index = env.actions_to_indices['ROLL_LEG_TO_MIN_DELTA_0']
+        # The action we want to test is on the call leg (index 0)
+        hedge_action_index = env.actions_to_indices['HEDGE_PORTFOLIO_BY_ROLLING_LEG_0']
         
-        print("[TEST_DEBUG] Waiting for ROLL_LEG_TO_MIN_DELTA action to become legal...")
+        print("[TEST_DEBUG] Waiting for a delta imbalance to make the hedge action legal...")
         for i in range(max_wait_steps):
             action_mask = timestep.obs['action_mask']
-            
-            if action_mask[roll_action_index] == 1:
-                print(f"[TEST_DEBUG] Roll action became legal after {i+1} market steps.")
+            if action_mask[hedge_action_index] == 1:
+                print(f"[TEST_DEBUG] Hedge action became legal after {i+1} market steps.")
                 break
-            
             timestep = env.step(env.actions_to_indices['HOLD'])
         else:
             stats = env.portfolio_manager.get_raw_portfolio_stats(env.price_manager.current_price, env.iv_bin_index)
-            assert False, f"Roll action did not become legal within {max_wait_steps} steps. Final leg delta: {stats['delta']:.2f}"
+            assert False, f"Hedge action did not become legal within {max_wait_steps} steps. Final delta_norm: {stats['delta'] / (4*75):.4f}"
 
-        # Step 2: Now that the action is legal, record the "before" state and execute
+        # Step 3: Now that the action is legal, record the "before" state and execute
         portfolio_before = env.portfolio_manager.get_portfolio().to_dict('records')
-        original_strike = portfolio_before[0]['strike_price']
-        env.step(roll_action_index)
+        env.step(hedge_action_index)
         
         # --- Assertions ---
         portfolio_after = env.portfolio_manager.get_portfolio()
-        assert len(portfolio_after) == 1, "Roll failed: Number of legs changed."
+        assert len(portfolio_after) == 2, "Hedge failed: Number of legs changed."
         
-        new_strike = portfolio_after.iloc[0]['strike_price']
-        assert new_strike > original_strike, f"Roll failed: Strike did not move up. Before: {original_strike}, After: {new_strike}"
-
-        # Strategic Check: Apples-to-apples delta comparison
+        # <<< --- THE DEFINITIVE, ROBUST CHECK --- >>>
+        # We will perform an apples-to-apples comparison of portfolio delta
+        # in the final market state.
+        
         current_price = env.price_manager.current_price
         iv_bin_index = env.iv_bin_index
+
+        # Get the actual delta of the new, adjusted portfolio.
         stats_after = env.portfolio_manager.get_raw_portfolio_stats(current_price, iv_bin_index)
         delta_after = stats_after['delta']
         
+        # Calculate what the delta of the OLD portfolio would have been in the NEW market.
         hypothetical_stats_before = env.portfolio_manager.get_raw_greeks_for_legs(portfolio_before, current_price, iv_bin_index)
         hypothetical_delta_before = hypothetical_stats_before['delta']
         
-        assert abs(delta_after) < abs(hypothetical_delta_before), f"Roll failed: Absolute delta did not decrease. Before: {hypothetical_delta_before:.2f}, After: {delta_after:.2f}"
-        assert abs(delta_after) < 10.0, f"Roll failed: Final delta {delta_after:.2f} was not sufficiently close to zero."
+        # The strategic goal is to reduce the absolute delta. The new portfolio's
+        # delta must be closer to zero than the old portfolio's would have been.
+        assert abs(delta_after) < abs(hypothetical_delta_before), \
+            f"Hedge failed to reduce portfolio delta. Before (hypothetical): {hypothetical_delta_before:.2f}, After (actual): {delta_after:.2f}"
 
         print(f"--- PASSED: {test_name} ---")
         return True
@@ -1213,7 +1217,7 @@ if __name__ == "__main__":
         test_hedge_delta_with_atm_option,
         test_increase_delta_by_shifting_leg,
         test_decrease_delta_by_shifting_leg,
-        test_roll_leg_to_min_delta,
+        test_hedge_portfolio_by_rolling_leg,
     ]
 
     failures = []

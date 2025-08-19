@@ -246,26 +246,23 @@ class PortfolioManager:
         self.lowest_realized_loss = 0.0
 
     # --- Public Methods (called by the main environment) ---
-    def roll_leg_to_min_delta(self, leg_index: int, current_price: float, iv_bin_index: int, current_step: int):
+    def hedge_portfolio_by_rolling_leg(self, leg_index: int, current_price: float, iv_bin_index: int, current_step: int):
         """
-        Finds the strike that minimizes the delta for a given leg and rolls
-        the position to that new strike.
+        Executes the portfolio delta hedge by finding the optimal strike for
+        the specified leg and rolling it.
         """
         if not (0 <= leg_index < len(self.portfolio)): return
 
+        # 1. Use the new solver to find the best strike
+        new_strike = self._find_portfolio_neutral_strike(leg_index, current_price, iv_bin_index)
+        
+        if new_strike is None:
+            # This means no better strike was found to reduce the delta.
+            return
+
+        # 2. Re-use the robust "shift" logic to execute the roll
         leg_to_roll_df = self.portfolio.iloc[[leg_index]]
         leg_to_roll = leg_to_roll_df.iloc[0]
-
-        # 1. Find the optimal new strike using the solver
-        new_strike = self._find_min_delta_strike(leg_to_roll, current_price, iv_bin_index)
-        
-        if new_strike is None or new_strike == leg_to_roll['strike_price']:
-            return # No valid or better strike found
-
-        # 2. Use the existing shift_position logic to perform the roll
-        # This is complex because we need to resolve to a series of UP or DOWN shifts.
-        # A simpler, more robust way is to re-implement the shift logic here.
-
         original_creation_id = leg_to_roll['creation_id']
         
         untouched_legs = self.portfolio[self.portfolio['creation_id'] != original_creation_id]
@@ -829,38 +826,37 @@ class PortfolioManager:
         }
 
     # --- Private Methods ---
-    def _find_min_delta_strike(self, leg_to_roll: pd.Series, current_price: float, iv_bin_index: int) -> float or None:
+    def _find_portfolio_neutral_strike(self, leg_index: int, current_price: float, iv_bin_index: int) -> float or None:
         """
-        Solver that finds the strike price for a given leg that minimizes its absolute delta,
-        while ensuring the new strike doesn't conflict with existing positions.
+        A powerful solver that finds the optimal new strike for a specific leg that
+        will bring the entire portfolio's net delta as close to zero as possible.
         """
+        leg_to_roll = self.portfolio.iloc[leg_index]
+        other_legs = self.portfolio.drop(leg_to_roll.name).to_dict('records')
+        
         best_strike = None
-        min_abs_delta = float('inf')
+        # Initialize with the current portfolio's delta
+        min_abs_portfolio_delta = abs(self.get_raw_portfolio_stats(current_price, iv_bin_index)['delta'])
         
-        # Search a wide range of OTM strikes
-        search_range = range(1, self.max_strike_offset + 1)
-        
-        # Determine the direction to search (up for calls, down for puts)
-        strike_modifier = 1 if leg_to_roll['type'] == 'call' else -1
+        # Search a wide range of strikes around the current price
+        atm_price = self.market_rules_manager.get_atm_price(current_price)
+        for offset in range(-self.max_strike_offset, self.max_strike_offset + 1):
+            candidate_strike = atm_price + (offset * self.strike_distance)
+            if candidate_strike <= 0 or candidate_strike == leg_to_roll['strike_price']:
+                continue
 
-        for offset_multiplier in search_range:
-            candidate_strike = self.market_rules_manager.get_atm_price(current_price) + (offset_multiplier * self.strike_distance * strike_modifier)
-            if candidate_strike <= 0: continue
-
-            # Check for strike conflicts with other legs
-            is_conflict = any(
-                (pos['strike_price'] == candidate_strike and pos['type'] == leg_to_roll['type'])
-                for _, pos in self.portfolio.drop(leg_to_roll.name).iterrows()
-            )
-            if is_conflict: continue
-
-            # Calculate the delta for this candidate strike
-            temp_leg = leg_to_roll.copy()
-            temp_leg['strike_price'] = candidate_strike
-            greeks = self.get_raw_greeks_for_legs([temp_leg.to_dict()], current_price, iv_bin_index)
+            # Create the hypothetical new leg
+            candidate_leg = leg_to_roll.to_dict()
+            candidate_leg['strike_price'] = candidate_strike
             
-            if abs(greeks['delta']) < min_abs_delta:
-                min_abs_delta = abs(greeks['delta'])
+            # Create the hypothetical portfolio
+            hypothetical_portfolio_legs = other_legs + [candidate_leg]
+            
+            # Calculate the total delta for this hypothetical portfolio
+            greeks = self.get_raw_greeks_for_legs(hypothetical_portfolio_legs, current_price, iv_bin_index)
+            
+            if abs(greeks['delta']) < min_abs_portfolio_delta:
+                min_abs_portfolio_delta = abs(greeks['delta'])
                 best_strike = candidate_strike
         
         return best_strike
