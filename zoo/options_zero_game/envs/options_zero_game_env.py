@@ -69,7 +69,6 @@ class OptionsZeroGameEnv(gym.Env):
         risk_free_rate=0.10,
 
         # Reward and Penalty Config
-        pnl_scaling_factor=1000,
         drawdown_penalty_weight=0.1,
         illegal_action_penalty=-1.0,
         
@@ -113,6 +112,13 @@ class OptionsZeroGameEnv(gym.Env):
     def __init__(self, cfg: dict = None) -> None:
         self._cfg = self.default_config()
         if cfg is not None: self._cfg.update(cfg)
+
+        # The scaling factor is now proportional to a "standard" unit of P&L:
+        # the max profit from a 1-strike-wide vertical spread.
+        self.pnl_scaling_factor = self._cfg.strike_distance * self._cfg.lot_size
+        # Add a failsafe for weird configs
+        if self.pnl_scaling_factor <= 0:
+            self.pnl_scaling_factor = 1000 # Fallback to the old default
         
         # The environment now knows its own role.
         self.is_eval_mode = self._cfg.get('is_eval_mode', False)
@@ -846,7 +852,7 @@ class OptionsZeroGameEnv(gym.Env):
         
         # --- 6. Scale and Squash the Reward ---
         # Scaling helps stabilize the learning process.
-        scaled_reward = risk_adjusted_reward / self._cfg.pnl_scaling_factor
+        scaled_reward = risk_adjusted_reward / self.pnl_scaling_factor
 
         # Defensive Assertion
         if not math.isfinite(scaled_reward):
