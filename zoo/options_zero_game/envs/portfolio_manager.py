@@ -500,7 +500,7 @@ class PortfolioManager:
             leg_greeks = self.bs_manager.get_all_greeks_and_price(current_price, pos['strike_price'], pos['days_to_expiry'], vol, is_call)
 
             total_delta += leg_greeks['delta'] * self.lot_size * direction_multiplier
-            total_gamma += leg_greeks['gamma'] * (self.lot_size**2 * current_price**2 / 100) * direction_multiplier
+            total_gamma += leg_greeks['gamma'] * self.lot_size * direction_multiplier
             total_theta += leg_greeks['theta'] * self.lot_size * direction_multiplier
             total_vega += leg_greeks['vega'] * self.lot_size * direction_multiplier
 
@@ -590,11 +590,19 @@ class PortfolioManager:
             
             vec[current_pos_idx + pos_idx_map['MAX_PROFIT_NORM']] = math.tanh(pos['strategy_max_profit'] / self.initial_cash)
             vec[current_pos_idx + pos_idx_map['MAX_LOSS_NORM']] = math.tanh(pos['strategy_max_loss'] / self.initial_cash)
+            # We now provide the true risk contribution of each leg to the agent.
             
-            vec[current_pos_idx + pos_idx_map['DELTA']] = greeks['delta']
-            vec[current_pos_idx + pos_idx_map['GAMMA']] = math.tanh(greeks['gamma'] * self.lot_size)
-            vec[current_pos_idx + pos_idx_map['THETA']] = math.tanh(greeks['theta'] * self.lot_size)
-            vec[current_pos_idx + pos_idx_map['VEGA']] = math.tanh(greeks['vega'] * self.lot_size)
+            # Delta is not normalized, just signed.
+            vec[current_pos_idx + pos_idx_map['DELTA']] = greeks['delta'] * direction_multiplier
+            
+            # For other greeks, we sign them *before* normalization.
+            signed_gamma = greeks['gamma'] * self.lot_size * direction_multiplier
+            signed_theta = greeks['theta'] * self.lot_size * direction_multiplier
+            signed_vega = greeks['vega'] * self.lot_size * direction_multiplier
+            
+            vec[current_pos_idx + pos_idx_map['GAMMA']] = math.tanh(signed_gamma)
+            vec[current_pos_idx + pos_idx_map['THETA']] = math.tanh(signed_theta)
+            vec[current_pos_idx + pos_idx_map['VEGA']] = math.tanh(signed_vega)
             # Convert the boolean to a float for the neural network.
             vec[current_pos_idx + pos_idx_map['IS_HEDGED']] = 1.0 if pos['is_hedged'] else 0.0
            

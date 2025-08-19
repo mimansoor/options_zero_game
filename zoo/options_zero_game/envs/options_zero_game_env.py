@@ -1070,7 +1070,7 @@ class OptionsZeroGameEnv(gym.Env):
             leg_greeks = self.portfolio_manager.get_raw_greeks_for_legs([original_pos.to_dict()], self.price_manager.current_price, self.iv_bin_index)
             # Only allow this aggressive action if the leg's delta is significant (e.g., > 10)
             if abs(leg_greeks['delta']) > 10.0:
-                 self._set_if_exists(action_mask, f'ROLL_LEG_TO_MIN_DELTA_{i}')
+                self._set_if_exists(action_mask, f'ROLL_LEG_TO_MIN_DELTA_{i}')
 
         # --- 3. Whole-Portfolio Transformation Actions ---
         if not portfolio_df.empty:

@@ -39,51 +39,56 @@ def test_roll_leg_to_min_delta():
     """
     Tests if ROLL_LEG_TO_MIN_DELTA correctly finds the optimal OTM strike
     and moves the leg, resulting in a drastically reduced absolute delta.
+    This version dynamically waits for the action to become legal.
     """
     test_name = "test_roll_leg_to_min_delta"
     print(f"\n--- RUNNING: {test_name} ---")
-    # Start with an at-the-money short call. We will let the market move
-    # to make it in-the-money, giving it a large delta to neutralize.
-    env = create_test_env('OPEN_SHORT_CALL_ATM+0')
+    env = create_test_env('OPEN_SHORT_CALL_ATM-2') # Start with an ITM call
     try:
-        # Step 1: Open the position and let the market move to create a delta imbalance.
+        # Step 1: Open the position
         env.reset(seed=62)
-        env.step(env.actions_to_indices['HOLD']) # Open the ATM short call
+        timestep = env.step(env.actions_to_indices['HOLD'])
+        assert len(env.portfolio_manager.get_portfolio()) == 1, "Setup failed: Did not open initial leg."
 
-        # Let the market run for several steps to ensure the delta becomes large.
-        for _ in range(10):
-            env.step(env.actions_to_indices['HOLD'])
+        # <<< --- THE NEW DYNAMIC WAITING LOOP --- >>>
+        max_wait_steps = 50
+        roll_action_index = env.actions_to_indices['ROLL_LEG_TO_MIN_DELTA_0']
+        
+        print("[TEST_DEBUG] Waiting for ROLL_LEG_TO_MIN_DELTA action to become legal...")
+        for i in range(max_wait_steps):
+            action_mask = timestep.obs['action_mask']
+            
+            if action_mask[roll_action_index] == 1:
+                print(f"[TEST_DEBUG] Roll action became legal after {i+1} market steps.")
+                break
+            
+            timestep = env.step(env.actions_to_indices['HOLD'])
+        else:
+            stats = env.portfolio_manager.get_raw_portfolio_stats(env.price_manager.current_price, env.iv_bin_index)
+            assert False, f"Roll action did not become legal within {max_wait_steps} steps. Final leg delta: {stats['delta']:.2f}"
 
+        # Step 2: Now that the action is legal, record the "before" state and execute
         portfolio_before = env.portfolio_manager.get_portfolio().to_dict('records')
-        assert len(portfolio_before) == 1, "Setup failed: Did not open initial leg."
         original_strike = portfolio_before[0]['strike_price']
-
-        # Step 2: Execute the roll action
-        action_to_take = env.actions_to_indices['ROLL_LEG_TO_MIN_DELTA_0']
-        env.step(action_to_take)
+        env.step(roll_action_index)
         
         # --- Assertions ---
         portfolio_after = env.portfolio_manager.get_portfolio()
         assert len(portfolio_after) == 1, "Roll failed: Number of legs changed."
         
-        # Mechanical Check: The strike MUST have moved up (further OTM for a call)
         new_strike = portfolio_after.iloc[0]['strike_price']
         assert new_strike > original_strike, f"Roll failed: Strike did not move up. Before: {original_strike}, After: {new_strike}"
 
-        # Strategic Check: The absolute delta MUST have been significantly reduced.
-        # Perform an apples-to-apples comparison in the final market state.
+        # Strategic Check: Apples-to-apples delta comparison
         current_price = env.price_manager.current_price
         iv_bin_index = env.iv_bin_index
-        
         stats_after = env.portfolio_manager.get_raw_portfolio_stats(current_price, iv_bin_index)
         delta_after = stats_after['delta']
         
         hypothetical_stats_before = env.portfolio_manager.get_raw_greeks_for_legs(portfolio_before, current_price, iv_bin_index)
         hypothetical_delta_before = hypothetical_stats_before['delta']
         
-        # The new delta should be much closer to zero.
         assert abs(delta_after) < abs(hypothetical_delta_before), f"Roll failed: Absolute delta did not decrease. Before: {hypothetical_delta_before:.2f}, After: {delta_after:.2f}"
-        # Add a stricter check: the new delta should be very small (e.g., less than 10).
         assert abs(delta_after) < 10.0, f"Roll failed: Final delta {delta_after:.2f} was not sufficiently close to zero."
 
         print(f"--- PASSED: {test_name} ---")
@@ -436,10 +441,13 @@ def test_greeks_and_risk_validation():
         validation_df['K'] = portfolio_df['strike_price']
         validation_df['t'] = portfolio_df['days_to_expiry'] / 365.25
         validation_df['r'] = risk_free_rate
+        # We must use the exact same volatility calculation that the PortfolioManager uses
+        # internally, which is its 'iv_calculator' method. This accounts for the
+        # dynamic IV from the transformer expert and the volatility premium.
         validation_df['sigma'] = np.array([
-            env.market_rules_manager.get_implied_volatility(
+            env.portfolio_manager.iv_calculator(
                 round((leg['strike_price'] - env.market_rules_manager.get_atm_price(current_price)) / env.strike_distance),
-                leg['type'], env.iv_bin_index
+                leg['type']
             ) for _, leg in portfolio_df.iterrows()
         ])
 
@@ -511,6 +519,7 @@ def test_greeks_and_risk_validation():
         truth_portfolio_delta = np.sum(validation_df['delta'].to_numpy() * pnl_multipliers * lot_size)
         
         # <<< --- THE FINAL FIX: Use a reasonable ABSOLUTE tolerance for the sum --- >>>
+        print(f"Delta           | {portfolio_stats['delta']:<15.4f} | {truth_portfolio_delta:<15.4f}")
         assert np.isclose(portfolio_stats['delta'], truth_portfolio_delta, atol=1.0)
         
         print(f"  - PASSED: Portfolio Delta is correct (Env: {portfolio_stats['delta']:.2f})")
@@ -1179,32 +1188,32 @@ if __name__ == "__main__":
 
     # A list of all test functions to be executed
     tests_to_run = [
-#        test_hedge_naked_put,
-#        test_convert_strangle_to_condor,
-#        test_convert_condor_to_vertical,
-#        test_shift_preserves_strategy,
-#        test_hedge_short_call,
-#        test_hedge_long_put,
-#        test_hedge_long_call,
-#        test_convert_straddle_to_fly,
-#        test_convert_call_fly_to_vertical,
-#        test_convert_put_fly_to_vertical,
-#        test_hedge_strangle_leg,
-#        test_hedge_straddle_leg,
-#        test_no_new_trades_when_active,
-#        test_all_open_actions_are_legal,
-#        test_dte_decay_logic,
-#        test_no_runaway_duplication_on_transform,
-#        test_close_all_action,
+        test_hedge_naked_put,
+        test_convert_strangle_to_condor,
+        test_convert_condor_to_vertical,
+        test_shift_preserves_strategy,
+        test_hedge_short_call,
+        test_hedge_long_put,
+        test_hedge_long_call,
+        test_convert_straddle_to_fly,
+        test_convert_call_fly_to_vertical,
+        test_convert_put_fly_to_vertical,
+        test_hedge_strangle_leg,
+        test_hedge_straddle_leg,
+        test_no_new_trades_when_active,
+        test_all_open_actions_are_legal,
+        test_dte_decay_logic,
+        test_no_runaway_duplication_on_transform,
+        test_close_all_action,
         test_greeks_and_risk_validation,
-#        test_open_short_call_condor,
-#        test_open_long_call_condor,
-#        test_convert_bull_call_spread_to_condor,
-#        test_convert_bear_put_spread_to_condor,
-#        test_hedge_delta_with_atm_option,
-#        test_increase_delta_by_shifting_leg,
-#        test_decrease_delta_by_shifting_leg,
-#        test_roll_leg_to_min_delta,
+        test_open_short_call_condor,
+        test_open_long_call_condor,
+        test_convert_bull_call_spread_to_condor,
+        test_convert_bear_put_spread_to_condor,
+        test_hedge_delta_with_atm_option,
+        test_increase_delta_by_shifting_leg,
+        test_decrease_delta_by_shifting_leg,
+        test_roll_leg_to_min_delta,
     ]
 
     failures = []
