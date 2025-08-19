@@ -60,7 +60,7 @@ class OptionsZeroGameEnv(gym.Env):
         lot_size=75,
         max_positions=4,
         strike_distance=50.0,
-        max_strike_offset=30,
+        max_strike_offset=50,
         bid_ask_spread_pct=0.002,
         brokerage_per_leg=25.0,
         days_before_liquidation=1,
@@ -88,7 +88,7 @@ class OptionsZeroGameEnv(gym.Env):
         stop_loss_multiple_of_cost=3.0, # NEW: Added stop loss multiple
         use_stop_loss=True,
         forced_opening_strategy_name=None,
-        disable_opening_curriculum=True,
+        disable_opening_curriculum=False,
 
         disable_spread_solver=False,
         

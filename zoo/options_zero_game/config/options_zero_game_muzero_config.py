@@ -178,7 +178,7 @@ class CurriculumHolder:
 # ==============================================================
 # This makes the script runnable from anywhere.
 # <<< NEW: Define high-level volatility parameters >>>
-MAX_STRIKE_OFFSET = 40
+MAX_STRIKE_OFFSET = 50
 AGENT_MAX_OPEN_OFFSET = 2
 ATM_IV = 25.0  # Volatility at the money is 25%
 FAR_OTM_PUT_IV = 50.0 # Volatility for the -30 strike put is 50%
@@ -275,7 +275,7 @@ options_zero_game_muzero_config = dict(
         # --- Collector-Specific Settings ---
         collector_env_num=collector_env_num,
         # The collector uses the opening curriculum.
-        disable_opening_curriculum=True,
+        disable_opening_curriculum=False,
         
         # --- Evaluator-Specific Settings ---
         evaluator_env_num=evaluator_env_num,
