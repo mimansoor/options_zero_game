@@ -72,7 +72,11 @@ def _numba_vega(S: float, K: float, T: float, r: float, sigma: float) -> float:
     d1 = (math.log(S / K) + (r + 0.5 * sigma ** 2) * T) / d1_denominator
 
     pdf_d1 = _numba_pdf(d1)
-    vega = (S * pdf_d1 * math.sqrt(T)) / 100.0
+
+    # <<< --- THE FIX: Return the raw, annualized Vega --- >>>
+    # The standard formula gives the change per 100% move in IV.
+    # The conversion to "per 1%" will happen in the manager class.
+    vega = S * pdf_d1 * math.sqrt(T)
     return vega if math.isfinite(vega) else 0.0
 
 @jit(nopython=True)
@@ -83,20 +87,19 @@ def _numba_theta(S: float, K: float, T: float, r: float, sigma: float, is_call: 
     if d1_denominator < 1e-8: return 0.0
     d1 = (math.log(S / K) + (r + 0.5 * sigma ** 2) * T) / d1_denominator
     d2 = d1 - sigma * math.sqrt(T)
-    
+
     pdf_d1 = _numba_pdf(d1)
-    
+
+    term1 = -(S * pdf_d1 * sigma) / (2 * math.sqrt(T))
+
     if is_call:
-        term1 = -(S * pdf_d1 * sigma) / (2 * math.sqrt(T))
         term2 = r * K * math.exp(-r * T) * _numba_cdf(d2)
-        theta = term1 - term2
-    else:
-        term1 = -(S * pdf_d1 * sigma) / (2 * math.sqrt(T))
+    else: # Put
         term2 = r * K * math.exp(-r * T) * _numba_cdf(-d2)
-        theta = term1 + term2
 
-    return (theta / 365.25) if math.isfinite(theta) else 0.0
+    annual_theta = term1 + term2
 
+    return annual_theta if math.isfinite(annual_theta) else 0.0
 
 class BlackScholesManager:
     """
@@ -115,26 +118,32 @@ class BlackScholesManager:
             delta = 1.0 if S > K else 0.0 if is_call else -1.0 if S < K else 0.0
             return {'price': price, 'delta': delta, 'gamma': 0.0, 'vega': 0.0, 'theta': 0.0, 'd2': 0.0}
 
-        # Calculate all values
+        # 1. Get the raw, annualized values from the pure Numba functions
         price = _numba_black_scholes(S, K, T_annual, self.risk_free_rate, sigma, is_call)
         delta = _numba_delta(S, K, T_annual, self.risk_free_rate, sigma, is_call)
         gamma = _numba_gamma(S, K, T_annual, self.risk_free_rate, sigma)
-        vega = _numba_vega(S, K, T_annual, self.risk_free_rate, sigma)
-        theta = _numba_theta(S, K, T_annual, self.risk_free_rate, sigma, is_call)
-        
+        raw_annual_vega = _numba_vega(S, K, T_annual, self.risk_free_rate, sigma)
+        raw_annual_theta = _numba_theta(S, K, T_annual, self.risk_free_rate, sigma, is_call)
+
         d1_denominator = sigma * math.sqrt(T_annual)
         d1 = (math.log(S / K) + (self.risk_free_rate + 0.5 * sigma ** 2) * T_annual) / d1_denominator
         d2 = d1 - sigma * math.sqrt(T_annual)
         
-        # --- Defensive Assertions ---
-        # Ensure that no calculation resulted in a non-finite number.
-        assert math.isfinite(price), f"Price calculation failed: {price} with inputs S={S}, K={K}, T={T_annual}, sigma={sigma}"
-        assert math.isfinite(delta), f"Delta calculation failed: {delta}"
-        assert math.isfinite(gamma), f"Gamma calculation failed: {gamma}"
-        assert math.isfinite(vega), f"Vega calculation failed: {vega}"
-        assert math.isfinite(theta), f"Theta calculation failed: {theta}"
+        # Convert Vega from "per 100% IV change" to "per 1% IV change"
+        final_vega = raw_annual_vega / 100.0
         
-        return {'price': price, 'delta': delta, 'gamma': gamma, 'vega': vega, 'theta': theta, 'd2': d2}
+        # Convert Theta from "per year" to "per calendar day"
+        final_theta = raw_annual_theta / 365.25
+
+        # --- Defensive Assertions ---
+        assert math.isfinite(price), "Price calculation failed"
+        assert math.isfinite(delta), "Delta calculation failed"
+        assert math.isfinite(gamma), "Gamma calculation failed"
+        assert math.isfinite(final_vega), "Vega calculation failed"
+        assert math.isfinite(final_theta), "Theta calculation failed"
+        
+        # Return the final, practical values
+        return {'price': price, 'delta': delta, 'gamma': gamma, 'vega': final_vega, 'theta': final_theta, 'd2': d2}
 
     def get_price_with_spread(self, mid_price: float, is_buy: bool, bid_ask_spread_pct: float) -> float:
         return mid_price * (1 + bid_ask_spread_pct) if is_buy else mid_price * (1 - bid_ask_spread_pct)

@@ -496,6 +496,11 @@ class OptionsZeroGameEnv(gym.Env):
                 resolved_action_name = f"SHIFT_{shift_dir}_POS_{leg_index}"
                 self.portfolio_manager.shift_position(resolved_action_name, self.price_manager.current_price, self.iv_bin_index, self.current_step)
 
+        # <<< --- NEW: Routing for the MIN_DELTA roll action --- >>>
+        elif final_action_name.startswith('ROLL_LEG_TO_MIN_DELTA_'):
+            leg_index = int(final_action_name.split('_')[-1])
+            self.portfolio_manager.roll_leg_to_min_delta(leg_index, self.price_manager.current_price, self.iv_bin_index, self.current_step)
+
         # 4. Sort the portfolio and take the crucial snapshot.
         self.portfolio_manager.sort_portfolio()
 
@@ -975,6 +980,10 @@ class OptionsZeroGameEnv(gym.Env):
             actions[f'INCREASE_DELTA_BY_SHIFTING_LEG_{j}'] = i; i+=1
             actions[f'DECREASE_DELTA_BY_SHIFTING_LEG_{j}'] = i; i+=1
 
+        # <<< --- NEW: Add the powerful risk-shedding roll action --- >>>
+        for j in range(self._cfg.max_positions):
+            actions[f'ROLL_LEG_TO_MIN_DELTA_{j}'] = i; i+=1
+
         actions['CLOSE_ALL'] = i
         return actions
         
@@ -1055,6 +1064,13 @@ class OptionsZeroGameEnv(gym.Env):
             # Check if decreasing delta is possible for this leg
             if self._is_delta_shift_possible(original_pos, 'decrease'):
                 self._set_if_exists(action_mask, f'DECREASE_DELTA_BY_SHIFTING_LEG_{i}')
+
+            # <<< --- NEW: Legality for the MIN_DELTA roll --- >>>
+            # We need the raw delta of the leg to check the threshold
+            leg_greeks = self.portfolio_manager.get_raw_greeks_for_legs([original_pos.to_dict()], self.price_manager.current_price, self.iv_bin_index)
+            # Only allow this aggressive action if the leg's delta is significant (e.g., > 10)
+            if abs(leg_greeks['delta']) > 10.0:
+                 self._set_if_exists(action_mask, f'ROLL_LEG_TO_MIN_DELTA_{i}')
 
         # --- 3. Whole-Portfolio Transformation Actions ---
         if not portfolio_df.empty:

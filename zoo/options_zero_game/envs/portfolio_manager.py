@@ -246,6 +246,46 @@ class PortfolioManager:
         self.lowest_realized_loss = 0.0
 
     # --- Public Methods (called by the main environment) ---
+    def roll_leg_to_min_delta(self, leg_index: int, current_price: float, iv_bin_index: int, current_step: int):
+        """
+        Finds the strike that minimizes the delta for a given leg and rolls
+        the position to that new strike.
+        """
+        if not (0 <= leg_index < len(self.portfolio)): return
+
+        leg_to_roll_df = self.portfolio.iloc[[leg_index]]
+        leg_to_roll = leg_to_roll_df.iloc[0]
+
+        # 1. Find the optimal new strike using the solver
+        new_strike = self._find_min_delta_strike(leg_to_roll, current_price, iv_bin_index)
+        
+        if new_strike is None or new_strike == leg_to_roll['strike_price']:
+            return # No valid or better strike found
+
+        # 2. Use the existing shift_position logic to perform the roll
+        # This is complex because we need to resolve to a series of UP or DOWN shifts.
+        # A simpler, more robust way is to re-implement the shift logic here.
+
+        original_creation_id = leg_to_roll['creation_id']
+        
+        untouched_legs = self.portfolio[self.portfolio['creation_id'] != original_creation_id]
+        sibling_legs = self.portfolio[(self.portfolio['creation_id'] == original_creation_id) & (self.portfolio.index != leg_index)]
+
+        self._process_leg_closures(leg_to_roll_df, current_price, current_step)
+        
+        new_leg_def = [{'type': leg_to_roll['type'], 'direction': leg_to_roll['direction'],
+                        'strike_price': new_strike, 'days_to_expiry': leg_to_roll['days_to_expiry'],
+                        'entry_step': current_step}]
+        priced_new_leg = self._price_legs(new_leg_def, current_price, iv_bin_index)
+        
+        modified_strategy_legs = sibling_legs.to_dict(orient='records') + priced_new_leg
+        pnl_profile = self._calculate_universal_risk_profile(modified_strategy_legs, self.realized_pnl)
+        pnl_profile['strategy_id'] = leg_to_roll['strategy_id']
+
+        self.portfolio = untouched_legs.copy()
+        self._execute_trades(modified_strategy_legs, pnl_profile)
+        self._update_hedge_status()
+
     def get_raw_greeks_for_legs(self, legs: List[Dict], current_price: float, iv_bin_index: int) -> Dict:
         """
         A helper method for testing that calculates the raw, un-normalized, aggregated
@@ -781,6 +821,42 @@ class PortfolioManager:
         }
 
     # --- Private Methods ---
+    def _find_min_delta_strike(self, leg_to_roll: pd.Series, current_price: float, iv_bin_index: int) -> float or None:
+        """
+        Solver that finds the strike price for a given leg that minimizes its absolute delta,
+        while ensuring the new strike doesn't conflict with existing positions.
+        """
+        best_strike = None
+        min_abs_delta = float('inf')
+        
+        # Search a wide range of OTM strikes
+        search_range = range(1, self.max_strike_offset + 1)
+        
+        # Determine the direction to search (up for calls, down for puts)
+        strike_modifier = 1 if leg_to_roll['type'] == 'call' else -1
+
+        for offset_multiplier in search_range:
+            candidate_strike = self.market_rules_manager.get_atm_price(current_price) + (offset_multiplier * self.strike_distance * strike_modifier)
+            if candidate_strike <= 0: continue
+
+            # Check for strike conflicts with other legs
+            is_conflict = any(
+                (pos['strike_price'] == candidate_strike and pos['type'] == leg_to_roll['type'])
+                for _, pos in self.portfolio.drop(leg_to_roll.name).iterrows()
+            )
+            if is_conflict: continue
+
+            # Calculate the delta for this candidate strike
+            temp_leg = leg_to_roll.copy()
+            temp_leg['strike_price'] = candidate_strike
+            greeks = self.get_raw_greeks_for_legs([temp_leg.to_dict()], current_price, iv_bin_index)
+            
+            if abs(greeks['delta']) < min_abs_delta:
+                min_abs_delta = abs(greeks['delta'])
+                best_strike = candidate_strike
+        
+        return best_strike
+
     def _get_total_expiry_pnl_at_price(self, legs_df: pd.DataFrame, price: float) -> float:
         """
         Calculates the total P&L for a given DataFrame of legs at a specific price
