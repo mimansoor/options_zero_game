@@ -829,30 +829,46 @@ class PortfolioManager:
     def _find_portfolio_neutral_strike(self, leg_index: int, current_price: float, iv_bin_index: int) -> float or None:
         """
         A powerful solver that finds the optimal new strike for a specific leg that
-        will bring the entire portfolio's net delta as close to zero as possible.
+        will bring the entire portfolio's net delta as close to zero as possible,
+        SUBJECT TO THE CONSTRAINT that a new short leg must have a premium above
+        the minimum threshold.
         """
         leg_to_roll = self.portfolio.iloc[leg_index]
         other_legs = self.portfolio.drop(leg_to_roll.name).to_dict('records')
         
         best_strike = None
-        # Initialize with the current portfolio's delta
         min_abs_portfolio_delta = abs(self.get_raw_portfolio_stats(current_price, iv_bin_index)['delta'])
         
-        # Search a wide range of strikes around the current price
         atm_price = self.market_rules_manager.get_atm_price(current_price)
         for offset in range(-self.max_strike_offset, self.max_strike_offset + 1):
             candidate_strike = atm_price + (offset * self.strike_distance)
             if candidate_strike <= 0 or candidate_strike == leg_to_roll['strike_price']:
                 continue
 
-            # Create the hypothetical new leg
             candidate_leg = leg_to_roll.to_dict()
             candidate_leg['strike_price'] = candidate_strike
             
-            # Create the hypothetical portfolio
+            # <<< --- THE DEFINITIVE FIX IS HERE --- >>>
+            # Before doing the expensive portfolio delta calculation, we perform
+            # a cheap check on the candidate leg itself.
+            if candidate_leg['direction'] == 'short':
+                # Price just this single leg to check its premium.
+                is_call = candidate_leg['type'] == 'call'
+                vol = self.iv_calculator(offset, candidate_leg['type'])
+                greeks_single_leg = self.bs_manager.get_all_greeks_and_price(
+                    current_price, candidate_strike, candidate_leg['days_to_expiry'], vol, is_call
+                )
+                premium = self.bs_manager.get_price_with_spread(
+                    greeks_single_leg['price'], is_buy=False, bid_ask_spread_pct=self.bid_ask_spread_pct
+                )
+                
+                # If the premium is below our minimum threshold, this strike is
+                # not a valid candidate. Skip it and move to the next one.
+                if premium < self.close_short_leg_on_profit_threshold:
+                    continue
+
+            # --- If the premium check passes, we proceed with the delta calculation ---
             hypothetical_portfolio_legs = other_legs + [candidate_leg]
-            
-            # Calculate the total delta for this hypothetical portfolio
             greeks = self.get_raw_greeks_for_legs(hypothetical_portfolio_legs, current_price, iv_bin_index)
             
             if abs(greeks['delta']) < min_abs_portfolio_delta:
