@@ -21,7 +21,7 @@ do
     source ../venv/bin/activate
 
     # Run your main evaluation script
-    ./run_periodic_evaluation.sh
+    ./run_periodic_evaluation.sh --profit_target_pct 3 --credit_tp_pct 70 --debit_tp_mult 2
 
     # Deactivate the environment (good practice)
     deactivate

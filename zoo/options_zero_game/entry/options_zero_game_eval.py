@@ -1,6 +1,3 @@
-# zoo/options_zero_game/entry/options_zero_game_eval.py
-# <<< UPGRADED VERSION with --symbol and --seed arguments >>>
-
 import numpy as np
 import argparse
 import time
@@ -19,6 +16,12 @@ if __name__ == "__main__":
     parser.add_argument('--strategy', type=str, default=None, help="Force a specific opening strategy for the replay.")
     parser.add_argument('--days', type=int, default=0, help="Force a specific episode length in days for the evaluation.")
     parser.add_argument('--agents_choice', action='store_true', help="Let the agent choose its own opening move (disables curriculum).")
+
+    # <<< --- NEW: Add the override arguments --- >>>
+    parser.add_argument('--profit_target_pct', type=float, default=None, help="Override the global profit target percentage (e.g., 3 for 3%).")
+    parser.add_argument('--credit_tp_pct', type=float, default=None, help="Override the take-profit percentage for credit strategies (e.g., 70 for 70%).")
+    parser.add_argument('--debit_tp_mult', type=float, default=None, help="Override the take-profit multiple for debit strategies (e.g., 2 for 2x).")
+    
     args = parser.parse_args()
 
     final_seed = int(time.time()) if args.seed < 0 else args.seed
@@ -30,9 +33,7 @@ if __name__ == "__main__":
     
     model_path = './best_ckpt/ckpt_best.pth.tar'
 
-    # This tells the DI-engine framework to put all logs and other output
-    # files for this run into a clean './evaluator' directory.
-    eval_main_config.exp_name = 'eval/evaluator'
+    eval_main_config.exp_name = 'evaluator'
 
     # --- Standard Evaluation Setup ---
     eval_create_config.env.type = 'log_replay'
@@ -40,9 +41,18 @@ if __name__ == "__main__":
     eval_main_config.env.evaluator_env_num = 1
     eval_main_config.env.n_evaluator_episode = 1
     eval_create_config.env_manager.type = 'base'
-    
-    # This ensures the evaluator uses human-readable sorting for the logs
     eval_main_config.env.is_eval_mode = True
+
+    # <<< --- NEW: Apply the overrides to the config --- >>>
+    if args.profit_target_pct is not None:
+        eval_main_config.env.profit_target_pct = args.profit_target_pct
+        print(f"--- OVERRIDE: Setting Profit Target to {args.profit_target_pct}% ---")
+    if args.credit_tp_pct is not None:
+        eval_main_config.env.credit_strategy_take_profit_pct = args.credit_tp_pct
+        print(f"--- OVERRIDE: Setting Credit Take-Profit to {args.credit_tp_pct}% ---")
+    if args.debit_tp_mult is not None:
+        eval_main_config.env.debit_strategy_take_profit_multiple = args.debit_tp_mult
+        print(f"--- OVERRIDE: Setting Debit Take-Profit to {args.debit_tp_mult}x ---")
 
     # --- Logic to control the opening move ---
     if args.strategy:
@@ -53,13 +63,10 @@ if __name__ == "__main__":
         eval_main_config.env.disable_opening_curriculum = True
     else:
         print("--- Using random curriculum for opening move ---")
-        # Default behavior, no change needed
 
     if args.symbol:
         print(f"--- Forcing evaluation on historical symbol: {args.symbol} ---")
         eval_main_config.env.forced_historical_symbol = args.symbol
-        
-        # If a symbol is provided, the price source MUST be historical.
         print(f"--- Setting price_source to 'historical' due to --symbol flag ---")
         eval_main_config.env.price_source = 'historical'
 
