@@ -1,42 +1,30 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import './App.css';
-
-// --- Charting Library Imports ---
 import { Line } from 'react-chartjs-2';
-import {
-  Chart as ChartJS, CategoryScale, LinearScale, PointElement, LineElement, Title, Tooltip, Legend, Filler
-} from 'chart.js';
+import { Chart as ChartJS, CategoryScale, LinearScale, PointElement, LineElement, Title, Tooltip, Legend, Filler } from 'chart.js';
 import annotationPlugin from 'chartjs-plugin-annotation';
 
 ChartJS.register(CategoryScale, LinearScale, PointElement, LineElement, Title, Tooltip, Legend, Filler, annotationPlugin);
 
-// ===================================================================================
-//                            JAVASCRIPT RE-SIMULATOR
-// ===================================================================================
 const reSimulateStep = (rawStepData, deNormParams, envDefaults) => {
     if (!rawStepData) return null;
-
     const newStepData = JSON.parse(JSON.stringify(rawStepData));
     const priceRatio = deNormParams.startPrice / envDefaults.startPrice;
     const pnlRatio = deNormParams.lotSize / envDefaults.lotSize;
-
     newStepData.info.price *= priceRatio;
     if(newStepData.info.initial_cash) newStepData.info.initial_cash *= pnlRatio;
-
     let totalUnrealizedPnl = 0;
     if (newStepData.portfolio) {
         newStepData.portfolio.forEach(leg => {
             const originalOffset = (leg.strike_price - envDefaults.startPrice) / envDefaults.strikeDistance;
             const rawNewStrike = deNormParams.startPrice + (originalOffset * deNormParams.strikeDistance);
             leg.strike_price = Math.round(rawNewStrike / deNormParams.strikeDistance) * deNormParams.strikeDistance;
-            
             leg.entry_premium *= priceRatio;
             leg.current_premium *= priceRatio;
             leg.live_pnl *= pnlRatio;
             totalUnrealizedPnl += leg.live_pnl;
         });
     }
-
     let totalRealizedPnl = 0;
     if (newStepData.info.closed_trades_log && newStepData.info.closed_trades_log.length > 0) {
         newStepData.info.closed_trades_log.forEach(trade => {
@@ -48,12 +36,10 @@ const reSimulateStep = (rawStepData, deNormParams, envDefaults) => {
             totalRealizedPnl += trade.realized_pnl;
         });
     } else { totalRealizedPnl = (newStepData.info.pnl_verification.realized_pnl || 0) * pnlRatio; }
-    
     newStepData.info.pnl_verification.realized_pnl = totalRealizedPnl;
     newStepData.info.pnl_verification.unrealized_pnl = totalUnrealizedPnl;
     newStepData.info.pnl_verification.verified_total_pnl = totalRealizedPnl + totalUnrealizedPnl;
     newStepData.info.eval_episode_return = newStepData.info.pnl_verification.verified_total_pnl;
-
     if(newStepData.info.portfolio_stats) {
         const stats = newStepData.info.portfolio_stats;
         stats.max_profit *= pnlRatio;
@@ -61,7 +47,6 @@ const reSimulateStep = (rawStepData, deNormParams, envDefaults) => {
         stats.net_premium = (stats.net_premium || 0) * pnlRatio;
         stats.breakevens = (stats.breakevens || []).map(be => ((be - envDefaults.startPrice) / envDefaults.strikeDistance * deNormParams.strikeDistance) + deNormParams.startPrice);
     }
-    
     if (newStepData.info.payoff_data && newStepData.info.payoff_data.expiry_pnl) {
         const payoff = newStepData.info.payoff_data;
         payoff.spot_price *= priceRatio;
@@ -72,12 +57,11 @@ const reSimulateStep = (rawStepData, deNormParams, envDefaults) => {
         payoff.expiry_pnl.forEach(point => { point.price *= priceRatio; point.pnl *= pnlRatio; });
         payoff.current_pnl.forEach(point => { point.price *= priceRatio; point.pnl *= pnlRatio; });
     }
-
     return newStepData;
 };
 
 // ===================================================================================
-//                            CHILD COMPONENTS
+//                            CHILD COMPONENTS (Now Bulletproof)
 // ===================================================================================
 
 function MetricsDashboard({ stepData }) {
@@ -160,6 +144,9 @@ function AgentBehaviorChart({ episodeHistory, historicalContext, deNormParams, e
 }
 
 function PortfolioRiskDashboard({ portfolioStats }) {
+    // <<< --- THE DEFINITIVE FIX --- >>>
+    // We provide a default empty object for portfolioStats, and for every
+    // property we access, ensuring it never tries to read a property of undefined.
     const { delta = 0, gamma = 0, theta = 0, vega = 0, max_profit = 0, max_loss = 0, rr_ratio = 0, prob_profit = 0, profit_factor = 0, breakevens = [], net_premium = 0 } = portfolioStats || {};
     const deltaColor = delta > 0 ? '#4CAF50' : delta < 0 ? '#F44336' : 'white';
     const formatBreakevens = (beArray) => {
@@ -213,6 +200,7 @@ function App() {
     const [startPrice, setStartPrice] = useState('20000');
     const [strikeDistance, setStrikeDistance] = useState('50');
     const [lotSize, setLotSize] = useState('75');
+    const [lots, setLots] = useState('1');
 
     const envDefaults = useMemo(() => ({ startPrice: 20000, strikeDistance: 50, lotSize: 75 }), []);
     const deNormParams = useMemo(() => ({
@@ -231,16 +219,28 @@ function App() {
 
     const displayedStepData = useMemo(() => {
         const paramsMatchDefaults = deNormParams.startPrice === envDefaults.startPrice && deNormParams.strikeDistance === envDefaults.strikeDistance && deNormParams.lotSize === envDefaults.lotSize;
-        
-        // <<< --- THE DEFINITIVE FIX IS HERE --- >>>
-        // We remove the isFinalStep bypass. The child components are now robust
-        // enough to handle the simplified final step data.
-        if (paramsMatchDefaults || !rawStepData) {
-            return rawStepData;
-        } else {
-            return reSimulateStep(rawStepData, deNormParams, envDefaults);
+        let baseStepData = rawStepData;
+
+        if (!paramsMatchDefaults && rawStepData && replayData) {
+            baseStepData = reSimulateStep(rawStepData, deNormParams, envDefaults);
         }
-    }, [rawStepData, deNormParams, envDefaults]);
+        
+        if (!baseStepData) return null;
+
+        const lotsMultiplier = Math.max(1, parseInt(lots) || 1);
+        if (lotsMultiplier === 1) return baseStepData;
+
+        const finalStepData = JSON.parse(JSON.stringify(baseStepData));
+        finalStepData.info.eval_episode_return *= lotsMultiplier;
+        finalStepData.info.pnl_verification.realized_pnl *= lotsMultiplier;
+        finalStepData.info.pnl_verification.unrealized_pnl *= lotsMultiplier;
+        finalStepData.info.pnl_verification.verified_total_pnl *= lotsMultiplier;
+        if (finalStepData.portfolio) { finalStepData.portfolio.forEach(leg => leg.live_pnl *= lotsMultiplier); }
+        if (finalStepData.info.closed_trades_log) { finalStepData.info.closed_trades_log.forEach(trade => trade.realized_pnl *= lotsMultiplier); }
+        if (finalStepData.info.portfolio_stats) { finalStepData.info.portfolio_stats.max_profit *= lotsMultiplier; finalStepData.info.portfolio_stats.max_loss *= lotsMultiplier; finalStepData.info.portfolio_stats.net_premium *= lotsMultiplier; }
+        if (finalStepData.info.payoff_data && finalStepData.info.payoff_data.expiry_pnl) { finalStepData.info.payoff_data.expiry_pnl.forEach(point => point.pnl *= lotsMultiplier); finalStepData.info.payoff_data.current_pnl.forEach(point => point.pnl *= lotsMultiplier); }
+        return finalStepData;
+    }, [rawStepData, deNormParams, envDefaults, lots, replayData]);
 
     const episodeHistory = replayData ? replayData.slice(0, currentStep + 1) : [];
     const getCheckpointFilename = (reportFilename) => { if (!reportFilename) return null; const timestamp = reportFilename.replace('strategy_report_', '').replace('.json', ''); return `ckpt_best_${timestamp}.pth.tar`; };
@@ -255,6 +255,7 @@ function App() {
                     <div className="input-group"><label>Start Price ($):</label><input type="number" value={startPrice} onChange={e => setStartPrice(e.target.value)} /></div>
                     <div className="input-group"><label>Strike Distance ($):</label><input type="number" value={strikeDistance} onChange={e => setStrikeDistance(e.target.value)} /></div>
                     <div className="input-group"><label>Lot Size (Shares/Contract):</label><input type="number" value={lotSize} onChange={e => setLotSize(e.target.value)} /></div>
+                    <div className="input-group"><label>Lots:</label><input type="number" value={lots} onChange={e => setLots(e.target.value)} min="1" step="1"/></div>
                 </div>
 
                 <div className="navigation-buttons view-toggle">

@@ -33,7 +33,7 @@ if __name__ == "__main__":
     
     model_path = './best_ckpt/ckpt_best.pth.tar'
 
-    eval_main_config.exp_name = 'evaluator'
+    eval_main_config.exp_name = 'eval/evaluator'
 
     # --- Standard Evaluation Setup ---
     eval_create_config.env.type = 'log_replay'
