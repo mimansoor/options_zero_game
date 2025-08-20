@@ -465,6 +465,8 @@ class OptionsZeroGameEnv(gym.Env):
             )
         elif final_action_name.startswith('CONVERT_TO_'):
             self._route_convert_action(final_action_name)
+        elif final_action_name == 'RECENTER_VOLATILITY_POSITION':
+            self.portfolio_manager.recenter_volatility_position(self.price_manager.current_price, self.iv_bin_index, self.current_step)
         # <<< --- NEW: Routing for Advanced Delta Management --- >>>
         elif final_action_name == 'HEDGE_DELTA_WITH_ATM_OPTION':
             current_day = self.current_step // self._cfg.steps_per_day
@@ -940,6 +942,10 @@ class OptionsZeroGameEnv(gym.Env):
         actions['CONVERT_TO_BULL_PUT_SPREAD'] = i; i+=1
         actions['CONVERT_TO_BEAR_PUT_SPREAD'] = i; i+=1
 
+        actions['RECENTER_VOLATILITY_POSITION'] = i; i+=1
+
+        actions['HEDGE_DELTA_WITH_ATM_OPTION'] = i; i+=1
+
         for d in ['LONG', 'SHORT']:
             actions[f'OPEN_{d}_STRADDLE'] = i; i+=1
 
@@ -952,7 +958,6 @@ class OptionsZeroGameEnv(gym.Env):
             actions[f'OPEN_{d}_IRON_FLY'] = i; i+=1
             actions[f'OPEN_{d}_IRON_CONDOR'] = i; i+=1
 
-            # <<< --- ADD THE NEW CONDOR ACTIONS HERE --- >>>
             for t in ['CALL', 'PUT']:
                 actions[f'OPEN_{d}_{t}_CONDOR'] = i; i+=1
 
@@ -960,9 +965,6 @@ class OptionsZeroGameEnv(gym.Env):
             for t in ['CALL', 'PUT']:
                 for d in ['LONG', 'SHORT']:
                     actions[f'OPEN_{d}_{t}_FLY_{w}'] = i; i+=1
-
-        # <<< --- NEW PORTFOLIO-LEVEL HEDGE ACTION --- >>>
-        actions['HEDGE_DELTA_WITH_ATM_OPTION'] = i; i+=1
 
         for j in range(self._cfg.max_positions):
             actions[f'CLOSE_POSITION_{j}'] = i; i+=1
@@ -1075,11 +1077,12 @@ class OptionsZeroGameEnv(gym.Env):
             option_type = portfolio_df.iloc[0]['type']
             s_map = self.strategy_name_to_id 
 
-            # Define sets of strategy IDs for easy checking
-            strangle_ids = {s_map.get(f'OPEN_{d}_STRANGLE_DELTA_{delta}') for d in ['LONG', 'SHORT'] for delta in [15, 20, 25, 30]}
-            straddle_id = s_map.get('SHORT_STRADDLE')
+            # --- Define specific strategy ID sets for clarity ---
+            short_strangle_ids = {s_map.get(f'OPEN_SHORT_STRANGLE_DELTA_{delta}') for delta in [15, 20, 25, 30]}
+            long_strangle_ids = {s_map.get(f'OPEN_LONG_STRANGLE_DELTA_{delta}') for delta in [15, 20, 25, 30]}
+            short_straddle_id = s_map.get('OPEN_SHORT_STRADDLE')
+            long_straddle_id = s_map.get('OPEN_LONG_STRADDLE')
             
-            # <<< --- THE CORRECTED LOGIC: A Comprehensive Set for All Condors --- >>>
             iron_condor_ids = {s_map.get(f'OPEN_{d}_IRON_CONDOR') for d in ['LONG', 'SHORT']}
             call_condor_ids = {s_map.get(f'OPEN_{d}_CALL_CONDOR') for d in ['LONG', 'SHORT']}
             put_condor_ids = {s_map.get(f'OPEN_{d}_PUT_CONDOR') for d in ['LONG', 'SHORT']}
@@ -1089,15 +1092,20 @@ class OptionsZeroGameEnv(gym.Env):
             put_fly_ids = {s_map.get(f'OPEN_{d}_PUT_FLY_{w}') for d in ['LONG', 'SHORT'] for w in [1, 2]}
             spread_ids = {s_map.get(f'OPEN_{d}_{t}_SPREAD') for d in ['BULL', 'BEAR'] for t in ['CALL', 'PUT']}
 
-            # a) Strangle -> Iron Condor
-            if current_strategy_id in strangle_ids and len(portfolio_df) <= self._cfg.max_positions - 2:
-                self._set_if_exists(action_mask, 'CONVERT_TO_IRON_CONDOR')
+            # --- Handle SHORT Volatility Positions ---
+            if current_strategy_id in short_strangle_ids:
+                if len(portfolio_df) <= self._cfg.max_positions - 2:
+                    self._set_if_exists(action_mask, 'CONVERT_TO_IRON_CONDOR')
+                # Fall through to the shared recenter check
+            elif current_strategy_id == short_straddle_id:
+                if len(portfolio_df) <= self._cfg.max_positions - 2:
+                    self._set_if_exists(action_mask, 'CONVERT_TO_IRON_FLY')
+                # Fall through to the shared recenter check
             
-            # b) Straddle -> Iron Fly
-            elif current_strategy_id == straddle_id and len(portfolio_df) <= self._cfg.max_positions - 2:
-                self._set_if_exists(action_mask, 'CONVERT_TO_IRON_FLY')
-            
-            # <<< --- THE CORRECTED LOGIC: Nuanced Conversion Rules for Condors --- >>>
+            # --- Handle LONG Volatility Positions (They cannot be converted) ---
+            elif current_strategy_id in long_strangle_ids or current_strategy_id == long_straddle_id:
+                pass # Explicitly do nothing for conversions, fall through to recenter check
+
             elif current_strategy_id in iron_condor_ids:
                 self._set_if_exists(action_mask, 'CONVERT_TO_STRANGLE') # Only Iron Condors can become Strangles
                 self._set_if_exists(action_mask, 'CONVERT_TO_BULL_PUT_SPREAD')
@@ -1128,6 +1136,12 @@ class OptionsZeroGameEnv(gym.Env):
                     self._set_if_exists(action_mask, 'CONVERT_TO_CALL_CONDOR')
                 else: # put
                     self._set_if_exists(action_mask, 'CONVERT_TO_PUT_CONDOR')
+
+            # --- Shared Legality Check for Re-centering (Applies to Strangles & Straddles) ---
+            if current_strategy_id in short_strangle_ids.union(long_strangle_ids, {short_straddle_id, long_straddle_id}):
+                greeks = self.portfolio_manager.get_portfolio_greeks(self.price_manager.current_price, self.iv_bin_index)
+                if abs(greeks['delta_norm']) > self.delta_neutral_threshold:
+                    self._set_if_exists(action_mask, 'RECENTER_VOLATILITY_POSITION')
 
         # <<< --- NEW: Legality for HEDGE_DELTA action --- >>>
         # Legal if delta is non-neutral AND there is an empty slot for the new leg

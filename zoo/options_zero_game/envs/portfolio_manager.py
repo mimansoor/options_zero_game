@@ -2177,6 +2177,58 @@ class PortfolioManager:
         self.portfolio = self.portfolio[self.portfolio['creation_id'] != original_creation_id].reset_index(drop=True)
         self._execute_trades(legs_to_keep, pnl_profile)
 
+    def recenter_volatility_position(self, current_price: float, iv_bin_index: int, current_step: int):
+        """
+        Adjusts a 2-leg strangle or straddle by closing the old position and
+        opening a new one with the SAME STRIKE WIDTH, perfectly centered
+        around the new at-the-money price.
+        """
+        # --- 1. Guard Clauses & Get Original Position Info ---
+        if len(self.portfolio) != 2 or not (self.portfolio['type'].isin(['call', 'put']).all() and len(self.portfolio['type'].unique()) == 2):
+            return
+
+        original_legs = self.portfolio.to_dict('records')
+        original_creation_id = original_legs[0]['creation_id']
+        original_strategy_id = original_legs[0]['strategy_id']
+        days_to_expiry = original_legs[0]['days_to_expiry']
+        
+        call_leg_before = next(leg for leg in original_legs if leg['type'] == 'call')
+        put_leg_before = next(leg for leg in original_legs if leg['type'] == 'put')
+        
+        # --- 2. Calculate New Strikes based on Original Width ---
+        original_width = abs(call_leg_before['strike_price'] - put_leg_before['strike_price'])
+        atm_price = self.market_rules_manager.get_atm_price(current_price)
+        
+        new_put_strike = self.market_rules_manager._round_to_strike_increment(atm_price - (original_width / 2))
+        new_call_strike = self.market_rules_manager._round_to_strike_increment(atm_price + (original_width / 2))
+
+        if (new_put_strike == put_leg_before['strike_price'] and new_call_strike == call_leg_before['strike_price']):
+            return # No change needed
+
+        # --- 3. Close the old position ---
+        self.close_all_positions(current_price, iv_bin_index, current_step)
+
+        # --- 4. Define and open the new, re-centered position ---
+        new_legs_def = [
+            {'type': 'put', 'direction': put_leg_before['direction'], 'strike_price': new_put_strike},
+            {'type': 'call', 'direction': call_leg_before['direction'], 'strike_price': new_call_strike}
+        ]
+        for leg in new_legs_def:
+            leg.update({'days_to_expiry': days_to_expiry, 'entry_step': current_step})
+
+        should_check_rule = (put_leg_before['direction'] == 'short')
+        priced_new_legs = self._price_legs(new_legs_def, current_price, iv_bin_index, check_short_rule=should_check_rule)
+        
+        if not priced_new_legs:
+            print("DEBUG: Re-centering failed due to illegal new legs. Position is now flat.")
+            return
+
+        # --- 5. Finalize the New Position ---
+        # The portfolio is now empty. We create the new one, preserving the original strategy ID.
+        pnl_profile = self._calculate_universal_risk_profile(priced_new_legs, self.realized_pnl)
+        pnl_profile['strategy_id'] = original_strategy_id
+        self._execute_trades(priced_new_legs, pnl_profile)
+
     def debug_print_portfolio(self, current_price: float, step: int, day: int, action_taken: str):
         return
         """

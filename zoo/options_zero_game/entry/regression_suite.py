@@ -104,6 +104,69 @@ def test_hedge_portfolio_by_rolling_leg():
     finally:
         env.close()
 
+def test_recenter_volatility_position():
+    """
+    Tests if RECENTER_VOLATILITY_POSITION correctly moves a straddle to the new
+    ATM price, resulting in a significant reduction of the absolute portfolio delta.
+    """
+    test_name = "test_recenter_volatility_position"
+    print(f"\n--- RUNNING: {test_name} ---")
+    env = create_test_env('OPEN_SHORT_STRADDLE')
+    try:
+        # Step 1: Open the position and wait for a delta imbalance
+        env.reset(seed=64)
+        timestep = env.step(env.actions_to_indices['HOLD'])
+        assert len(env.portfolio_manager.get_portfolio()) == 2, "Setup failed: Did not open initial straddle."
+
+        max_wait_steps = 50
+        action_to_take = env.actions_to_indices['RECENTER_VOLATILITY_POSITION']
+        
+        print("[TEST_DEBUG] Waiting for delta imbalance to make RECENTER action legal...")
+        for i in range(max_wait_steps):
+            action_mask = timestep.obs['action_mask']
+            if action_mask[action_to_take] == 1:
+                print(f"[TEST_DEBUG] RECENTER action became legal after {i+1} market steps.")
+                break
+            timestep = env.step(env.actions_to_indices['HOLD'])
+        else:
+            stats = env.portfolio_manager.get_raw_portfolio_stats(env.price_manager.current_price, env.iv_bin_index)
+            assert False, f"RECENTER action did not become legal within {max_wait_steps} steps. Final delta_norm: {stats['delta'] / (4*75):.4f}"
+        
+        # Step 2: Now that the action is legal, perform the apples-to-apples comparison.
+        # Capture the state BEFORE the action.
+        portfolio_before = env.portfolio_manager.get_portfolio().to_dict('records')
+        current_price_before_action = env.price_manager.current_price
+        iv_bin_index_before_action = env.iv_bin_index
+        
+        # Calculate what the delta of the imbalanced position is.
+        hypothetical_delta_before = env.portfolio_manager.get_raw_greeks_for_legs(portfolio_before, current_price_before_action, iv_bin_index_before_action)['delta']
+
+        # Step 3: Execute the recenter action
+        env.step(action_to_take)
+        
+        # --- Assertions ---
+        portfolio_after = env.portfolio_manager.get_portfolio()
+        assert len(portfolio_after) == 2, f"Recenter failed: Expected 2 legs."
+
+        # Strategic Check (Risk): Did the absolute delta decrease?
+        stats_after = env.portfolio_manager.get_raw_portfolio_stats(env.price_manager.current_price, env.iv_bin_index)
+        delta_after = stats_after['delta']
+
+        print(f"[TEST_DEBUG] Delta Before (Imbalanced): {hypothetical_delta_before:.2f}, Delta After (Recentered): {delta_after:.2f}")
+
+        # The new delta, even if not zero, MUST be smaller in magnitude than the old one.
+        assert abs(delta_after) < abs(hypothetical_delta_before), \
+            f"Recenter failed to reduce the delta imbalance. Before: {hypothetical_delta_before:.2f}, After: {delta_after:.2f}"
+
+        print(f"--- PASSED: {test_name} ---")
+        return True
+    except Exception:
+        traceback.print_exc()
+        print(f"--- FAILED: {test_name} ---")
+        return False
+    finally:
+        env.close()
+
 # ==============================================================================
 #                 ADVANCED DELTA MANAGEMENT TEST CASES
 # ==============================================================================
@@ -1218,6 +1281,7 @@ if __name__ == "__main__":
         test_increase_delta_by_shifting_leg,
         test_decrease_delta_by_shifting_leg,
         test_hedge_portfolio_by_rolling_leg,
+        test_recenter_volatility_position,
     ]
 
     failures = []
