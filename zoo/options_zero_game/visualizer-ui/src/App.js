@@ -13,40 +13,47 @@ ChartJS.register(CategoryScale, LinearScale, PointElement, LineElement, Title, T
 // ===================================================================================
 //                            JAVASCRIPT RE-SIMULATOR
 // ===================================================================================
-// This function is correct and robust. It scales existing values.
 const reSimulateStep = (rawStepData, deNormParams, envDefaults) => {
     if (!rawStepData) return null;
+
     const newStepData = JSON.parse(JSON.stringify(rawStepData));
     const priceRatio = deNormParams.startPrice / envDefaults.startPrice;
     const pnlRatio = deNormParams.lotSize / envDefaults.lotSize;
+
     newStepData.info.price *= priceRatio;
     if(newStepData.info.initial_cash) newStepData.info.initial_cash *= pnlRatio;
+
     let totalUnrealizedPnl = 0;
     if (newStepData.portfolio) {
         newStepData.portfolio.forEach(leg => {
             const originalOffset = (leg.strike_price - envDefaults.startPrice) / envDefaults.strikeDistance;
-            leg.strike_price = deNormParams.startPrice + (originalOffset * deNormParams.strikeDistance);
+            const rawNewStrike = deNormParams.startPrice + (originalOffset * deNormParams.strikeDistance);
+            leg.strike_price = Math.round(rawNewStrike / deNormParams.strikeDistance) * deNormParams.strikeDistance;
+            
             leg.entry_premium *= priceRatio;
             leg.current_premium *= priceRatio;
             leg.live_pnl *= pnlRatio;
             totalUnrealizedPnl += leg.live_pnl;
         });
     }
+
     let totalRealizedPnl = 0;
-    if (newStepData.info.closed_trades_log) {
+    if (newStepData.info.closed_trades_log && newStepData.info.closed_trades_log.length > 0) {
         newStepData.info.closed_trades_log.forEach(trade => {
             const originalOffset = (trade.strike - envDefaults.startPrice) / envDefaults.strikeDistance;
-            trade.strike = deNormParams.startPrice + (originalOffset * deNormParams.strikeDistance);
+            trade.strike = Math.round((deNormParams.startPrice + (originalOffset * deNormParams.strikeDistance)) / deNormParams.strikeDistance) * deNormParams.strikeDistance;
             trade.entry_prem *= priceRatio;
             trade.exit_prem *= priceRatio;
             trade.realized_pnl *= pnlRatio;
             totalRealizedPnl += trade.realized_pnl;
         });
     } else { totalRealizedPnl = (newStepData.info.pnl_verification.realized_pnl || 0) * pnlRatio; }
+    
     newStepData.info.pnl_verification.realized_pnl = totalRealizedPnl;
     newStepData.info.pnl_verification.unrealized_pnl = totalUnrealizedPnl;
     newStepData.info.pnl_verification.verified_total_pnl = totalRealizedPnl + totalUnrealizedPnl;
     newStepData.info.eval_episode_return = newStepData.info.pnl_verification.verified_total_pnl;
+
     if(newStepData.info.portfolio_stats) {
         const stats = newStepData.info.portfolio_stats;
         stats.max_profit *= pnlRatio;
@@ -54,6 +61,7 @@ const reSimulateStep = (rawStepData, deNormParams, envDefaults) => {
         stats.net_premium = (stats.net_premium || 0) * pnlRatio;
         stats.breakevens = (stats.breakevens || []).map(be => ((be - envDefaults.startPrice) / envDefaults.strikeDistance * deNormParams.strikeDistance) + deNormParams.startPrice);
     }
+    
     if (newStepData.info.payoff_data && newStepData.info.payoff_data.expiry_pnl) {
         const payoff = newStepData.info.payoff_data;
         payoff.spot_price *= priceRatio;
@@ -64,11 +72,12 @@ const reSimulateStep = (rawStepData, deNormParams, envDefaults) => {
         payoff.expiry_pnl.forEach(point => { point.price *= priceRatio; point.pnl *= pnlRatio; });
         payoff.current_pnl.forEach(point => { point.price *= priceRatio; point.pnl *= pnlRatio; });
     }
+
     return newStepData;
 };
 
 // ===================================================================================
-//                            CHILD COMPONENTS (Now Bulletproof)
+//                            CHILD COMPONENTS
 // ===================================================================================
 
 function MetricsDashboard({ stepData }) {
@@ -131,50 +140,12 @@ function PayoffDiagram({ payoffData }) {
     if (!payoffData || !payoffData.expiry_pnl || !payoffData.expiry_pnl.length) {
         return <p className="empty-message">Portfolio is empty.</p>;
     }
-
     const { expiry_pnl, current_pnl, spot_price = 0, sigma_levels = {} } = payoffData;
     const { plus_one = spot_price, minus_one = spot_price } = sigma_levels;
-
-    const data = {
-        labels: expiry_pnl.map(d => d.price),
-        datasets: [
-            {
-                label: 'P&L at Expiry',
-                data: expiry_pnl.map(d => d.pnl),
-                borderColor: '#E91E63',
-                tension: 0.1,
-                pointRadius: 0,
-                fill: true,
-                backgroundColor: (context) => {
-                    const chart = context.chart;
-                    const { ctx, chartArea } = chart;
-                    if (!chartArea) return null;
-
-                    const zero = chart.scales.y.getPixelForValue(0);
-                    let zeroPoint = (zero - chartArea.top) / (chartArea.bottom - chartArea.top);
-                    
-                    // <<< --- THE DEFINITIVE FIX: Clamp the zeroPoint to the valid [0, 1] range --- >>>
-                    zeroPoint = Math.max(0, Math.min(1, zeroPoint));
-
-                    const gradient = ctx.createLinearGradient(0, chartArea.top, 0, chartArea.bottom);
-                    const epsilon = 0.0001;
-                    
-                    gradient.addColorStop(0, 'rgba(76, 175, 80, 0.5)');
-                    gradient.addColorStop(Math.max(0, zeroPoint - epsilon), 'rgba(76, 175, 80, 0.5)');
-                    gradient.addColorStop(zeroPoint, 'rgba(244, 67, 54, 0.5)');
-                    gradient.addColorStop(1, 'rgba(244, 67, 54, 0.5)');
-                    
-                    return gradient;
-                },
-            },
-            { label: 'Mark-to-Market P&L (T+0)', data: current_pnl.map(d => d.pnl), borderColor: '#2196F3', borderDash: [5, 5], tension: 0.4, pointRadius: 0 }
-        ],
-    };
-    
+    const data = { labels: expiry_pnl.map(d => d.price), datasets: [ { label: 'P&L at Expiry', data: expiry_pnl.map(d => d.pnl), borderColor: '#E91E63', tension: 0.1, pointRadius: 0, fill: true, backgroundColor: (context) => { const chart = context.chart; const { ctx, chartArea } = chart; if (!chartArea) { return null; } let zeroPoint = (chart.scales.y.getPixelForValue(0) - chartArea.top) / (chartArea.bottom - chartArea.top); zeroPoint = Math.max(0, Math.min(1, zeroPoint)); const gradient = ctx.createLinearGradient(0, chartArea.top, 0, chartArea.bottom); const epsilon = 0.0001; gradient.addColorStop(0, 'rgba(76, 175, 80, 0.5)'); gradient.addColorStop(Math.max(0, zeroPoint - epsilon), 'rgba(76, 175, 80, 0.5)'); gradient.addColorStop(zeroPoint, 'rgba(244, 67, 54, 0.5)'); gradient.addColorStop(1, 'rgba(244, 67, 54, 0.5)'); return gradient; }, }, { label: 'Mark-to-Market P&L (T+0)', data: current_pnl.map(d => d.pnl), borderColor: '#2196F3', borderDash: [5, 5], tension: 0.4, pointRadius: 0 } ], };
     const allPnlValues = [...expiry_pnl.map(d => d.pnl), ...current_pnl.map(d => d.pnl)];
     const minY = Math.min(...allPnlValues); const maxY = Math.max(...allPnlValues); const padding = Math.abs(maxY - minY) * 0.1;
     const options = { responsive: true, maintainAspectRatio: false, scales: { x: { type: 'linear', ticks: { color: 'white', callback: (value) => '$' + value.toLocaleString() } }, y: { ticks: { color: 'white', callback: (value) => '$' + value.toLocaleString() }, min: minY - padding, max: maxY + padding, grid: { color: (c) => c.tick.value === 0 ? 'rgba(255, 255, 255, 0.8)' : 'rgba(255, 255, 255, 0.2)', lineWidth: (c) => c.tick.value === 0 ? 2 : 1 } } }, plugins: { legend: { labels: { color: 'white' } }, annotation: { annotations: { spotLine: { type: 'line', xMin: spot_price, xMax: spot_price, borderColor: '#4CAF50', borderWidth: 2, label: { content: `Spot: ${spot_price.toFixed(2)}`, enabled: true, position: 'start' } }, plusOneSigma: { type: 'line', xMin: plus_one, xMax: plus_one, borderColor: 'rgba(255, 255, 255, 0.3)', borderWidth: 1, borderDash: [6, 6] }, minusOneSigma: { type: 'line', xMin: minus_one, xMax: minus_one, borderColor: 'rgba(255, 255, 255, 0.3)', borderWidth: 1, borderDash: [6, 6] } } } } };
-    
     return <div className="chart-container"><Line options={options} data={data} /></div>;
 }
 
@@ -260,12 +231,16 @@ function App() {
 
     const displayedStepData = useMemo(() => {
         const paramsMatchDefaults = deNormParams.startPrice === envDefaults.startPrice && deNormParams.strikeDistance === envDefaults.strikeDistance && deNormParams.lotSize === envDefaults.lotSize;
-        if (paramsMatchDefaults || !rawStepData || !replayData) {
+        
+        // <<< --- THE DEFINITIVE FIX IS HERE --- >>>
+        // We remove the isFinalStep bypass. The child components are now robust
+        // enough to handle the simplified final step data.
+        if (paramsMatchDefaults || !rawStepData) {
             return rawStepData;
         } else {
             return reSimulateStep(rawStepData, deNormParams, envDefaults);
         }
-    }, [rawStepData, deNormParams, envDefaults, replayData]);
+    }, [rawStepData, deNormParams, envDefaults]);
 
     const episodeHistory = replayData ? replayData.slice(0, currentStep + 1) : [];
     const getCheckpointFilename = (reportFilename) => { if (!reportFilename) return null; const timestamp = reportFilename.replace('strategy_report_', '').replace('.json', ''); return `ckpt_best_${timestamp}.pth.tar`; };

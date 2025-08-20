@@ -100,6 +100,11 @@ class OptionsZeroGameEnv(gym.Env):
         itm_long_delta_threshold=0.55, # Disallow buying options with delta > 55
         itm_short_delta_threshold=0.55, # Disallow shorting options with delta > 55
 
+        # <<< --- NEW: The Liquidity Window Parameter --- >>>
+        # The max number of strikes away from the ATM that the portfolio hedge solver
+        # is allowed to search. Prevents rolling to illiquid, far OTM options.
+        hedge_roll_search_width=10, # ATM +/- 10 strikes seems like a reasonable default
+
         strategy_name_to_id={}, # Can be left empty, as it's populated from the main config
     )
 
@@ -305,7 +310,7 @@ class OptionsZeroGameEnv(gym.Env):
         # --- 5. Initialize the Portfolio Manager ---
         # This must happen AFTER the MarketRulesManager is created.
         self.portfolio_manager = PortfolioManager(
-            cfg=self._cfg,
+            cfg=self._cfg, # This now automatically includes the new parameter
             bs_manager=self.bs_manager,
             market_rules_manager=self.market_rules_manager,
             iv_calculator_func=self._get_dynamic_iv,
