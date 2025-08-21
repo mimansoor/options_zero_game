@@ -1,11 +1,7 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import './App.css';
-
-// --- Charting Library Imports ---
 import { Line } from 'react-chartjs-2';
-import {
-  Chart as ChartJS, CategoryScale, LinearScale, PointElement, LineElement, Title, Tooltip, Legend, Filler
-} from 'chart.js';
+import { Chart as ChartJS, CategoryScale, LinearScale, PointElement, LineElement, Title, Tooltip, Legend, Filler } from 'chart.js';
 import annotationPlugin from 'chartjs-plugin-annotation';
 
 ChartJS.register(CategoryScale, LinearScale, PointElement, LineElement, Title, Tooltip, Legend, Filler, annotationPlugin);
@@ -13,6 +9,7 @@ ChartJS.register(CategoryScale, LinearScale, PointElement, LineElement, Title, T
 // ===================================================================================
 //                            JAVASCRIPT RE-SIMULATOR
 // ===================================================================================
+// This function remains the same as the last correct version.
 const reSimulateStep = (rawStepData, deNormParams, envDefaults) => {
     if (!rawStepData) return null;
     const newStepData = JSON.parse(JSON.stringify(rawStepData));
@@ -32,17 +29,7 @@ const reSimulateStep = (rawStepData, deNormParams, envDefaults) => {
             totalUnrealizedPnl += leg.live_pnl;
         });
     }
-    let totalRealizedPnl = 0;
-    if (newStepData.info.closed_trades_log && newStepData.info.closed_trades_log.length > 0) {
-        newStepData.info.closed_trades_log.forEach(trade => {
-            const originalOffset = (trade.strike - envDefaults.startPrice) / envDefaults.strikeDistance;
-            trade.strike = Math.round((deNormParams.startPrice + (originalOffset * deNormParams.strikeDistance)) / deNormParams.strikeDistance) * deNormParams.strikeDistance;
-            trade.entry_prem *= priceRatio;
-            trade.exit_prem *= priceRatio;
-            trade.realized_pnl *= pnlRatio;
-            totalRealizedPnl += trade.realized_pnl;
-        });
-    } else { totalRealizedPnl = (newStepData.info.pnl_verification.realized_pnl || 0) * pnlRatio; }
+    let totalRealizedPnl = (newStepData.info.pnl_verification.realized_pnl || 0) * pnlRatio;
     newStepData.info.pnl_verification.realized_pnl = totalRealizedPnl;
     newStepData.info.pnl_verification.unrealized_pnl = totalUnrealizedPnl;
     newStepData.info.pnl_verification.verified_total_pnl = totalRealizedPnl + totalUnrealizedPnl;
@@ -208,37 +195,34 @@ function StrategyReport({ reportData }) {
     </tbody></table></div></div>);
 }
 
-function ReplayerView({ deNormParams, envDefaults }) {
-    const [replayData, setReplayData] = useState(null);
-    const [historicalContext, setHistoricalContext] = useState([]);
-    const [currentStep, setCurrentStep] = useState(0);
-    useEffect(() => { fetch(`/replay_log.json?t=${new Date().getTime()}`).then(res => res.ok ? res.json() : Promise.reject(res)).then(logObject => { setHistoricalContext(logObject.historical_context || []); setReplayData(logObject.episode_data || []); }).catch(error => console.error('Could not load replay_log.json', error)); }, []);
-    const goToStep = (step) => setCurrentStep(Math.max(0, Math.min(replayData ? replayData.length - 1 : 0, step)));
-    const rawStepData = replayData ? replayData[currentStep] : null;
-    const displayedStepData = useMemo(() => {
-        const paramsMatchDefaults = deNormParams.startPrice === envDefaults.startPrice && deNormParams.strikeDistance === envDefaults.strikeDistance && deNormParams.lotSize === envDefaults.lotSize;
-        if (paramsMatchDefaults || !rawStepData || !replayData) {
-            return rawStepData;
-        } else {
-            return reSimulateStep(rawStepData, deNormParams, envDefaults);
-        }
-    }, [rawStepData, deNormParams, envDefaults, replayData]);
-    const episodeHistory = replayData ? replayData.slice(0, currentStep + 1) : [];
-    if (!replayData || !displayedStepData) { return <p><i>Loading Replay Data... (Run an evaluation to generate `replay_log.json`)</i></p>; }
-    return (<div className="main-content">
-        <div className="top-bar"><h2>Step: {displayedStepData.step} / {displayedStepData.info.total_steps_in_episode} (Day: {displayedStepData.day})</h2><div className="navigation-buttons"><button onClick={() => goToStep(currentStep - 1)} disabled={currentStep === 0}>Prev S</button><button onClick={() => goToStep(currentStep + 1)} disabled={currentStep >= replayData.length - 1}>Next S</button></div><input type="range" min="0" max={replayData.length - 1} value={currentStep} onChange={(e) => setCurrentStep(Number(e.target.value))} className="slider" /></div>
-        <MetricsDashboard stepData={displayedStepData} />
-        <div className="charts-container">
-            <div className="card chart-card"><h3>Agent Behavior</h3><AgentBehaviorChart episodeHistory={episodeHistory} historicalContext={historicalContext} deNormParams={deNormParams} envDefaults={envDefaults} /></div>
-            <div className="card chart-card"><h3>Portfolio P&L Diagram</h3><PayoffDiagram payoffData={displayedStepData.info.payoff_data} /></div>
+// <<< --- NEW: A truly "dumb" ReplayerView that only renders props --- >>>
+function ReplayerView({ displayedStepData, replayData, currentStep, goToStep, episodeHistory, historicalContext, deNormParams, envDefaults }) {
+    if (!replayData || !displayedStepData) {
+        return <p><i>Loading Replay Data... (Run an evaluation to generate `replay_log.json`)</i></p>;
+    }
+    return (
+        <div className="main-content">
+            <div className="top-bar">
+                <h2>Step: {displayedStepData.step} / {displayedStepData.info.total_steps_in_episode} (Day: {displayedStepData.day})</h2>
+                <div className="navigation-buttons">
+                    <button onClick={() => goToStep(currentStep - 1)} disabled={currentStep === 0}>Prev S</button>
+                    <button onClick={() => goToStep(currentStep + 1)} disabled={currentStep >= replayData.length - 1}>Next S</button>
+                </div>
+                <input type="range" min="0" max={replayData.length - 1} value={currentStep} onChange={(e) => goToStep(Number(e.target.value))} className="slider" />
+            </div>
+            <MetricsDashboard stepData={displayedStepData} />
+            <div className="charts-container">
+                <div className="card chart-card"><h3>Agent Behavior</h3><AgentBehaviorChart episodeHistory={episodeHistory} historicalContext={historicalContext} deNormParams={deNormParams} envDefaults={envDefaults} /></div>
+                <div className="card chart-card"><h3>Portfolio P&L Diagram</h3><PayoffDiagram payoffData={displayedStepData.info.payoff_data} /></div>
+            </div>
+            <div className="info-panels-container">
+               <div className="card"><h3>Active Positions</h3><ActivePositions portfolio={displayedStepData.portfolio} /></div>
+               <div className="card"><h3>Portfolio Risk Profile</h3><PortfolioRiskDashboard portfolioStats={displayedStepData.info.portfolio_stats} /></div>
+               <div className="card"><h3>Closed Trades Log</h3><ClosedTradesLog closedTrades={displayedStepData.info.closed_trades_log} /></div>
+               <div className="card"><h3>P&L Verification</h3><PnlVerification verificationData={displayedStepData.info.pnl_verification} /></div>
+            </div>
         </div>
-        <div className="info-panels-container">
-           <div className="card"><h3>Active Positions</h3><ActivePositions portfolio={displayedStepData.portfolio} /></div>
-           <div className="card"><h3>Portfolio Risk Profile</h3><PortfolioRiskDashboard portfolioStats={displayedStepData.info.portfolio_stats} /></div>
-           <div className="card"><h3>Closed Trades Log</h3><ClosedTradesLog closedTrades={displayedStepData.info.closed_trades_log} /></div>
-           <div className="card"><h3>P&L Verification</h3><PnlVerification verificationData={displayedStepData.info.pnl_verification} /></div>
-        </div>
-    </div>);
+    );
 }
 
 // ===================================================================================
@@ -246,9 +230,14 @@ function ReplayerView({ deNormParams, envDefaults }) {
 // ===================================================================================
 
 function App() {
+    // --- State is now correctly centralized in the top-level component ---
+    const [replayData, setReplayData] = useState(null);
+    const [historicalContext, setHistoricalContext] = useState([]);
+    const [currentStep, setCurrentStep] = useState(0);
+
     const [reportHistory, setReportHistory] = useState([]);
     const [selectedReportFile, setSelectedReportFile] = useState(null);
-    const [selectedReportData, setSelectedReportData] = useState(null); // Default to null
+    const [selectedReportData, setSelectedReportData] = useState(null);
     const [isLoadingReport, setIsLoadingReport] = useState(false);
     const [view, setView] = useState('replayer');
 
@@ -264,26 +253,44 @@ function App() {
         lotSize: parseFloat(lotSize) || envDefaults.lotSize
     }), [startPrice, strikeDistance, lotSize, envDefaults]);
 
+    useEffect(() => { fetch(`/replay_log.json?t=${new Date().getTime()}`).then(res => res.ok ? res.json() : Promise.reject(res)).then(logObject => { setHistoricalContext(logObject.historical_context || []); setReplayData(logObject.episode_data || []); }).catch(error => console.error('Could not load replay_log.json', error)); }, []);
     useEffect(() => { fetch('/api/history').then(res => res.json()).then(data => setReportHistory(data)).catch(error => console.error('Error fetching report history:', error)); }, []);
-    useEffect(() => {
-        if (!selectedReportFile) return;
-        setIsLoadingReport(true);
-        fetch(`/reports/${selectedReportFile}`).then(res => res.json()).then(data => {
-            setSelectedReportData(data);
-            setIsLoadingReport(false);
-        }).catch(error => {
-            console.error('Error loading report file:', error);
-            setIsLoadingReport(false);
-        });
-    }, [selectedReportFile]);
+    useEffect(() => { if (!selectedReportFile) return; setIsLoadingReport(true); fetch(`/reports/${selectedReportFile}`).then(res => res.json()).then(data => { setSelectedReportData(data); setIsLoadingReport(false); }).catch(error => { console.error('Error loading report file:', error); setIsLoadingReport(false); }); }, [selectedReportFile]);
 
+    const goToStep = (step) => setCurrentStep(Math.max(0, Math.min(replayData ? replayData.length - 1 : 0, step)));
+    
+    const rawStepData = replayData ? replayData[currentStep] : null;
+
+    const displayedStepData = useMemo(() => {
+        const paramsMatchDefaults = deNormParams.startPrice === envDefaults.startPrice && deNormParams.strikeDistance === envDefaults.strikeDistance && deNormParams.lotSize === envDefaults.lotSize;
+        let baseStepData = rawStepData;
+        if (!paramsMatchDefaults && rawStepData && replayData) {
+             baseStepData = reSimulateStep(rawStepData, replayData, deNormParams, envDefaults);
+        }
+        if (!baseStepData) return null;
+        const lotsMultiplier = Math.max(1, parseInt(lots) || 1);
+        if (lotsMultiplier === 1) return baseStepData;
+        const finalStepData = JSON.parse(JSON.stringify(baseStepData));
+        finalStepData.info.eval_episode_return *= lotsMultiplier;
+        if (finalStepData.info.pnl_verification) {
+            finalStepData.info.pnl_verification.realized_pnl *= lotsMultiplier;
+            finalStepData.info.pnl_verification.unrealized_pnl *= lotsMultiplier;
+            finalStepData.info.pnl_verification.verified_total_pnl *= lotsMultiplier;
+        }
+        if (finalStepData.portfolio) { finalStepData.portfolio.forEach(leg => leg.live_pnl *= lotsMultiplier); }
+        if (finalStepData.info.closed_trades_log) { finalStepData.info.closed_trades_log.forEach(trade => trade.realized_pnl *= lotsMultiplier); }
+        if (finalStepData.info.portfolio_stats) { finalStepData.info.portfolio_stats.max_profit *= lotsMultiplier; finalStepData.info.portfolio_stats.max_loss *= lotsMultiplier; finalStepData.info.portfolio_stats.net_premium *= lotsMultiplier; }
+        if (finalStepData.info.payoff_data && finalStepData.info.payoff_data.expiry_pnl) { finalStepData.info.payoff_data.expiry_pnl.forEach(point => point.pnl *= lotsMultiplier); finalStepData.info.payoff_data.current_pnl.forEach(point => point.pnl *= lotsMultiplier); }
+        return finalStepData;
+    }, [rawStepData, deNormParams, envDefaults, lots, replayData]);
+
+    const episodeHistory = replayData ? replayData.slice(0, currentStep + 1) : [];
     const getCheckpointFilename = (reportFilename) => { if (!reportFilename) return null; const timestamp = reportFilename.replace('strategy_report_', '').replace('.json', ''); return `ckpt_best_${timestamp}.pth.tar`; };
 
     return (
         <div className="App">
             <header className="App-header">
                 <h1>Options-Zero-Game Visualizer</h1>
-                
                 <div className="denorm-panel card">
                     <h3>Real-World Re-Simulation Parameters</h3>
                     <div className="input-group"><label>Start Price ($):</label><input type="number" value={startPrice} onChange={e => setStartPrice(e.target.value)} /></div>
@@ -291,14 +298,22 @@ function App() {
                     <div className="input-group"><label>Lot Size (Shares/Contract):</label><input type="number" value={lotSize} onChange={e => setLotSize(e.target.value)} /></div>
                     <div className="input-group"><label>Lots:</label><input type="number" value={lots} onChange={e => setLots(e.target.value)} min="1" step="1"/></div>
                 </div>
-
                 <div className="navigation-buttons view-toggle">
                     <button onClick={() => setView('replayer')} disabled={view === 'replayer'}>Episode Replayer</button>
                     <button onClick={() => setView('history')} disabled={view === 'history'}>Strategy History</button>
                 </div>
                 
                 {view === 'replayer' && (
-                    <ReplayerView deNormParams={deNormParams} envDefaults={envDefaults} />
+                    <ReplayerView 
+                        displayedStepData={displayedStepData}
+                        replayData={replayData}
+                        currentStep={currentStep}
+                        goToStep={goToStep}
+                        episodeHistory={episodeHistory}
+                        historicalContext={historicalContext}
+                        deNormParams={deNormParams}
+                        envDefaults={envDefaults}
+                    />
                 )}
 
                 {view === 'history' && (
