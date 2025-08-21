@@ -42,12 +42,45 @@ def calculate_statistics(results: list, strategy_name: str) -> dict:
     return {"Strategy": strategy_name, "Total_Trades": len(pnls), "Win_Rate_%": win_rate, "Expectancy_$": expectancy, "Profit_Factor": profit_factor, "Avg_Win_$": avg_profit, "Avg_Loss_$": avg_loss, "Max_Win_$": max(wins) if wins else 0.0, "Max_Loss_$": min(losses) if losses else 0.0, "Win_Streak": max_win_streak, "Loss_Streak": max_loss_streak}
 
 def calculate_trader_score(strategy_data):
+    """
+    Calculates a unified 'Trader's Score' using a robust multi-factor model.
+    This version correctly separates the logic for profitable and unprofitable
+    strategies to ensure a meaningful and correctly signed score.
+    """
     expectancy = strategy_data.get("Expectancy_$", 0)
+    
+    # --- The Fundamental Check: Is the strategy profitable? ---
+    if expectancy <= 0:
+        # For losing strategies, the score is a direct function of its negative expectancy.
+        # A larger loss results in a score closer to -1.
+        # We use a scaling factor to prevent tanh from saturating too quickly.
+        # A max loss of 500k is a reasonable scale.
+        return np.tanh(expectancy / 50000) # Returns a value between -1 and 0.
+
+    # --- If we reach here, the strategy is PROFITABLE. ---
+    
+    # "Good" Factors (Guaranteed Positive)
     profit_factor = strategy_data.get("Profit_Factor", 0)
     win_rate = strategy_data.get("Win_Rate_%", 0)
-    log_pf = np.log(max(profit_factor, 0.01))
-    score = expectancy * log_pf * (win_rate / 100)
-    return score if np.isfinite(score) else -999999
+    
+    # "Bad" Factors (Measures of Risk/Drawdown)
+    # Add 1 to avoid division by zero for a perfect strategy with zero loss.
+    avg_loss = 1 + abs(strategy_data.get("Avg_Loss_$", 0))
+    max_loss = 1 + abs(strategy_data.get("Max_Loss_$", 0))
+
+    # --- Calculate the Score for Profitable Strategies ---
+    # The raw score is a ratio of profitability and consistency vs. risk.
+    # Expectancy is the core driver.
+    raw_score = (expectancy * win_rate * profit_factor) / (avg_loss + max_loss)
+
+    # Use log to scale the raw score gracefully.
+    # Since expectancy > 0, raw_score will be positive. log will work correctly.
+    log_scaled_score = np.log(1 + raw_score)
+
+    # Tanh normalizes the final score to a clean [0, 1] range.
+    final_score = np.tanh(log_scaled_score)
+
+    return final_score if np.isfinite(final_score) else 0.0 # Default profitable but non-finite score to 0
 
 if __name__ == "__main__":
     valid_strategies = get_valid_strategies()
