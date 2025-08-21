@@ -167,6 +167,43 @@ def test_recenter_volatility_position():
     finally:
         env.close()
 
+def test_no_recenter_on_long_volatility_position():
+    """
+    A negative test to ensure RECENTER_VOLATILITY_POSITION is ILLEGAL
+    for a LONG volatility position (e.g., a Long Straddle), as re-centering
+    is strategically incorrect for a position that profits from large moves.
+    """
+    test_name = "test_no_recenter_on_long_volatility_position"
+    print(f"\n--- RUNNING (Negative Test): {test_name} ---")
+    env = create_test_env('OPEN_LONG_STRADDLE')
+    try:
+        # Step 1: Open the position and let the market move to create a delta imbalance.
+        env.reset(seed=65) # Use a new seed
+        timestep = env.step(env.actions_to_indices['HOLD']) # Open the long straddle
+        
+        # Advance the market to ensure the delta is large enough that the
+        # delta threshold condition would otherwise be met.
+        for _ in range(15):
+            timestep = env.step(env.actions_to_indices['HOLD'])
+
+        # --- Assertions ---
+        # Get the final action mask from the last timestep
+        action_mask = timestep.obs['action_mask']
+        recenter_action_index = env.actions_to_indices['RECENTER_VOLATILITY_POSITION']
+
+        # The most important check: The action MUST be illegal.
+        assert action_mask[recenter_action_index] == 0, \
+            "Negative test failed: RECENTER_VOLATILITY_POSITION was incorrectly legal for a LONG straddle."
+
+        print(f"--- PASSED (Negative Test): Action was correctly disabled. ---")
+        return True
+    except Exception:
+        traceback.print_exc()
+        print(f"--- FAILED (Negative Test): {test_name} ---")
+        return False
+    finally:
+        env.close()
+
 # ==============================================================================
 #                 ADVANCED DELTA MANAGEMENT TEST CASES
 # ==============================================================================
@@ -1282,6 +1319,7 @@ if __name__ == "__main__":
         test_decrease_delta_by_shifting_leg,
         test_hedge_portfolio_by_rolling_leg,
         test_recenter_volatility_position,
+        test_no_recenter_on_long_volatility_position,
     ]
 
     failures = []

@@ -82,7 +82,7 @@ if __name__ == "__main__":
 
     # --- The Main Analysis Loop ---
     all_stats = []
-    ANALYZER_RUN_DIR_PREFIX = 'strategy_analyzer_runs'
+    ANALYZER_RUN_DIR_PREFIX = 'strat_eval/strategy_analyzer_runs'
 
     # Initial cleanup
     for dir_path in glob.glob(f"{ANALYZER_RUN_DIR_PREFIX}*"):

@@ -88,7 +88,7 @@ class OptionsZeroGameEnv(gym.Env):
         stop_loss_multiple_of_cost=3.0, # NEW: Added stop loss multiple
         use_stop_loss=True,
         forced_opening_strategy_name=None,
-        disable_opening_curriculum=True,
+        disable_opening_curriculum=False,
 
         disable_spread_solver=False,
         
@@ -437,6 +437,7 @@ class OptionsZeroGameEnv(gym.Env):
         # 1. Determine the final action and if the agent's attempt was illegal.
         final_action, was_illegal_action = self._handle_action(action)
         final_action_name = self.indices_to_actions.get(final_action, 'INVALID')
+        #print(f"DEBUG: entered _take_action_on_state {final_action_name}")
 
         # 2. Store this information for the second half of the step.
         self.last_action_info = {
@@ -512,6 +513,7 @@ class OptionsZeroGameEnv(gym.Env):
 
     def _route_convert_action(self, action_name):
         """Helper to route all CONVERT_TO_* actions."""
+        print(f"DEBUG: entered _route_convert_action {action_name}")
         # (This is just a cleaner way to organize the many elif statements)
         pm = self.portfolio_manager
         price, iv_idx, step = self.price_manager.current_price, self.iv_bin_index, self.current_step
@@ -1043,122 +1045,86 @@ class OptionsZeroGameEnv(gym.Env):
     def _get_non_empty_portfolio_mask(self) -> np.ndarray:
         """
         Computes the action mask for when the portfolio has one or more positions.
-        This function enables all valid management and conversion actions while
-        disabling all 'OPEN_*' actions.
+        This version uses independent checks for each action type to prevent
+        logic errors from chained if/elif statements.
         """
         action_mask = np.zeros(self.action_space_size, dtype=np.int8)
-        portfolio_df = self.portfolio_manager.portfolio
+        portfolio_df = self.portfolio_manager.get_portfolio()
         
-        # --- 1. Universal Management Actions ---
+        # --- 1. Universal & Per-Leg Actions ---
         action_mask[self.actions_to_indices['HOLD']] = 1
         action_mask[self.actions_to_indices['CLOSE_ALL']] = 1
-
-        # --- 2. Per-Leg Management Actions ---
         atm_price = self.market_rules_manager.get_atm_price(self.price_manager.current_price)
-        for i, original_pos in portfolio_df.iterrows():
+        for i, pos in portfolio_df.iterrows():
             self._set_if_exists(action_mask, f'CLOSE_POSITION_{i}')
-            if not original_pos['is_hedged']: self._set_if_exists(action_mask, f'HEDGE_NAKED_POS_{i}')
-            self._set_shift_if_no_conflict(action_mask, i, original_pos, direction="UP")
-            self._set_shift_if_no_conflict(action_mask, i, original_pos, direction="DOWN")
-            if original_pos['strike_price'] != atm_price:
-                self._set_shift_to_atm_if_no_conflict(action_mask, i, original_pos, atm_price)
+            if not pos['is_hedged']: self._set_if_exists(action_mask, f'HEDGE_NAKED_POS_{i}')
+            self._set_shift_if_no_conflict(action_mask, i, pos, direction="UP")
+            self._set_shift_if_no_conflict(action_mask, i, pos, direction="DOWN")
+            if pos['strike_price'] != atm_price: self._set_if_exists(action_mask, f'SHIFT_TO_ATM_{i}')
+            if self._is_delta_shift_possible(pos, 'increase'): self._set_if_exists(action_mask, f'INCREASE_DELTA_BY_SHIFTING_LEG_{i}')
+            if self._is_delta_shift_possible(pos, 'decrease'): self._set_if_exists(action_mask, f'DECREASE_DELTA_BY_SHIFTING_LEG_{i}')
 
-            # <<< --- NEW: Legality for Delta Shifting Actions --- >>>
-            # Check if increasing delta is possible for this leg
-            if self._is_delta_shift_possible(original_pos, 'increase'):
-                self._set_if_exists(action_mask, f'INCREASE_DELTA_BY_SHIFTING_LEG_{i}')
-            # Check if decreasing delta is possible for this leg
-            if self._is_delta_shift_possible(original_pos, 'decrease'):
-                self._set_if_exists(action_mask, f'DECREASE_DELTA_BY_SHIFTING_LEG_{i}')
-
-        # --- 3. Whole-Portfolio Transformation Actions ---
+        # --- 2. Whole-Portfolio Transformation Actions ---
         if not portfolio_df.empty:
             current_strategy_id = portfolio_df.iloc[0]['strategy_id']
             option_type = portfolio_df.iloc[0]['type']
-            s_map = self.strategy_name_to_id 
-
-            # --- Define specific strategy ID sets for clarity ---
-            short_strangle_ids = {s_map.get(f'OPEN_SHORT_STRANGLE_DELTA_{delta}') for delta in [15, 20, 25, 30]}
-            long_strangle_ids = {s_map.get(f'OPEN_LONG_STRANGLE_DELTA_{delta}') for delta in [15, 20, 25, 30]}
-            short_straddle_id = s_map.get('OPEN_SHORT_STRADDLE')
-            long_straddle_id = s_map.get('OPEN_LONG_STRADDLE')
+            s_map = self.strategy_name_to_id
             
+            # Define sets of strategy IDs for easy checking
+            short_strangle_ids = {s_map.get(f'OPEN_SHORT_STRANGLE_DELTA_{delta}') for delta in [15, 20, 25, 30]}
+            short_straddle_id = s_map.get('OPEN_SHORT_STRADDLE')
             iron_condor_ids = {s_map.get(f'OPEN_{d}_IRON_CONDOR') for d in ['LONG', 'SHORT']}
             call_condor_ids = {s_map.get(f'OPEN_{d}_CALL_CONDOR') for d in ['LONG', 'SHORT']}
             put_condor_ids = {s_map.get(f'OPEN_{d}_PUT_CONDOR') for d in ['LONG', 'SHORT']}
-            
-            fly_id = s_map.get('SHORT_IRON_FLY')
+            fly_id = s_map.get('OPEN_SHORT_IRON_FLY')
             call_fly_ids = {s_map.get(f'OPEN_{d}_CALL_FLY_{w}') for d in ['LONG', 'SHORT'] for w in [1, 2]}
             put_fly_ids = {s_map.get(f'OPEN_{d}_PUT_FLY_{w}') for d in ['LONG', 'SHORT'] for w in [1, 2]}
             spread_ids = {s_map.get(f'OPEN_{d}_{t}_SPREAD') for d in ['BULL', 'BEAR'] for t in ['CALL', 'PUT']}
 
-            # --- Handle SHORT Volatility Positions ---
-            if current_strategy_id in short_strangle_ids:
-                if len(portfolio_df) <= self._cfg.max_positions - 2:
+            # <<< --- THE DEFINITIVE FIX: Independent 'if' statements for each action type --- >>>
+            
+            # --- Rules for 2-Leg Positions ---
+            if len(portfolio_df) == 2:
+                if current_strategy_id in short_strangle_ids and len(portfolio_df) <= self._cfg.max_positions - 2:
                     self._set_if_exists(action_mask, 'CONVERT_TO_IRON_CONDOR')
-                # Fall through to the shared recenter check
-            elif current_strategy_id == short_straddle_id:
-                if len(portfolio_df) <= self._cfg.max_positions - 2:
+                if current_strategy_id == short_straddle_id and len(portfolio_df) <= self._cfg.max_positions - 2:
                     self._set_if_exists(action_mask, 'CONVERT_TO_IRON_FLY')
-                # Fall through to the shared recenter check
-            
-            # --- Handle LONG Volatility Positions (They cannot be converted) ---
-            elif current_strategy_id in long_strangle_ids or current_strategy_id == long_straddle_id:
-                pass # Explicitly do nothing for conversions, fall through to recenter check
+                if current_strategy_id in spread_ids and len(portfolio_df) <= self._cfg.max_positions - 2:
+                    if option_type == 'call': self._set_if_exists(action_mask, 'CONVERT_TO_CALL_CONDOR')
+                    else: self._set_if_exists(action_mask, 'CONVERT_TO_PUT_CONDOR')
+                is_short_vol_position = current_strategy_id in short_strangle_ids or current_strategy_id == short_straddle_id
+                if is_short_vol_position:
+                    greeks = self.portfolio_manager.get_portfolio_greeks(self.price_manager.current_price, self.iv_bin_index)
+                    if abs(greeks['delta_norm']) > self.delta_neutral_threshold:
+                        self._set_if_exists(action_mask, 'RECENTER_VOLATILITY_POSITION')
 
-            elif current_strategy_id in iron_condor_ids:
-                self._set_if_exists(action_mask, 'CONVERT_TO_STRANGLE') # Only Iron Condors can become Strangles
-                self._set_if_exists(action_mask, 'CONVERT_TO_BULL_PUT_SPREAD')
-                self._set_if_exists(action_mask, 'CONVERT_TO_BEAR_CALL_SPREAD')
-            
-            elif current_strategy_id in call_condor_ids:
-                self._set_if_exists(action_mask, 'CONVERT_TO_BULL_CALL_SPREAD')
-                self._set_if_exists(action_mask, 'CONVERT_TO_BEAR_CALL_SPREAD')
+            # --- Rules for 4-Leg Positions ---
+            if len(portfolio_df) == 4:
+                if current_strategy_id in iron_condor_ids:
+                    print(f"DEBUG: convert_ strangle/bull_put/bear_call legal")
+                    self._set_if_exists(action_mask, 'CONVERT_TO_STRANGLE')
+                    self._set_if_exists(action_mask, 'CONVERT_TO_BULL_PUT_SPREAD')
+                    self._set_if_exists(action_mask, 'CONVERT_TO_BEAR_CALL_SPREAD')
+                if current_strategy_id in call_condor_ids or current_strategy_id in call_fly_ids:
+                    self._set_if_exists(action_mask, 'CONVERT_TO_BULL_CALL_SPREAD')
+                    self._set_if_exists(action_mask, 'CONVERT_TO_BEAR_CALL_SPREAD')
+                if current_strategy_id in put_condor_ids or current_strategy_id in put_fly_ids:
+                    print(f"DEBUG: convert_ bull_put/bear_put legal")
+                    self._set_if_exists(action_mask, 'CONVERT_TO_BULL_PUT_SPREAD')
+                    self._set_if_exists(action_mask, 'CONVERT_TO_BEAR_PUT_SPREAD')
+                if current_strategy_id == fly_id:
+                    self._set_if_exists(action_mask, 'CONVERT_TO_STRADDLE')
 
-            elif current_strategy_id in put_condor_ids:
-                self._set_if_exists(action_mask, 'CONVERT_TO_BULL_PUT_SPREAD')
-                self._set_if_exists(action_mask, 'CONVERT_TO_BEAR_PUT_SPREAD')
-            
-            # d) Rules for Butterflies and Spreads (unchanged but placed correctly in the logic flow)
-            elif current_strategy_id == fly_id:
-                self._set_if_exists(action_mask, 'CONVERT_TO_STRADDLE')
-            
-            elif current_strategy_id in call_fly_ids:
-                self._set_if_exists(action_mask, 'CONVERT_TO_BULL_CALL_SPREAD')
-                self._set_if_exists(action_mask, 'CONVERT_TO_BEAR_CALL_SPREAD')
-
-            elif current_strategy_id in put_fly_ids:
-                self._set_if_exists(action_mask, 'CONVERT_TO_BULL_PUT_SPREAD')
-                self._set_if_exists(action_mask, 'CONVERT_TO_BEAR_PUT_SPREAD')
-
-            elif current_strategy_id in spread_ids and len(portfolio_df) <= self._cfg.max_positions - 2:
-                if option_type == 'call':
-                    self._set_if_exists(action_mask, 'CONVERT_TO_CALL_CONDOR')
-                else: # put
-                    self._set_if_exists(action_mask, 'CONVERT_TO_PUT_CONDOR')
-
-            # --- Shared Legality Check for Re-centering (Applies to Strangles & Straddles) ---
-            if current_strategy_id in short_strangle_ids.union(long_strangle_ids, {short_straddle_id, long_straddle_id}):
-                greeks = self.portfolio_manager.get_portfolio_greeks(self.price_manager.current_price, self.iv_bin_index)
-                if abs(greeks['delta_norm']) > self.delta_neutral_threshold:
-                    self._set_if_exists(action_mask, 'RECENTER_VOLATILITY_POSITION')
-
-        # <<< --- NEW: Legality for HEDGE_DELTA action --- >>>
-        # Legal if delta is non-neutral AND there is an empty slot for the new leg
-        # --- 4. Portfolio-Level Delta Management ---
+        # --- 3. Portfolio-Level Delta Management ---
         greeks = self.portfolio_manager.get_portfolio_greeks(self.price_manager.current_price, self.iv_bin_index)
-        if abs(greeks['delta_norm']) > self.delta_neutral_threshold and len(portfolio_df) < self._cfg.max_positions:
-            self._set_if_exists(action_mask, 'HEDGE_DELTA_WITH_ATM_OPTION')
-
-        # Legality for HEDGE_PORTFOLIO_BY_ROLLING_LEG_*
-        # We also use the same portfolio-level delta check for this action.
         if abs(greeks['delta_norm']) > self.delta_neutral_threshold:
+            if len(portfolio_df) < self._cfg.max_positions:
+                self._set_if_exists(action_mask, 'HEDGE_DELTA_WITH_ATM_OPTION')
             for i in range(len(portfolio_df)):
                  self._set_if_exists(action_mask, f'HEDGE_PORTFOLIO_BY_ROLLING_LEG_{i}')
-
+        
         return action_mask
 
-    # <<< --- NEW HELPER FUNCTION for the action mask --- >>>
     def _is_delta_shift_possible(self, leg_data: pd.Series, direction: str) -> bool:
         """
         Determines if a leg can be shifted to achieve a desired delta change.
