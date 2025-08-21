@@ -513,7 +513,6 @@ class OptionsZeroGameEnv(gym.Env):
 
     def _route_convert_action(self, action_name):
         """Helper to route all CONVERT_TO_* actions."""
-        print(f"DEBUG: entered _route_convert_action {action_name}")
         # (This is just a cleaner way to organize the many elif statements)
         pm = self.portfolio_manager
         price, iv_idx, step = self.price_manager.current_price, self.iv_bin_index, self.current_step
@@ -1101,7 +1100,6 @@ class OptionsZeroGameEnv(gym.Env):
             # --- Rules for 4-Leg Positions ---
             if len(portfolio_df) == 4:
                 if current_strategy_id in iron_condor_ids:
-                    print(f"DEBUG: convert_ strangle/bull_put/bear_call legal")
                     self._set_if_exists(action_mask, 'CONVERT_TO_STRANGLE')
                     self._set_if_exists(action_mask, 'CONVERT_TO_BULL_PUT_SPREAD')
                     self._set_if_exists(action_mask, 'CONVERT_TO_BEAR_CALL_SPREAD')
@@ -1109,7 +1107,6 @@ class OptionsZeroGameEnv(gym.Env):
                     self._set_if_exists(action_mask, 'CONVERT_TO_BULL_CALL_SPREAD')
                     self._set_if_exists(action_mask, 'CONVERT_TO_BEAR_CALL_SPREAD')
                 if current_strategy_id in put_condor_ids or current_strategy_id in put_fly_ids:
-                    print(f"DEBUG: convert_ bull_put/bear_put legal")
                     self._set_if_exists(action_mask, 'CONVERT_TO_BULL_PUT_SPREAD')
                     self._set_if_exists(action_mask, 'CONVERT_TO_BEAR_PUT_SPREAD')
                 if current_strategy_id == fly_id:
