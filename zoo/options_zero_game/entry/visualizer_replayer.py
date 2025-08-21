@@ -1,5 +1,3 @@
-# <<< UPGRADED, API-AWARE WEB SERVER >>>
-
 import http.server
 import socketserver
 import os
@@ -8,49 +6,61 @@ import glob
 from datetime import datetime
 
 PORT = 5001
-# The root directory for serving files is still the main build folder
-ROOT_DIRECTORY = "zoo/options_zero_game/visualizer-ui/build"
-REPORTS_DIRECTORY = os.path.join(ROOT_DIRECTORY, "reports")
+# Define the directory we want to serve files from
+SERVE_DIRECTORY = "zoo/options_zero_game/visualizer-ui/build"
+
+# --- Pre-flight Checks ---
+if not os.path.isdir(SERVE_DIRECTORY):
+    print(f"--- ERROR ---")
+    print(f"The build directory '{SERVE_DIRECTORY}' does not exist.")
+    print("Please run 'npm run build' inside the 'visualizer-ui' folder first.")
+    exit()
 
 class APIHandler(http.server.SimpleHTTPRequestHandler):
-    def __init__(self, *args, **kwargs):
-        # We call the parent constructor with the ROOT_DIRECTORY
-        super().__init__(*args, directory=ROOT_DIRECTORY, **kwargs)
-
+    # This handler no longer needs a custom __init__
+    
     def do_GET(self):
-        # If the client is requesting our new API endpoint...
+        # API endpoint path is now relative to the new root
         if self.path == '/api/history':
             self.send_response(200)
             self.send_header('Content-type', 'application/json')
             self.end_headers()
             
-            # --- API Logic: Find all reports and create a JSON response ---
-            report_files = glob.glob(os.path.join(REPORTS_DIRECTORY, "strategy_report_*.json"))
+            # Logic now correctly searches in "reports/" not the full path
+            report_files = glob.glob(os.path.join("reports", "strategy_report_*.json"))
             
             history = []
-            for filepath in sorted(report_files, reverse=True): # Show newest first
+            for filepath in sorted(report_files, reverse=True):
                 filename = os.path.basename(filepath)
                 try:
-                    # Extract timestamp from filename for a human-readable label
                     ts_str = filename.replace('strategy_report_', '').replace('.json', '')
                     ts_obj = datetime.strptime(ts_str, "%Y%m%d_%H%M%S")
                     label = ts_obj.strftime("%Y-%m-%d %H:%M:%S")
                     history.append({'filename': filename, 'label': label})
                 except ValueError:
-                    # Ignore files that don't match the expected timestamp format
                     continue
             
-            # Write the JSON list of reports back to the client
             self.wfile.write(json.dumps(history).encode())
         
         else:
-            # For any other request, fall back to the standard file server behavior
+            # For all other requests, fall back to the standard file server.
+            # It will now correctly find index.html, replay_log.json, etc.
             super().do_GET()
 
-# --- Standard Server Startup Logic ---
+# <<< --- THE DEFINITIVE FIX --- >>>
+# 1. Change the current working directory to the target directory.
+# This is the most robust way to ensure the server finds all files.
+try:
+    os.chdir(SERVE_DIRECTORY)
+except FileNotFoundError:
+    print(f"--- FATAL ERROR ---")
+    print(f"Could not change directory to '{SERVE_DIRECTORY}'. Please check the path.")
+    exit()
+
+# 2. Start the server. It will now operate from within the 'build' directory.
 with socketserver.TCPServer(("", PORT), APIHandler) as httpd:
     print(f"\n--- Advanced Server Starting ---")
-    print(f"Serving files from '{ROOT_DIRECTORY}'")
+    print(f"Serving files from: '{os.getcwd()}'") # Print the new working directory
     print(f"API endpoint for history available at /api/history")
     print(f"Please open your browser to http://<your-ip-address>:{PORT}")
     print("Press Ctrl+C to stop the server.")

@@ -23,23 +23,46 @@ def get_valid_strategies() -> list:
     return [name for name in temp_env.actions_to_indices if name.startswith('OPEN_')]
 
 def calculate_statistics(results: list, strategy_name: str) -> dict:
+    """Calculates a full statistical summary and returns it as a dictionary."""
     if not results: return {}
+
     pnls = [r['pnl'] for r in results]
     wins = [p for p in pnls if p > 0]
     losses = [p for p in pnls if p <= 0]
-    num_wins, num_losses = len(wins), len(losses)
+
+    num_wins = len(wins)
+    num_losses = len(losses)
     win_rate = (num_wins / len(pnls)) * 100 if pnls else 0.0
     avg_profit = sum(wins) / num_wins if num_wins > 0 else 0.0
     avg_loss = sum(losses) / num_losses if num_losses > 0 else 0.0
+    
     expectancy = ((win_rate / 100) * avg_profit) + ((1 - win_rate / 100) * avg_loss)
-    profit_factor = sum(wins) / abs(sum(losses)) if sum(losses) != 0 else float('inf')
+    
+    # <<< --- THE DEFINITIVE FIX IS HERE --- >>>
+    # If there are no losses, the profit factor is infinite. We represent this
+    # with None, which correctly serializes to the valid JSON value 'null'.
+    profit_factor = sum(wins) / abs(sum(losses)) if sum(losses) != 0 else None
+
     max_win_streak, max_loss_streak, current_win_streak, current_loss_streak = 0, 0, 0, 0
     for pnl in pnls:
         if pnl > 0: current_win_streak += 1; current_loss_streak = 0
         else: current_loss_streak += 1; current_win_streak = 0
         max_win_streak = max(max_win_streak, current_win_streak)
         max_loss_streak = max(max_loss_streak, current_loss_streak)
-    return {"Strategy": strategy_name, "Total_Trades": len(pnls), "Win_Rate_%": win_rate, "Expectancy_$": expectancy, "Profit_Factor": profit_factor, "Avg_Win_$": avg_profit, "Avg_Loss_$": avg_loss, "Max_Win_$": max(wins) if wins else 0.0, "Max_Loss_$": min(losses) if losses else 0.0, "Win_Streak": max_win_streak, "Loss_Streak": max_loss_streak}
+
+    return {
+        "Strategy": strategy_name,
+        "Total_Trades": len(pnls),
+        "Win_Rate_%": win_rate,
+        "Expectancy_$": expectancy,
+        "Profit_Factor": profit_factor, # This will now be a number or None
+        "Avg_Win_$": avg_profit,
+        "Avg_Loss_$": avg_loss,
+        "Max_Win_$": max(wins) if wins else 0.0,
+        "Max_Loss_$": min(losses) if losses else 0.0,
+        "Win_Streak": max_win_streak,
+        "Loss_Streak": max_loss_streak,
+    }
 
 def calculate_trader_score(strategy_data):
     """
