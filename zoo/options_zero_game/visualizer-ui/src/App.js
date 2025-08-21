@@ -1,11 +1,19 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import './App.css';
+
+// --- Charting Library Imports ---
 import { Line } from 'react-chartjs-2';
-import { Chart as ChartJS, CategoryScale, LinearScale, PointElement, LineElement, Title, Tooltip, Legend, Filler } from 'chart.js';
+import {
+  Chart as ChartJS, CategoryScale, LinearScale, PointElement, LineElement, Title, Tooltip, Legend, Filler
+} from 'chart.js';
 import annotationPlugin from 'chartjs-plugin-annotation';
 
 ChartJS.register(CategoryScale, LinearScale, PointElement, LineElement, Title, Tooltip, Legend, Filler, annotationPlugin);
 
+// ===================================================================================
+//                            JAVASCRIPT RE-SIMULATOR
+// ===================================================================================
+// This function is correct and does not need to be changed.
 const reSimulateStep = (rawStepData, deNormParams, envDefaults) => {
     if (!rawStepData) return null;
     const newStepData = JSON.parse(JSON.stringify(rawStepData));
@@ -220,16 +228,12 @@ function App() {
     const displayedStepData = useMemo(() => {
         const paramsMatchDefaults = deNormParams.startPrice === envDefaults.startPrice && deNormParams.strikeDistance === envDefaults.strikeDistance && deNormParams.lotSize === envDefaults.lotSize;
         let baseStepData = rawStepData;
-
         if (!paramsMatchDefaults && rawStepData && replayData) {
-            baseStepData = reSimulateStep(rawStepData, deNormParams, envDefaults);
+            baseStepData = reSimulateStep(rawStepData, replayData, deNormParams, envDefaults);
         }
-        
         if (!baseStepData) return null;
-
         const lotsMultiplier = Math.max(1, parseInt(lots) || 1);
         if (lotsMultiplier === 1) return baseStepData;
-
         const finalStepData = JSON.parse(JSON.stringify(baseStepData));
         finalStepData.info.eval_episode_return *= lotsMultiplier;
         finalStepData.info.pnl_verification.realized_pnl *= lotsMultiplier;
@@ -268,8 +272,12 @@ function App() {
                         <div className="main-content">
                             <div className="top-bar">
                                 <h2>Step: {displayedStepData.step} / {displayedStepData.info.total_steps_in_episode} (Day: {displayedStepData.day})</h2>
-                                <div className="navigation-buttons"><button onClick={() => goToStep(currentStep - 1)} disabled={currentStep === 0}>Prev S</button><button onClick={() => goToStep(currentStep + 1)} disabled={currentStep >= replayData.length - 1}>Next S</button></div>
-                                <input type="range" min="0" max={replayData.length - 1} value={currentStep} onChange={(e) => setCurrentStep(Number(e.target.value))} className="slider" />
+                                {/* <<< --- NEW JSX STRUCTURE FOR NAVIGATION --- >>> */}
+                                <div className="slider-container">
+                                    <button onClick={() => goToStep(currentStep - 1)} disabled={currentStep === 0} className="nav-button">Prev S</button>
+                                    <input type="range" min="0" max={replayData.length - 1} value={currentStep} onChange={(e) => setCurrentStep(Number(e.target.value))} className="slider" />
+                                    <button onClick={() => goToStep(currentStep + 1)} disabled={currentStep >= replayData.length - 1} className="nav-button">Next S</button>
+                                </div>
                             </div>
                             
                             <MetricsDashboard stepData={displayedStepData} />
