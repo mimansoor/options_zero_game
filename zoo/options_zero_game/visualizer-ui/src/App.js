@@ -7,16 +7,27 @@ import annotationPlugin from 'chartjs-plugin-annotation';
 ChartJS.register(CategoryScale, LinearScale, PointElement, LineElement, Title, Tooltip, Legend, Filler, annotationPlugin);
 
 // ===================================================================================
-//                            JAVASCRIPT RE-SIMULATOR
+//                            JAVASCRIPT RE-SIMULATOR (Bulletproof Version)
 // ===================================================================================
-// This function remains the same as the last correct version.
+
 const reSimulateStep = (rawStepData, deNormParams, envDefaults) => {
     if (!rawStepData) return null;
+
     const newStepData = JSON.parse(JSON.stringify(rawStepData));
     const priceRatio = deNormParams.startPrice / envDefaults.startPrice;
     const pnlRatio = deNormParams.lotSize / envDefaults.lotSize;
-    newStepData.info.price *= priceRatio;
+
+    // --- Ensure all necessary nested objects exist ---
+    newStepData.info = newStepData.info || {};
+    newStepData.portfolio = newStepData.portfolio || [];
+    newStepData.info.pnl_verification = newStepData.info.pnl_verification || {};
+    newStepData.info.portfolio_stats = newStepData.info.portfolio_stats || {};
+    newStepData.info.payoff_data = newStepData.info.payoff_data || { expiry_pnl: [], current_pnl: [], sigma_levels: {} };
+
+    // --- De-normalize all values, now safely ---
+    newStepData.info.price = (newStepData.info.price || envDefaults.startPrice) * priceRatio;
     if(newStepData.info.initial_cash) newStepData.info.initial_cash *= pnlRatio;
+
     let totalUnrealizedPnl = 0;
     if (newStepData.portfolio) {
         newStepData.portfolio.forEach(leg => {
@@ -29,30 +40,31 @@ const reSimulateStep = (rawStepData, deNormParams, envDefaults) => {
             totalUnrealizedPnl += leg.live_pnl;
         });
     }
+
     let totalRealizedPnl = (newStepData.info.pnl_verification.realized_pnl || 0) * pnlRatio;
     newStepData.info.pnl_verification.realized_pnl = totalRealizedPnl;
     newStepData.info.pnl_verification.unrealized_pnl = totalUnrealizedPnl;
     newStepData.info.pnl_verification.verified_total_pnl = totalRealizedPnl + totalUnrealizedPnl;
     newStepData.info.eval_episode_return = newStepData.info.pnl_verification.verified_total_pnl;
-    if(newStepData.info.portfolio_stats) {
-        const stats = newStepData.info.portfolio_stats;
-        stats.max_profit *= pnlRatio;
-        stats.max_loss *= pnlRatio;
-        stats.net_premium = (stats.net_premium || 0) * pnlRatio;
-        stats.breakevens = (stats.breakevens || []).map(be => ((be - envDefaults.startPrice) / envDefaults.strikeDistance * deNormParams.strikeDistance) + deNormParams.startPrice);
+    
+    const stats = newStepData.info.portfolio_stats;
+    stats.max_profit = (stats.max_profit || 0) * pnlRatio;
+    stats.max_loss = (stats.max_loss || 0) * pnlRatio;
+    stats.net_premium = (stats.net_premium || 0) * pnlRatio;
+    stats.breakevens = (stats.breakevens || []).map(be => ((be - envDefaults.startPrice) / envDefaults.strikeDistance * deNormParams.strikeDistance) + deNormParams.startPrice);
+    
+    const payoff = newStepData.info.payoff_data;
+    payoff.spot_price = (payoff.spot_price || newStepData.info.price) * priceRatio;
+    if (payoff.sigma_levels && payoff.sigma_levels.plus_one) {
+        payoff.sigma_levels.plus_one *= priceRatio;
+        payoff.sigma_levels.minus_one *= priceRatio;
     }
-    if (newStepData.info.payoff_data && newStepData.info.payoff_data.expiry_pnl) {
-        const payoff = newStepData.info.payoff_data;
-        payoff.spot_price *= priceRatio;
-        if (payoff.sigma_levels && payoff.sigma_levels.plus_one) {
-            payoff.sigma_levels.plus_one *= priceRatio;
-            payoff.sigma_levels.minus_one *= priceRatio;
-        }
-        payoff.expiry_pnl.forEach(point => { point.price *= priceRatio; point.pnl *= pnlRatio; });
-        payoff.current_pnl.forEach(point => { point.price *= priceRatio; point.pnl *= pnlRatio; });
-    }
+    payoff.expiry_pnl.forEach(point => { point.price *= priceRatio; point.pnl *= pnlRatio; });
+    payoff.current_pnl.forEach(point => { point.price *= priceRatio; point.pnl *= pnlRatio; });
+
     return newStepData;
 };
+
 
 // ===================================================================================
 //                            CHILD COMPONENTS
@@ -230,11 +242,9 @@ function ReplayerView({ displayedStepData, replayData, currentStep, goToStep, ep
 // ===================================================================================
 
 function App() {
-    // --- State is now correctly centralized in the top-level component ---
     const [replayData, setReplayData] = useState(null);
     const [historicalContext, setHistoricalContext] = useState([]);
     const [currentStep, setCurrentStep] = useState(0);
-
     const [reportHistory, setReportHistory] = useState([]);
     const [selectedReportFile, setSelectedReportFile] = useState(null);
     const [selectedReportData, setSelectedReportData] = useState(null);
@@ -265,7 +275,7 @@ function App() {
         const paramsMatchDefaults = deNormParams.startPrice === envDefaults.startPrice && deNormParams.strikeDistance === envDefaults.strikeDistance && deNormParams.lotSize === envDefaults.lotSize;
         let baseStepData = rawStepData;
         if (!paramsMatchDefaults && rawStepData && replayData) {
-             baseStepData = reSimulateStep(rawStepData, replayData, deNormParams, envDefaults);
+            baseStepData = reSimulateStep(rawStepData, deNormParams, envDefaults);
         }
         if (!baseStepData) return null;
         const lotsMultiplier = Math.max(1, parseInt(lots) || 1);
