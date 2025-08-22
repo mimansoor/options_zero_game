@@ -381,65 +381,49 @@ class PortfolioManager:
         parts = action_name.replace('OPEN_', '').split('_')
         direction_name = '_'.join(parts[0:2])
         option_type = parts[1].lower()
-
-        # --- 2. Attempt to Find the Ideal Spread ---
-        # We need to tell the solver whether this is a credit or debit spread
         is_credit_spread = 'BULL_PUT' in direction_name or 'BEAR_CALL' in direction_name
+
+        # <<< --- THE DEFINITIVE FIX: The solver logic is now at the top level --- >>>
+        # --- 2. Attempt to Find the Ideal Spread ---
         found_legs = self._find_best_available_spread(
-            option_type, direction_name, current_price, iv_bin_index, days_to_expiry,
-            is_credit_spread
+            option_type, direction_name, current_price, iv_bin_index, days_to_expiry, is_credit_spread
         )
 
-        # --- 3. THE FIX: Implement a Robust Fallback ---
+        # --- 3. Robust Fallback (only runs if the solver fails) ---
         if not found_legs:
-            # This print is helpful for knowing when the main solver fails
             # print(f"DEBUG: Tiered R:R solver failed for {action_name}. Using fixed-width fallback.")
             
             atm_strike = self.market_rules_manager.get_atm_price(current_price)
-            wing_offset = self.strike_distance * 2 
-
-            is_credit_spread = 'BULL_PUT' in direction_name or 'BEAR_CALL' in direction_name
+            wing_offset = self.strike_distance * 2
             anchor_direction = 'short' if is_credit_spread else 'long'
             wing_direction = 'long' if is_credit_spread else 'short'
             
-            # This new structure is exhaustive and handles all cases correctly.
             if direction_name == 'BULL_CALL_SPREAD':
-                # Debit Spread: Long the lower strike, Short the higher
                 anchor_strike = atm_strike
                 wing_strike = atm_strike + wing_offset
             elif direction_name == 'BEAR_CALL_SPREAD':
-                # Credit Spread: Short the lower strike, Long the higher
                 anchor_strike = atm_strike
                 wing_strike = atm_strike + wing_offset
             elif direction_name == 'BULL_PUT_SPREAD':
-                # Credit Spread: Short the higher strike, Long the lower
                 anchor_strike = atm_strike
                 wing_strike = atm_strike - wing_offset
-            elif direction_name == 'BEAR_PUT_SPREAD':
-                # Debit Spread: Long the higher strike, Short the lower
+            else: # BEAR_PUT_SPREAD
                 anchor_strike = atm_strike
-                wing_strike = atm_strike - wing_offset
-            else:
-                # This is a critical failsafe. If the action_name is somehow invalid,
-                # we must abort to prevent a crash.
-                print(f"FATAL WARNING: Invalid direction_name '{direction_name}' in open_best_available_vertical. Aborting.")
-                return # Abort the function entirely
+                wing_strike = atm_strike - wing_offset # A Bear Put is SHORT the higher strike, so this is correct.
 
             fallback_legs_def = [
-                {'type': option_type, 'direction': anchor_direction, 'strike_price': anchor_strike, 'days_to_expiry': days_to_expiry},
-                {'type': option_type, 'direction': wing_direction, 'strike_price': wing_strike, 'days_to_expiry': days_to_expiry}
+                {'type': option_type, 'direction': anchor_direction, 'strike_price': anchor_strike},
+                {'type': option_type, 'direction': wing_direction, 'strike_price': wing_strike}
             ]
-            
-            # Price the fallback legs with the correct rule
+            for leg in fallback_legs_def: leg['days_to_expiry'] = days_to_expiry
+
             found_legs = self._price_legs(fallback_legs_def, current_price, iv_bin_index, check_short_rule=is_credit_spread)
 
         # --- 4. Finalize and Execute the Trade ---
-        # This block now runs for BOTH the ideal spread OR the fallback spread.
         if found_legs:
             for leg in found_legs:
                 leg['entry_step'] = current_step
 
-            # Use the original action name for the ID to give the agent credit
             pnl_profile = self._calculate_universal_risk_profile(found_legs, self.realized_pnl)
             pnl_profile['strategy_id'] = self.strategy_name_to_id.get(action_name, -1)
             self._execute_trades(found_legs, pnl_profile)
@@ -1749,85 +1733,53 @@ class PortfolioManager:
         current_price: float, iv_bin_index: int, days_to_expiry: float,
         is_credit_spread: bool
     ) -> List[Dict] or None:
-        """
-        A tiered solver that searches for the best possible vertical spread.
-        It starts by looking for a high R:R (e.g., 1:3) and falls back to lower
-        ratios if the ideal is not available in the market.
-
-        Args:
-            option_type (str): 'call' or 'put'.
-            direction_name (str): 'BULL_CALL', 'BEAR_CALL', 'BULL_PUT', or 'BEAR_PUT'.
-            ... (other args)
-
-        Returns:
-            A list of the two leg dictionaries if a valid spread is found, otherwise None.
-        """
-        # --- 1. Define the prioritized search list and spread characteristics ---
-        target_ratios = [3.0, 2.0, 1.0]  # Try for 1:3, then 1:2, then 1:1
-        tolerance = 0.3                  # Allow R:R to be within 0.3 of the target
+        """A tiered solver that searches for the best possible vertical spread."""
+        target_ratios = [3.0, 2.0, 1.0]
+        tolerance = 0.3
         
-        is_credit_spread = 'BULL_PUT' in direction_name or 'BEAR_CALL' in direction_name
-        
-        # --- 2. Loop through the prioritized targets ---
-        for target_rr in target_ratios:
-            # --- 3. Setup the search for this target ratio ---
-            atm_strike = self.market_rules_manager.get_atm_price(current_price)
-            
-            # Anchor leg is the one at the money
-            anchor_direction = 'short' if is_credit_spread else 'long'
-            anchor_leg = {'type': option_type, 'direction': anchor_direction, 'strike_price': atm_strike}
+        atm_strike = self.market_rules_manager.get_atm_price(current_price)
+        anchor_direction = 'short' if is_credit_spread else 'long'
+        anchor_leg = {'type': option_type, 'direction': anchor_direction, 'strike_price': atm_strike}
 
-            # Search outwards from the anchor for the wing leg
-            max_search_strikes = 20  # Widen search to increase chance of finding a match
+        for target_rr in target_ratios: # This loop is now correctly placed
+            max_search_strikes = 20
             for i in range(1, max_search_strikes + 1):
                 wing_direction = 'long' if is_credit_spread else 'short'
                 strike_offset = i * self.strike_distance
                 
-                # Determine the strike for the wing based on the strategy type
-                if direction_name in ['BULL_CALL', 'BEAR_CALL']: # Call spreads
+                if direction_name in ['BULL_CALL_SPREAD', 'BEAR_CALL_SPREAD']:
                     wing_strike = atm_strike + strike_offset
-                else: # Put spreads
+                else:
                     wing_strike = atm_strike - strike_offset
                 
-                if wing_strike <= 0: continue
+                if wing_strike <= 0 or wing_strike == anchor_leg['strike_price']:
+                    continue
 
                 wing_leg = {'type': option_type, 'direction': wing_direction, 'strike_price': wing_strike}
                 
-                # --- 4. Price the candidate spread and calculate its R:R ---
-                # Create copies to avoid modifying the originals in the loop
                 candidate_legs_def = [anchor_leg.copy(), wing_leg.copy()]
                 for leg in candidate_legs_def: leg['days_to_expiry'] = days_to_expiry
 
-                # Price the legs to get their entry premiums
                 priced_legs = self._price_legs(candidate_legs_def, current_price, iv_bin_index, check_short_rule=is_credit_spread)
+                if not priced_legs: continue
                 
-                # Calculate the net premium received or paid for the spread
-                net_premium = sum(
-                    leg['entry_premium'] * (1 if leg['direction'] == 'long' else -1)
-                    for leg in priced_legs
-                )
-                
+                net_premium = sum(leg['entry_premium'] * (1 if leg['direction'] == 'long' else -1) for leg in priced_legs)
                 spread_width = abs(anchor_leg['strike_price'] - wing_leg['strike_price'])
                 
-                # Calculate Max Profit and Max Loss based on spread type
                 if is_credit_spread:
-                    max_profit = abs(net_premium)  # Credit received
+                    max_profit = abs(net_premium)
                     max_loss = spread_width - max_profit
-                else:  # Debit Spread
-                    max_loss = abs(net_premium)  # Debit paid
+                else:
+                    max_loss = abs(net_premium)
                     max_profit = spread_width - max_loss
                     
-                if max_loss < 1e-6: continue  # Avoid division by zero for riskless trades
+                if max_loss < 1e-6: continue
                 
                 current_rr = max_profit / max_loss
                 
-                # --- 5. Check if we found a match ---
                 if abs(current_rr - target_rr) < tolerance:
-                    # SUCCESS: We found a spread that meets the current tier's R:R target.
-                    # Return the fully priced legs immediately.
                     return priced_legs
 
-        # FAILURE: If the outer loop completes, no spread was found that matched any of the targets.
         return None
 
     def _open_butterfly(self, action_name: str, current_price: float, iv_bin_index: int, current_step: int, days_to_expiry: float):
