@@ -35,7 +35,7 @@ class OptionsZeroGameEnv(gym.Env):
     # instantiated on its own without errors.
     config = dict(
         # Price Action Manager Config
-        price_source='mixed',
+        price_source='historical',
         forced_historical_symbol=None,
         historical_data_path='zoo/options_zero_game/data/market_data_cache',
         market_regimes = [
@@ -85,10 +85,10 @@ class OptionsZeroGameEnv(gym.Env):
         # For debit strategies, target is a multiple of the initial debit paid.
         debit_strategy_take_profit_multiple=0, # Target 2x the debit paid (200% return). Set to 0 to disable.
 
-        stop_loss_multiple_of_cost=3.0, # NEW: Added stop loss multiple
+        stop_loss_multiple_of_cost=10.0, # NEW: Added stop loss multiple
         use_stop_loss=True,
         forced_opening_strategy_name=None,
-        disable_opening_curriculum=True,
+        disable_opening_curriculum=False,
 
         disable_spread_solver=False,
         
@@ -249,6 +249,8 @@ class OptionsZeroGameEnv(gym.Env):
 
         # 0 = Normal, 1 = Symmetric Mirror, 2 = Strategy-Type Mirror
         self.mirror_mode = 0
+        # <<< --- NEW: Add the state variable to the environment --- >>>
+        self.fixed_profit_target_pnl: float = 0.0
 
     def seed(self, seed: int, dynamic_seed: int = None) -> List[int]:
         self.np_random, seed = seeding.np_random(seed)
@@ -327,6 +329,8 @@ class OptionsZeroGameEnv(gym.Env):
         obs = self._get_observation()
         action_mask = self._get_true_action_mask() if not self._cfg.ignore_legal_actions else np.ones(self.action_space_size, dtype=np.int8)
 
+        # <<< --- NEW: Reset the profit target for the new episode --- >>>
+        self.fixed_profit_target_pnl = 0.0
         return {'observation': obs, 'action_mask': action_mask, 'to_play': -1}
 
     def _handle_day_change(self):
@@ -453,10 +457,33 @@ class OptionsZeroGameEnv(gym.Env):
             days_to_expiry_float = (self.episode_time_to_expiry - current_day) * (self.TOTAL_DAYS_IN_WEEK / self.TRADING_DAYS_IN_WEEK)
             days_to_expiry = int(round(days_to_expiry_float))
             self.portfolio_manager.open_strategy(final_action_name, self.price_manager.current_price, self.iv_bin_index, self.current_step, days_to_expiry)
+            # 2. Check if the opening was successful by seeing if the portfolio is now non-empty.
+            if not self.portfolio_manager.portfolio.empty:
+                # 3. Get the fresh, authoritative stats for the new position.
+                stats = self.portfolio_manager.get_raw_portfolio_stats(self.price_manager.current_price, self.iv_bin_index)
+
+                self.fixed_profit_target_pnl = 0.0
+                net_premium = self.portfolio_manager.initial_net_premium
+                
+                if net_premium < 0: # Credit strategy
+                    credit_tp_pct = self._cfg.get('credit_strategy_take_profit_pct', 0)
+                    if credit_tp_pct > 0:
+                        # 4. Use the max_profit directly from the stats dictionary.
+                        max_profit = stats.get('max_profit', 0.0)
+                        self.fixed_profit_target_pnl = max_profit * (credit_tp_pct / 100)
+                        #print(f"DEBUG: Credit: setting fixed_profit_target: {self.fixed_profit_target_pnl} max_profit: {max_profit} credit_tp_pct: {credit_tp_pct}")
+                elif net_premium > 0: # Debit strategy
+                    debit_tp_mult = self._cfg.get('debit_strategy_take_profit_multiple', 0)
+                    if debit_tp_mult > 0:
+                        debit_paid = net_premium * self.portfolio_manager.lot_size
+                        self.fixed_profit_target_pnl = debit_paid * debit_tp_mult
+                        #print(f"DEBUG: Debit: setting fixed_profit_target: {self.fixed_profit_target_pnl}")
         elif final_action_name.startswith('CLOSE_POSITION_'):
             self.portfolio_manager.close_position(int(final_action_name.split('_')[-1]), self.price_manager.current_price, self.iv_bin_index, self.current_step)
         elif final_action_name == 'CLOSE_ALL':
             self.portfolio_manager.close_all_positions(self.price_manager.current_price, self.iv_bin_index, self.current_step)
+            # After closing all, we must reset the profit target so a new one can be set.
+            self.fixed_profit_target_pnl = 0.0
         elif final_action_name.startswith('SHIFT_'):
             if 'ATM' in final_action_name: self.portfolio_manager.shift_to_atm(final_action_name, self.price_manager.current_price, self.iv_bin_index, self.current_step)
             else: self.portfolio_manager.shift_position(final_action_name, self.price_manager.current_price, self.iv_bin_index, self.current_step)
@@ -583,7 +610,7 @@ class OptionsZeroGameEnv(gym.Env):
                         termination_reason = f"PORTFOLIO TARGET ({fixed_target_pct}%) MET"
 
             # --- Rule 2b: Dynamic Strategy-Level Target ---
-            profit_target_pnl = self.portfolio_manager.fixed_profit_target_pnl
+            profit_target_pnl = self.fixed_profit_target_pnl
             if profit_target_pnl > 0 and current_pnl >= profit_target_pnl:
                 terminated_by_rule = True
                 final_shaped_reward_override = self._cfg.jackpot_reward
@@ -593,6 +620,7 @@ class OptionsZeroGameEnv(gym.Env):
                 net_premium = self.portfolio_manager.initial_net_premium
                 if net_premium < 0: # Credit strategy
                     termination_reason = f"CREDIT TARGET ({self._cfg.credit_strategy_take_profit_pct}%) MET"
+                    #print(f"DEBUG: current_pnl: {current_pnl} profit_target_pnl: {profit_target_pnl}")
                 else: # Debit strategy
                     termination_reason = f"DEBIT TARGET ({self._cfg.debit_strategy_take_profit_multiple}x) MET"
 
