@@ -1083,7 +1083,7 @@ class PortfolioManager:
         portfolio_legs_as_dict = self.portfolio.to_dict(orient='records')
         risk_profile = self._calculate_universal_risk_profile(portfolio_legs_as_dict, self.realized_pnl)
         
-        max_profit = risk_profile['max_profit']
+        max_profit = risk_profile['total_max_profit']
         max_loss = risk_profile['max_loss']
         breakevens = risk_profile['breakevens']
         
@@ -1340,48 +1340,43 @@ class PortfolioManager:
 
     def _calculate_universal_risk_profile(self, legs: List[Dict], realized_pnl: float) -> Dict:
         """
-        The definitive, single-pass, universal risk engine.
-        It simulates the P&L curve for any given set of legs and calculates
-        max profit, max loss, profit factor, and all breakeven points in one go.
-        It now correctly includes realized P&L for a total portfolio view.
+        Calculates the risk profile. This version correctly separates the
+        calculation of the STRATEGY's max profit from the TOTAL portfolio's.
         """
-        # --- A. Handle Edge Cases ---
         if not legs:
-            return {
-                'max_profit': realized_pnl, 'max_loss': realized_pnl,
-                'profit_factor': float('inf') if realized_pnl > 0 else 0.0, 'breakevens': []
-            }
+            # For the total portfolio view
+            return {'max_profit': realized_pnl, 'max_loss': realized_pnl, 'profit_factor': 0.0, 'breakevens': []}
 
-        if len(legs) == 1 and legs[0]['direction'] == 'short':
-            entry_premium_total = legs[0]['entry_premium'] * self.lot_size
-            # Even the naked short needs to consider realized pnl for its final value
-            breakeven = legs[0]['strike_price'] + legs[0]['entry_premium']
-            return {
-                'max_profit': entry_premium_total + realized_pnl,
-                'max_loss': -self.undefined_risk_cap + realized_pnl,
-                'profit_factor': 0.01,
-                'breakevens': [breakeven]
-            }
-
-        # --- 2. Data Preparation (for all other strategies) ---
-        # The JIT function cannot handle dicts, so we convert to a structured array.
-        # [strike, entry_premium, type_code, direction_code, creation_id, days_to_expiry]
-        legs_array = self._prepare_legs_for_numba(legs)
-
-        # --- C. Call the High-Performance JIT Simulation Engine ---
-        max_profit, max_loss, profit_factor, breakevens = _numba_run_pnl_simulation(
-            legs_array,
-            realized_pnl,
+        # <<< --- THE DEFINITIVE FIX IS HERE --- >>>
+        # 1. Calculate the raw, theoretical max profit/loss of the LEGS ALONE.
+        # We pass a realized_pnl of 0 to isolate the strategy's profile.
+        strategy_max_profit, strategy_max_loss, _, _ = _numba_run_pnl_simulation(
+            self._prepare_legs_for_numba(legs),
+            0.0, # Use a neutral realized P&L for the theoretical calculation
             self.start_price,
             self.lot_size,
-            self.bs_manager.risk_free_rate, # Pass in required BS params
+            self.bs_manager.risk_free_rate,
             self.bid_ask_spread_pct
         )
 
-        # --- 4. Package the Results ---
+        # 2. Separately, calculate the TOTAL portfolio's profile including past trades.
+        # This is used for the breakevens and profit factor.
+        total_max_profit, total_max_loss, profit_factor, breakevens = _numba_run_pnl_simulation(
+            self._prepare_legs_for_numba(legs),
+            realized_pnl, # Use the real realized P&L here
+            self.start_price,
+            self.lot_size,
+            self.bs_manager.risk_free_rate,
+            self.bid_ask_spread_pct
+        )
+
+        # 3. Return a dictionary containing BOTH values.
         return {
-            'max_profit': min(self.undefined_risk_cap, max_profit),
-            'max_loss': max(-self.undefined_risk_cap, max_loss),
+            # This is the pure, theoretical max profit of the strategy structure itself.
+            'strategy_max_profit': min(self.undefined_risk_cap, strategy_max_profit),
+            # This is the max profit of the entire episode's P&L curve.
+            'total_max_profit': min(self.undefined_risk_cap, total_max_profit),
+            'max_loss': max(-self.undefined_risk_cap, total_max_loss),
             'profit_factor': profit_factor,
             'breakevens': sorted(breakevens)
         }
