@@ -52,7 +52,7 @@ echo "Running strategy analyzer for all strategies using historical data only...
 # are transparently forwarding them to the Python script.
 python3 zoo/options_zero_game/entry/strategy_analyzer.py \
     --strategy ALL \
-    -n 10 \
+    -n 15 \
     --timestamp "$TIMESTAMP" \
     --symbol ANY \
     "$@"  # <-- This is the key change

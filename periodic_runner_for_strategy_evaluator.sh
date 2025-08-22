@@ -24,7 +24,7 @@ do
     # forwarded to the evaluation script.
     # Example: ./run_loop.sh --profit_target_pct 3
     #./run_periodic_evaluation.sh "$@"
-    ./run_periodic_evaluation.sh --profit_target_pct 3 --credit_tp_pct 70 --debit_tp_mult 2
+    ./run_periodic_evaluation.sh --profit_target_pct 3 --credit_tp_pct 50 --debit_tp_mult 1
 
     # Deactivate the environment (good practice)
     deactivate
