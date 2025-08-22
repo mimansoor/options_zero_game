@@ -112,7 +112,7 @@ UNIFIED_REGIMES = [
 # A structured training plan that teaches the agent concepts in phases.
 # Each phase focuses on a core strategy for 2 million steps before moving to the next.
 
-TRAINING_CURRICULUM = {
+TRAINING_CURRICULUM1 = {
     # === Phase 1: Master Naked Puts (Bullish Premium Selling) ===
     # Give the agent 1 million steps to learn this core concept.
     0: 'OPEN_SHORT_PUT_ATM-2',
@@ -161,6 +161,70 @@ TRAINING_CURRICULUM = {
     # === Final Phase: Integration and Agent Autonomy ===
     # Allow the agent to use any of its learned strategies to maximize reward.
     int(18e6): 'ALL'
+}
+
+TRAINING_CURRICULUM = {
+    # === Phase 1: Start with Full Autonomy ===
+    # Goal: Force the agent to learn a general, high-level policy by exposing
+    # it to the entire action space from the beginning.
+    0: 'ALL',
+
+    # === Phase 2: Specialize in Spreads (Credit & Debit) ===
+    # Duration of this phase is 1M steps (18e6 - 17e6 from original)
+    int(1e6): 'OPEN_BEAR_CALL_SPREAD',
+    # Duration: 1M steps (17e6 - 16e6)
+    int(2e6): 'OPEN_BULL_PUT_SPREAD',
+    # Duration: 1M steps (16e6 - 15e6)
+    int(3e6): 'OPEN_BEAR_PUT_SPREAD',
+    # Duration: 1M steps (15e6 - 14e6)
+    int(4e6): 'OPEN_BULL_CALL_SPREAD',
+
+    # === Phase 3: Specialize in Risk-Defined Volatility (Buying) ===
+    # Duration: 1M steps (14e6 - 13e6)
+    int(5e6): 'OPEN_LONG_CALL_FLY_2',
+    # Duration: 1M steps (13e6 - 12e6)
+    int(6e6): 'OPEN_LONG_PUT_CONDOR',
+    # Duration: 1M steps (12e6 - 11e6)
+    int(7e6): 'OPEN_LONG_CALL_CONDOR',
+    # Duration: 1M steps (11e6 - 10e6)
+    int(8e6): 'OPEN_LONG_IRON_CONDOR',
+
+    # === Phase 4: Specialize in Risk-Defined Volatility (Selling) ===
+    # Duration: 1M steps (10e6 - 9e6)
+    int(9e6): 'OPEN_SHORT_CALL_FLY_2',
+    # Duration: 1M steps (9e6 - 8e6)
+    int(10e6): 'OPEN_SHORT_PUT_CONDOR',
+    # Duration: 1M steps (8e6 - 7e6)
+    int(11e6): 'OPEN_SHORT_CALL_CONDOR',
+    # Duration: 1M steps (7e6 - 6e6)
+    int(12e6): 'OPEN_SHORT_IRON_CONDOR',
+
+    # === Phase 5: Specialize in Undefined Risk Volatility (Buying & Selling) ===
+    # Duration: 1M steps (6e6 - 5e6)
+    int(13e6): 'OPEN_LONG_STRANGLE_DELTA_15',
+    # Duration: 1M steps (5e6 - 4e6)
+    int(14e6): 'OPEN_LONG_STRADDLE',
+    # Duration: 1M steps (4e6 - 3e6)
+    int(15e6): 'OPEN_SHORT_STRANGLE_DELTA_15',
+    # Duration: 1M steps (3e6 - 2e6)
+    int(16e6): 'OPEN_SHORT_STRADDLE',
+
+    # === Phase 6: Refine Foundational Naked Call Skills ===
+    # Duration: 200k steps each (e.g., 2e6 - 1.8e6)
+    int(17e6): 'OPEN_SHORT_CALL_ATM+2',
+    int(17.2e6): 'OPEN_SHORT_CALL_ATM+1',
+    int(17.4e6): 'OPEN_SHORT_CALL_ATM+0',
+    int(17.6e6): 'OPEN_SHORT_CALL_ATM-1',
+    int(17.8e6): 'OPEN_SHORT_CALL_ATM-2',
+
+    # === Phase 7: Refine Foundational Naked Put Skills (The Final Phase) ===
+    # Duration: 200k steps each
+    int(18e6): 'OPEN_SHORT_PUT_ATM+2',
+    int(18.2e6): 'OPEN_SHORT_PUT_ATM+1',
+    int(18.4e6): 'OPEN_SHORT_PUT_ATM+0',
+    int(18.6e6): 'OPEN_SHORT_PUT_ATM-1',
+    # This phase runs until the end of training
+    int(18.8e6): 'OPEN_SHORT_PUT_ATM-2',
 }
 
 # This class will "hide" the integer-keyed dictionary from EasyDict.
