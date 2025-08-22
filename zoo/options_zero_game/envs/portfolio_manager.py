@@ -140,7 +140,6 @@ class PortfolioManager:
         self.realized_pnl: float = 0.0
         self.high_water_mark: float = 0.0
         self.next_creation_id: int = 0
-        self.initial_net_premium: float = 0.0
         self.portfolio_columns = ['type', 'direction', 'entry_step', 'strike_price', 'entry_premium', 'days_to_expiry', 'creation_id', 'strategy_id', 'strategy_max_profit', 'strategy_max_loss', 'is_hedged']
         self.portfolio_dtypes = {'type': 'object', 'direction': 'object', 'entry_step': 'int16', 'strike_price': 'float32', 'entry_premium': 'float32', 'days_to_expiry': 'float32', 'creation_id': 'int16', 'strategy_id': 'int16', 'strategy_max_profit': 'float32', 'strategy_max_loss': 'float32', 'is_hedged': 'bool'}
         self.highest_realized_profit = 0.0
@@ -238,7 +237,6 @@ class PortfolioManager:
         self.realized_pnl = 0.0
         self.high_water_mark = self.initial_cash
         self.next_creation_id = 0
-        self.initial_net_premium = 0.0
         self.receipts_for_current_step = []
 
         # Reset the MtM trackers for the new episode
@@ -1261,8 +1259,6 @@ class PortfolioManager:
             
             strategy_id = strategy_pnl.get('strategy_id', -1)
             assert strategy_id != -1, (f"CRITICAL ERROR: Strategy ID not found for PnL object: {strategy_pnl}")
-            
-            self.initial_net_premium = sum(leg['entry_premium'] * (1 if leg['direction'] == 'long' else -1) for leg in trades_to_execute)
             
             for trade in trades_to_execute:
                 trade['creation_id'] = transaction_id
