@@ -175,13 +175,14 @@ class LogReplayEnv(gym.Wrapper):
         info = final_timestep.info
         final_pnl = info['eval_episode_return']
         
-        termination_reason = info.get('termination_reason', 'UNKNOWN')
+        # 1. Get the true termination reason directly from the final info dict.
+        #    Provide a sensible default if it's somehow missing.
+        final_action_name = info.get('termination_reason', 'EPISODE END')
         
-        if termination_reason == "TIME_LIMIT": final_action_name = "EXPIRATION / SETTLEMENT"
-        elif termination_reason == "STOP_LOSS": final_action_name = "STOP-LOSS HIT"
-        elif termination_reason == "TAKE_PROFIT": final_action_name = "PROFIT TARGET MET"
-        else: final_action_name = "EPISODE END"
-        
+        # 2. Format the reason for better display in the UI.
+        #    This replaces underscores and capitalizes it correctly.
+        final_action_name = final_action_name.replace('_', ' ').title()
+
         final_info = copy.deepcopy(info)
         final_info.update({
             'directional_bias': "Neutral", 'volatility_bias': "Neutral / Low Volatility Expected",
