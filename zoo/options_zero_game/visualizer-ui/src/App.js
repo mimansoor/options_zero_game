@@ -70,12 +70,19 @@ const reSimulateStep = (rawStepData, deNormParams, envDefaults) => {
 //                            CHILD COMPONENTS
 // ===================================================================================
 
-function MetricsDashboard({ stepData }) {
+function MetricsDashboard({ stepData, lots, envDefaults }) { // <-- NEW: Added lots and envDefaults
     const info = stepData?.info || {};
     const pnlColor = (info.eval_episode_return || 0) > 0 ? '#4CAF50' : (info.eval_episode_return || 0) < 0 ? '#F44336' : 'white';
     const lastChangeColor = (info.last_price_change_pct || 0) > 0 ? '#4CAF50' : (info.last_price_change_pct || 0) < 0 ? '#F44336' : 'white';
-    const pnlChangePct = info.initial_cash ? ((info.eval_episode_return || 0) / info.initial_cash) * 100 : 0;
+
+    // <<< --- THE DEFINITIVE FIX --- >>>
+    // 1. Calculate the scaled initial cash based on the environment default and the user's "Lots" input.
+    const scaledInitialCash = (envDefaults.initial_cash || 500000) * (lots || 1);
+
+    // 2. Calculate the percentage change against this stable, correct denominator.
+    const pnlChangePct = scaledInitialCash ? ((info.eval_episode_return || 0) / scaledInitialCash) * 100 : 0;
     const pnlChangeColor = pnlChangePct > 0 ? '#4CAF50' : pnlChangePct < 0 ? '#F44336' : 'white';
+    
     return (<div className="metrics-dashboard">
         <div className="metric-item"><h2>Market Regime</h2><p style={{ color: '#2196F3' }}>{(info.market_regime || 'N/A').replace("Historical: ", "")}</p></div>
         <div className="metric-item"><h2>Day</h2><p>{stepData?.day || 0}</p></div>
@@ -208,7 +215,7 @@ function StrategyReport({ reportData }) {
 }
 
 // <<< --- NEW: A truly "dumb" ReplayerView that only renders props --- >>>
-function ReplayerView({ displayedStepData, replayData, currentStep, goToStep, episodeHistory, historicalContext, deNormParams, envDefaults }) {
+function ReplayerView({ displayedStepData, replayData, currentStep, goToStep, episodeHistory, historicalContext, deNormParams, envDefaults, lots }) { // <-- NEW: Added lots
     if (!replayData || !displayedStepData) {
         return <p><i>Loading Replay Data... (Run an evaluation to generate `replay_log.json`)</i></p>;
     }
@@ -222,7 +229,9 @@ function ReplayerView({ displayedStepData, replayData, currentStep, goToStep, ep
                 </div>
                 <input type="range" min="0" max={replayData.length - 1} value={currentStep} onChange={(e) => goToStep(Number(e.target.value))} className="slider" />
             </div>
-            <MetricsDashboard stepData={displayedStepData} />
+            
+            {/* <<< --- NEW: Pass the new props down --- >>> */}
+            <MetricsDashboard stepData={displayedStepData} lots={lots} envDefaults={envDefaults} />
             <div className="charts-container">
                 <div className="card chart-card"><h3>Agent Behavior</h3><AgentBehaviorChart episodeHistory={episodeHistory} historicalContext={historicalContext} deNormParams={deNormParams} envDefaults={envDefaults} /></div>
                 <div className="card chart-card"><h3>Portfolio P&L Diagram</h3><PayoffDiagram payoffData={displayedStepData.info.payoff_data} /></div>
@@ -322,6 +331,7 @@ function App() {
                         episodeHistory={episodeHistory}
                         historicalContext={historicalContext}
                         deNormParams={deNormParams}
+                        lots={lots}
                         envDefaults={envDefaults}
                     />
                 )}

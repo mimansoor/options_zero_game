@@ -88,7 +88,7 @@ class OptionsZeroGameEnv(gym.Env):
         stop_loss_multiple_of_cost=3.0, # NEW: Added stop loss multiple
         use_stop_loss=True,
         forced_opening_strategy_name=None,
-        disable_opening_curriculum=False,
+        disable_opening_curriculum=True,
 
         disable_spread_solver=False,
         
@@ -303,9 +303,9 @@ class OptionsZeroGameEnv(gym.Env):
 
         # <<< --- MODIFIED: The new 3-way choice logic --- >>>
         self.mirror_mode = 0 # Default to normal
-        if self.is_training_mode:
-            # Choose one of the three modes with equal probability
-            self.mirror_mode = self.np_random.choice([0, 1, 2], p=[0.34, 0.33, 0.33])
+        #if self.is_training_mode:
+        #    # Choose one of the three modes with equal probability
+        #    self.mirror_mode = self.np_random.choice([0, 1, 2], p=[0.34, 0.33, 0.33])
 
         # --- 5. Initialize the Portfolio Manager ---
         # This must happen AFTER the MarketRulesManager is created.
@@ -568,10 +568,21 @@ class OptionsZeroGameEnv(gym.Env):
                 termination_reason = "STOP_LOSS"
 
         # 2. Take-Profit Rules (Only check if not already stopped out)
-        # 2. Take-Profit Rules (Only check if not already stopped out)
         if not terminated_by_rule and not self.portfolio_manager.portfolio.empty:
-            
-            # --- Rule 2a: Dynamic Strategy-Level Target ---
+
+            # --- Rule 2a: Portfolio-Level "Home Run" Target ---
+            if not terminated_by_rule:
+                fixed_target_pct = self._cfg.profit_target_pct
+                if fixed_target_pct > 0:
+                    pnl_pct = (current_pnl / self.portfolio_manager.initial_cash) * 100
+                    if pnl_pct >= fixed_target_pct:
+                        terminated_by_rule = True
+                        final_shaped_reward_override = self._cfg.jackpot_reward
+                        
+                        # <<< --- THE DEFINITIVE FIX: Descriptive Reason --- >>>
+                        termination_reason = f"PORTFOLIO TARGET ({fixed_target_pct}%) MET"
+
+            # --- Rule 2b: Dynamic Strategy-Level Target ---
             profit_target_pnl = self.portfolio_manager.fixed_profit_target_pnl
             if profit_target_pnl > 0 and current_pnl >= profit_target_pnl:
                 terminated_by_rule = True
@@ -584,18 +595,6 @@ class OptionsZeroGameEnv(gym.Env):
                     termination_reason = f"CREDIT TARGET ({self._cfg.credit_strategy_take_profit_pct}%) MET"
                 else: # Debit strategy
                     termination_reason = f"DEBIT TARGET ({self._cfg.debit_strategy_take_profit_multiple}x) MET"
-
-            # --- Rule 2b: Portfolio-Level "Home Run" Target ---
-            if not terminated_by_rule:
-                fixed_target_pct = self._cfg.profit_target_pct
-                if fixed_target_pct > 0:
-                    pnl_pct = (current_pnl / self.portfolio_manager.initial_cash) * 100
-                    if pnl_pct >= fixed_target_pct:
-                        terminated_by_rule = True
-                        final_shaped_reward_override = self._cfg.jackpot_reward
-                        
-                        # <<< --- THE DEFINITIVE FIX: Descriptive Reason --- >>>
-                        termination_reason = f"PORTFOLIO TARGET ({fixed_target_pct}%) MET"
 
         # Final termination condition
         terminated_by_time = self.current_step >= self.total_steps
