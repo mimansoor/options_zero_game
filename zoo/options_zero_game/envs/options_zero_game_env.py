@@ -570,53 +570,22 @@ class OptionsZeroGameEnv(gym.Env):
         # 2. Take-Profit Rules (Only check if not already stopped out)
         if not terminated_by_rule and not self.portfolio_manager.portfolio.empty:
 
-            # Rule 2a: Fixed Portfolio-Level "Home Run" Target
-            fixed_target_pct = self._cfg.profit_target_pct
-            if fixed_target_pct > 0:
-                pnl_pct = (current_pnl / self.portfolio_manager.initial_cash) * 100
-                if pnl_pct >= fixed_target_pct:
-                    terminated_by_rule = True
-                    final_shaped_reward_override = self._cfg.jackpot_reward
-                    termination_reason = "TAKE_PROFIT"
+            # First, check the dynamic strategy-level target against our new fixed value.
+            profit_target_pnl = self.portfolio_manager.fixed_profit_target_pnl
+            if profit_target_pnl > 0 and current_pnl >= profit_target_pnl:
+                terminated_by_rule = True
+                final_shaped_reward_override = self._cfg.jackpot_reward
+                termination_reason = "TAKE_PROFIT"
 
-            # Rule 2b: Dynamic Strategy-Level Targets (only check if home run not hit)
+            # Second, if the dynamic target wasn't hit, check the portfolio-level "home run" target.
             if not terminated_by_rule:
-                net_premium = self.portfolio_manager.initial_net_premium
-                if net_premium < 0: # Credit strategy
-                    credit_target_pct = self._cfg.credit_strategy_take_profit_pct
-                    if credit_target_pct > 0:
-                        max_profit = self.portfolio_manager.portfolio.iloc[0]['strategy_max_profit']
-                        profit_target_pnl = max_profit * (credit_target_pct / 100)
-                        if max_profit > 0 and current_pnl >= profit_target_pnl:
-                            terminated_by_rule = True
-                            final_shaped_reward_override = self._cfg.jackpot_reward
-                            termination_reason = "TAKE_PROFIT"
-                elif net_premium > 0: # Debit strategy
-                    debit_target_multiple = self._cfg.debit_strategy_take_profit_multiple
-                    # We use the same credit_strategy_take_profit_pct for the max profit ratio
-                    max_profit_target_pct = self._cfg.credit_strategy_take_profit_pct 
-                    
-                    if debit_target_multiple > 0 or max_profit_target_pct > 0:
-                        # Target A: Based on a multiple of the debit paid
-                        debit_paid = net_premium * self.portfolio_manager.lot_size
-                        target_from_multiple = debit_paid * debit_target_multiple
-                        
-                        # Target B: Based on a percentage of the max possible profit
-                        max_profit = self.portfolio_manager.portfolio.iloc[0]['strategy_max_profit']
-                        target_from_ratio = max_profit * (max_profit_target_pct / 100)
-                        
-                        # The final, achievable target is the MINIMUM of the two.
-                        # We only consider targets that are enabled (value > 0)
-                        possible_targets = []
-                        if debit_target_multiple > 0: possible_targets.append(target_from_multiple)
-                        if max_profit_target_pct > 0: possible_targets.append(target_from_ratio)
-                        
-                        if possible_targets:
-                            profit_target_pnl = min(possible_targets)
-                            if max_profit > 0 and current_pnl >= profit_target_pnl:
-                                terminated_by_rule = True
-                                final_shaped_reward_override = self._cfg.jackpot_reward
-                                termination_reason = "TAKE_PROFIT"
+                fixed_target_pct = self._cfg.profit_target_pct
+                if fixed_target_pct > 0:
+                    pnl_pct = (current_pnl / self.portfolio_manager.initial_cash) * 100
+                    if pnl_pct >= fixed_target_pct:
+                        terminated_by_rule = True
+                        final_shaped_reward_override = self._cfg.jackpot_reward
+                        termination_reason = "TAKE_PROFIT"
 
         # Final termination condition
         terminated_by_time = self.current_step >= self.total_steps

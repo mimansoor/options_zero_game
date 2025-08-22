@@ -147,6 +147,9 @@ class PortfolioManager:
         self.lowest_realized_loss = 0.0
         self.mtm_pnl_high = 0.0  # Tracks the highest MtM P&L seen
         self.mtm_pnl_low = 0.0   # Tracks the lowest MtM P&L seen (max drawdown)
+
+        # <<< --- NEW: State variable to store the fixed profit target --- >>>
+        self.fixed_profit_target_pnl: float = 0.0
     
         # This guarantees a perfect, two-way symmetrical mapping for all actions.
         
@@ -240,11 +243,13 @@ class PortfolioManager:
         self.next_creation_id = 0
         self.initial_net_premium = 0.0
         self.receipts_for_current_step = []
+
         # Reset the MtM trackers for the new episode
         self.mtm_pnl_high = 0.0
         self.mtm_pnl_low = 0.0
         self.highest_realized_profit = 0.0
         self.lowest_realized_loss = 0.0
+        self.fixed_profit_target_pnl = 0.0
 
     # --- Public Methods (called by the main environment) ---
     def hedge_portfolio_by_rolling_leg(self, leg_index: int, current_price: float, iv_bin_index: int, current_step: int):
@@ -1248,6 +1253,10 @@ class PortfolioManager:
         source of truth for updating hedge status.
         This version ensures state is finalized even when trades_to_execute is empty.
         """
+        # --- 1. Check if this is the initiation of a new strategy ---
+        # This is true if the portfolio is currently empty.
+        is_new_strategy_initiation = self.portfolio.empty
+
         # --- 1. Add New Trades (if any) ---
         if trades_to_execute:
             # Deduct brokerage from realized PnL for each new leg being opened.
@@ -1271,6 +1280,24 @@ class PortfolioManager:
             
             new_positions_df = pd.DataFrame(trades_to_execute).astype(self.portfolio_dtypes)
             self.portfolio = pd.concat([self.portfolio, new_positions_df], ignore_index=True)
+
+        # <<< --- NEW: Set the fixed profit target --- >>>
+        if is_new_strategy_initiation:
+            net_premium = self.initial_net_premium
+
+            # This logic is now moved from the environment to the manager
+            if net_premium < 0: # Credit strategy
+                credit_tp_pct = self.cfg.get('credit_strategy_take_profit_pct', 0)
+                if credit_tp_pct > 0:
+                    # Use the pure, theoretical max profit of the strategy
+                    max_profit = strategy_pnl.get('strategy_max_profit', 0.0)
+                    self.fixed_profit_target_pnl = max_profit * (credit_tp_pct / 100)
+
+            elif net_premium > 0: # Debit strategy
+                debit_tp_mult = self.cfg.get('debit_strategy_take_profit_multiple', 0)
+                if debit_tp_mult > 0:
+                    debit_paid = net_premium * self.lot_size
+                    self.fixed_profit_target_pnl = debit_paid * debit_tp_mult
 
         # --- 2. Finalize State (ALWAYS runs) ---
         # This ensures that after any modification (add, close, shift),
