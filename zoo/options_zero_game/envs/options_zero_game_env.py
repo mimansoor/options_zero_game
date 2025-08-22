@@ -463,10 +463,12 @@ class OptionsZeroGameEnv(gym.Env):
                 # 1. Calculate and store the initial net premium for the environment
                 #    immediately after the position is opened.
                 new_portfolio = self.portfolio_manager.get_portfolio()
-                self.initial_net_premium = sum(
+                per_share_net_premium = sum(
                     leg['entry_premium'] * (1 if leg['direction'] == 'long' else -1)
                     for _, leg in new_portfolio.iterrows()
                 )
+                # 2. Store the TRUE initial net premium, including the lot size.
+                self.initial_net_premium = per_share_net_premium * self.portfolio_manager.lot_size
 
                 # 2. Now, the profit target logic can use this correct, fresh value.
                 stats = self.portfolio_manager.get_raw_portfolio_stats(self.price_manager.current_price, self.iv_bin_index)
@@ -482,8 +484,7 @@ class OptionsZeroGameEnv(gym.Env):
                 elif self.initial_net_premium > 0: # Debit strategy
                     debit_tp_mult = self._cfg.get('debit_strategy_take_profit_multiple', 0)
                     if debit_tp_mult > 0:
-                        debit_paid = self.initial_net_premium * self.portfolio_manager.lot_size
-                        self.fixed_profit_target_pnl = debit_paid * debit_tp_mult
+                        self.fixed_profit_target_pnl = self.initial_net_premium * debit_tp_mult
         elif final_action_name.startswith('CLOSE_POSITION_'):
             self.portfolio_manager.close_position(int(final_action_name.split('_')[-1]), self.price_manager.current_price, self.iv_bin_index, self.current_step)
         elif final_action_name == 'CLOSE_ALL':
@@ -594,7 +595,7 @@ class OptionsZeroGameEnv(gym.Env):
 
         # 1. Stop-Loss Rule (Highest Priority)
         if self._cfg.use_stop_loss and not self.portfolio_manager.portfolio.empty:
-            initial_cost = abs(self.initial_net_premium * self.portfolio_manager.lot_size)
+            initial_cost = abs(self.initial_net_premium)
             stop_loss_level = initial_cost * self._cfg.stop_loss_multiple_of_cost
             if current_pnl <= -stop_loss_level:
                 terminated_by_rule = True
