@@ -184,13 +184,13 @@ function StrategyReport({ reportData }) {
         if (sortConfig !== null) { sortableData.sort((a, b) => { const valA = a[sortConfig.key] === null ? Infinity : a[sortConfig.key] || -Infinity; const valB = b[sortConfig.key] === null ? Infinity : b[sortConfig.key] || -Infinity; if (valA < valB) return sortConfig.direction === 'ascending' ? -1 : 1; if (valA > valB) return sortConfig.direction === 'ascending' ? 1 : -1; return 0; }); }
         return sortableData;
     }, [reportData, sortConfig]);
-
     const requestSort = (key) => { let direction = 'ascending'; if (sortConfig && sortConfig.key === key && sortConfig.direction === 'ascending') { direction = 'descending'; } setSortConfig({ key, direction }); };
     const getSortIndicatorClass = (key) => { if (!sortConfig || sortConfig.key !== key) return 'sort-indicator-hidden'; return sortConfig.direction === 'ascending' ? 'sort-indicator' : 'sort-indicator descending'; };
-    
     if (!reportData || !Array.isArray(reportData) || reportData.length === 0) return <p className="empty-message">No strategy data in this report.</p>;
     
-    const columns = ["Trader_Score", "Strategy", "Total_Trades", "Win_Rate_%", "Expectancy_$", "Profit_Factor", "Avg_Win_$", "Avg_Loss_$", "Max_Win_$", "Max_Loss_$", "Win_Streak", "Loss_Streak"];
+    // <<< --- NEW: Add 'CVaR_95%_$' to the columns list --- >>>
+    // Placing it right after Max Loss makes for a logical comparison.
+    const columns = ["Trader_Score", "Strategy", "Total_Trades", "Win_Rate_%", "Expectancy_$", "Profit_Factor", "Avg_Win_$", "Avg_Loss_$", "Max_Win_$", "Max_Loss_$", "CVaR_95%_$", "Win_Streak", "Loss_Streak"];
     
     return (<div className="card" style={{ flex: '1 1 100%', marginTop: '20px' }}><h3>Strategy Performance Report (Click Headers to Sort)</h3><div className="table-container"><table className="info-table sortable"><thead><tr>{columns.map(col => (<th key={col} onClick={() => requestSort(col)}>{col.replace(/_/g, ' ')}<span className={getSortIndicatorClass(col)}>▲</span></th>))}</tr></thead><tbody>
         {sortedData.map((row, index) => (
@@ -198,8 +198,6 @@ function StrategyReport({ reportData }) {
                 {columns.map(col => {
                     const value = row[col];
                     let displayValue;
-
-                    // <<< --- THE UI FIX IS HERE --- >>>
                     if (value === null) {
                         displayValue = col === 'Profit_Factor' ? '∞' : 'N/A';
                     } else if (typeof value === 'number') {

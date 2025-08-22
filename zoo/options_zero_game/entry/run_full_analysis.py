@@ -22,7 +22,7 @@ def run_full_analysis():
     # --- Configuration ---
     REPORTS_DIR = "zoo/options_zero_game/visualizer-ui/build/reports"
     ANALYZER_SCRIPT_PATH = "zoo/options_zero_game/entry/strategy_analyzer.py"
-    ANALYZER_RUN_DIR_PREFIX = 'strat_eval/strategy_analyzer_runs'
+    ANALYZER_RUN_DIR_PREFIX = 'strat_eval/strategy_analyzer'
     ANALYZER_RUN_DIR = 'strat_eval/strategy_analyzer' # This will be the prefix
     BEST_CKPT_DEST = "best_ckpt/ckpt_best.pth.tar"
     EXPERIMENT_DIR = "experiments/options_zero_game_muzero_agent_v2.2-Final_ns50_upc2000_bs256"
