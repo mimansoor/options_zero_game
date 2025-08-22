@@ -443,7 +443,6 @@ class OptionsZeroGameEnv(gym.Env):
         # 1. Determine the final action and if the agent's attempt was illegal.
         final_action, was_illegal_action = self._handle_action(action)
         final_action_name = self.indices_to_actions.get(final_action, 'INVALID')
-        #print(f"DEBUG: entered _take_action_on_state {final_action_name}")
 
         # 2. Store this information for the second half of the step.
         self.last_action_info = {
@@ -628,7 +627,6 @@ class OptionsZeroGameEnv(gym.Env):
                 net_premium = self.initial_net_premium
                 if net_premium < 0: # Credit strategy
                     termination_reason = f"CREDIT TARGET ({self._cfg.credit_strategy_take_profit_pct}%) MET"
-                    #print(f"DEBUG: current_pnl: {current_pnl} profit_target_pnl: {profit_target_pnl}")
                 else: # Debit strategy
                     termination_reason = f"DEBIT TARGET ({self._cfg.debit_strategy_take_profit_multiple}x) MET"
 
@@ -1132,7 +1130,7 @@ class OptionsZeroGameEnv(gym.Env):
             if len(portfolio_df) < self._cfg.max_positions:
                 self._set_if_exists(action_mask, 'HEDGE_DELTA_WITH_ATM_OPTION')
             for i in range(len(portfolio_df)):
-                 self._set_if_exists(action_mask, f'HEDGE_PORTFOLIO_BY_ROLLING_LEG_{i}')
+                self._set_if_exists(action_mask, f'HEDGE_PORTFOLIO_BY_ROLLING_LEG_{i}')
         
         return action_mask
 

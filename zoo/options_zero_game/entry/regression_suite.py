@@ -44,7 +44,7 @@ def test_hedge_portfolio_by_rolling_leg():
     test_name = "test_hedge_portfolio_by_rolling_leg"
     print(f"\n--- RUNNING: {test_name} ---")
     # Start with a short strangle, as it's a good candidate for delta adjustments.
-    env = create_test_env('OPEN_SHORT_STRANGLE_DELTA_20')
+    env = create_test_env('OPEN_SHORT_STRANGLE_DELTA_30')
     try:
         # Step 1: Open the position
         env.reset(seed=63)
@@ -73,7 +73,7 @@ def test_hedge_portfolio_by_rolling_leg():
         
         # --- Assertions ---
         portfolio_after = env.portfolio_manager.get_portfolio()
-        assert len(portfolio_after) == 2, "Hedge failed: Number of legs changed."
+        assert len(portfolio_after) == 2, f"Hedge failed: Number of legs changed. {len(portfolio_after)}"
         
         # <<< --- THE DEFINITIVE, ROBUST CHECK --- >>>
         # We will perform an apples-to-apples comparison of portfolio delta
@@ -524,7 +524,7 @@ def test_greeks_and_risk_validation():
         print("\n--- Validating Max Profit / Max Loss ---")
         lot_size = env.portfolio_manager.lot_size
         brokerage_per_leg = env.portfolio_manager.brokerage_per_leg
-        net_credit = abs(env.portfolio_manager.initial_net_premium * lot_size)
+        net_credit = abs(env.initial_net_premium * lot_size)
         total_brokerage = len(portfolio_df) * brokerage_per_leg
         theoretical_max_profit = net_credit - total_brokerage
         call_legs = portfolio_df[portfolio_df['type'] == 'call']

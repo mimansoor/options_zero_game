@@ -249,38 +249,50 @@ class PortfolioManager:
     def hedge_portfolio_by_rolling_leg(self, leg_index: int, current_price: float, iv_bin_index: int, current_step: int):
         """
         Executes the portfolio delta hedge by finding the optimal strike for
-        the specified leg and rolling it.
+        the specified leg and performing an atomic roll.
         """
         if not (0 <= leg_index < len(self.portfolio)): return
 
-        # 1. Use the new solver to find the best strike
         new_strike = self._find_portfolio_neutral_strike(leg_index, current_price, iv_bin_index)
         
         if new_strike is None:
-            # This means no better strike was found to reduce the delta.
             return
 
-        # 2. Re-use the robust "shift" logic to execute the roll
+        # --- 2. The Definitive, Atomic Roll Logic ---
         leg_to_roll_df = self.portfolio.iloc[[leg_index]]
-        leg_to_roll = leg_to_roll_df.iloc[0]
-        original_creation_id = leg_to_roll['creation_id']
+        leg_to_roll_dict = leg_to_roll_df.iloc[0].to_dict()
         
-        untouched_legs = self.portfolio[self.portfolio['creation_id'] != original_creation_id]
-        sibling_legs = self.portfolio[(self.portfolio['creation_id'] == original_creation_id) & (self.portfolio.index != leg_index)]
-
+        other_legs_df = self.portfolio.drop(self.portfolio.index[leg_index])
+        
         self._process_leg_closures(leg_to_roll_df, current_price, current_step)
         
-        new_leg_def = [{'type': leg_to_roll['type'], 'direction': leg_to_roll['direction'],
-                        'strike_price': new_strike, 'days_to_expiry': leg_to_roll['days_to_expiry'],
-                        'entry_step': current_step}]
-        priced_new_leg = self._price_legs(new_leg_def, current_price, iv_bin_index)
-        
-        modified_strategy_legs = sibling_legs.to_dict(orient='records') + priced_new_leg
-        pnl_profile = self._calculate_universal_risk_profile(modified_strategy_legs, self.realized_pnl)
-        pnl_profile['strategy_id'] = leg_to_roll['strategy_id']
+        # <<< --- THE DEFINITIVE FIX IS HERE --- >>>
+        # a) Create the new leg by copying the old one to preserve all essential keys.
+        new_leg_def = leg_to_roll_dict.copy()
+        new_leg_def['strike_price'] = new_strike
+        new_leg_def['entry_step'] = current_step
+        # Remove the old premium; it will be recalculated.
+        if 'entry_premium' in new_leg_def: del new_leg_def['entry_premium']
 
-        self.portfolio = untouched_legs.copy()
-        self._execute_trades(modified_strategy_legs, pnl_profile)
+        # b) Price the newly defined leg. _price_legs expects a list.
+        priced_new_leg_list = self._price_legs([new_leg_def], current_price, iv_bin_index)
+
+        if not priced_new_leg_list:
+            self.portfolio = other_legs_df.reset_index(drop=True)
+            self._update_hedge_status()
+            return
+
+        # c) Re-assemble the full portfolio and re-calculate its profile
+        final_legs_list = other_legs_df.to_dict('records') + priced_new_leg_list
+        pnl_profile = self._calculate_universal_risk_profile(final_legs_list, self.realized_pnl)
+        
+        # We must preserve the original strategy ID after the roll
+        pnl_profile['strategy_id'] = leg_to_roll_dict['strategy_id']
+
+        # d) Atomically replace the entire portfolio with the new, correct state
+        for leg in final_legs_list:
+            leg.update(pnl_profile)
+        self.portfolio = pd.DataFrame(final_legs_list).astype(self.portfolio_dtypes)
         self._update_hedge_status()
 
     def get_raw_greeks_for_legs(self, legs: List[Dict], current_price: float, iv_bin_index: int) -> Dict:
