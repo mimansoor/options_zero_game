@@ -17,7 +17,7 @@ do
     echo "--- [$(date)] Activating Python environment and starting new cycle ---"
 
     # Activate the Python virtual environment
-    source venv/bin/activate
+    source ../venv/bin/activate
 
     # Run your main evaluation script
     # The "$@" allows you to pass arguments to this loop script, which will be
