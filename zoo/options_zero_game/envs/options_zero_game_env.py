@@ -568,16 +568,24 @@ class OptionsZeroGameEnv(gym.Env):
                 termination_reason = "STOP_LOSS"
 
         # 2. Take-Profit Rules (Only check if not already stopped out)
+        # 2. Take-Profit Rules (Only check if not already stopped out)
         if not terminated_by_rule and not self.portfolio_manager.portfolio.empty:
-
-            # First, check the dynamic strategy-level target against our new fixed value.
+            
+            # --- Rule 2a: Dynamic Strategy-Level Target ---
             profit_target_pnl = self.portfolio_manager.fixed_profit_target_pnl
             if profit_target_pnl > 0 and current_pnl >= profit_target_pnl:
                 terminated_by_rule = True
                 final_shaped_reward_override = self._cfg.jackpot_reward
-                termination_reason = "TAKE_PROFIT"
+                
+                # <<< --- THE DEFINITIVE FIX: Descriptive Reason --- >>>
+                # Determine if it was a credit or debit target that was hit.
+                net_premium = self.portfolio_manager.initial_net_premium
+                if net_premium < 0: # Credit strategy
+                    termination_reason = f"CREDIT TARGET ({self._cfg.credit_strategy_take_profit_pct}%) MET"
+                else: # Debit strategy
+                    termination_reason = f"DEBIT TARGET ({self._cfg.debit_strategy_take_profit_multiple}x) MET"
 
-            # Second, if the dynamic target wasn't hit, check the portfolio-level "home run" target.
+            # --- Rule 2b: Portfolio-Level "Home Run" Target ---
             if not terminated_by_rule:
                 fixed_target_pct = self._cfg.profit_target_pct
                 if fixed_target_pct > 0:
@@ -585,7 +593,9 @@ class OptionsZeroGameEnv(gym.Env):
                     if pnl_pct >= fixed_target_pct:
                         terminated_by_rule = True
                         final_shaped_reward_override = self._cfg.jackpot_reward
-                        termination_reason = "TAKE_PROFIT"
+                        
+                        # <<< --- THE DEFINITIVE FIX: Descriptive Reason --- >>>
+                        termination_reason = f"PORTFOLIO TARGET ({fixed_target_pct}%) MET"
 
         # Final termination condition
         terminated_by_time = self.current_step >= self.total_steps
