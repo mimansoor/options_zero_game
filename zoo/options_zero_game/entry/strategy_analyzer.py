@@ -86,37 +86,33 @@ def calculate_statistics(results: list, strategy_name: str) -> dict:
 def calculate_trader_score(strategy_data):
     """
     Calculates a unified 'Trader's Score' using a robust multi-factor model.
-    This version now correctly incorporates Conditional Value at Risk (CVaR)
-    as a primary risk factor in the denominator.
+    This version now correctly handles the case of a positive CVaR.
     """
     expectancy = strategy_data.get("Expectancy_$", 0)
 
     if expectancy <= 0:
         return np.tanh(expectancy / 50000)
 
-    # --- "Good" Factors (Guaranteed Positive for profitable strategies) ---
-    profit_factor = strategy_data.get("Profit_Factor", 1.0) or 1.0 # Default null/0 to 1.0
+    # --- "Good" Factors ---
+    profit_factor = strategy_data.get("Profit_Factor", 1.0) or 1.0
     win_rate = strategy_data.get("Win_Rate_%", 0)
 
-    # --- "Bad" Factors (Measures of Risk, including Tail Risk) ---
+    # --- "Bad" Factors (Measures of Risk) ---
     avg_loss = 1 + abs(strategy_data.get("Avg_Loss_$", 0))
     max_loss = 1 + abs(strategy_data.get("Max_Loss_$", 0))
-    # <<< --- THE DEFINITIVE FIX: Add CVaR to the "bad" factors --- >>>
-    cvar_95 = 1 + abs(strategy_data.get("CVaR_95%_$", 0))
+
+    # <<< --- THE DEFINITIVE FIX IS HERE --- >>>
+    # We only penalize for the "Value at Risk" component of CVaR.
+    # If CVaR is positive, its contribution to the risk denominator is zero.
+    cvar_95_raw = strategy_data.get("CVaR_95%_$", 0)
+    cvar_risk_component = 1 + abs(min(0, cvar_95_raw))
 
     # --- Calculate the Score ---
-    # The raw score is a ratio of profitability and consistency vs. risk.
-    # Expectancy is the core driver.
-    # CVaR is now included in the denominator to penalize for tail risk.
     good_product = expectancy * win_rate * profit_factor
-    bad_product = avg_loss + max_loss + cvar_95 # Summing risk factors is more stable
+    bad_product = avg_loss + max_loss + cvar_risk_component
 
-    raw_score = good_product / (bad_product + 1e-6) # Add epsilon for safety
-
-    # Use log to scale the raw score gracefully.
+    raw_score = good_product / (bad_product + 1e-6)
     log_scaled_score = np.log(1 + raw_score)
-
-    # Tanh normalizes the final score to a clean [0, 1] range.
     final_score = np.tanh(log_scaled_score)
 
     return final_score if np.isfinite(final_score) else 0.0
