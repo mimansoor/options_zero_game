@@ -133,14 +133,86 @@ function PnlVerification({ verificationData }) {
     </div>);
 }
 
-function PayoffDiagram({ payoffData }) {
-    if (!payoffData || !payoffData.expiry_pnl || !payoffData.expiry_pnl.length) { return <p className="empty-message">Portfolio is empty.</p>; }
-    const { expiry_pnl, current_pnl, spot_price = 0, sigma_levels = {} } = payoffData;
+const calculateExpiryPnl = (portfolio, priceRange, lotSize, realizedPnl) => {
+    if (!portfolio || portfolio.length === 0) {
+        return [];
+    }
+
+    return priceRange.map(price => {
+        let unrealizedPnl = 0;
+        portfolio.forEach(leg => {
+            const pnlMultiplier = leg.direction === 'long' ? 1 : -1;
+            let intrinsicValue = 0;
+            if (leg.type === 'call') {
+                intrinsicValue = Math.max(0, price - leg.strike_price);
+            } else { // put
+                intrinsicValue = Math.max(0, leg.strike_price - price);
+            }
+            const pnlPerShare = intrinsicValue - leg.entry_premium;
+            unrealizedPnl += pnlPerShare * pnlMultiplier * lotSize;
+        });
+        return { price: price, pnl: realizedPnl + unrealizedPnl };
+    });
+};
+
+function PayoffDiagram({ payoffData, portfolio, pnlVerification, lotSize }) {
+    if (!payoffData || !payoffData.current_pnl || payoffData.current_pnl.length === 0 || !portfolio || !pnlVerification) {
+        return <p className="empty-message">Portfolio is empty.</p>;
+    }
+
+    // <<< --- THE DEFINITIVE FIX IS HERE --- >>>
+    // 1. Destructure payoffData and provide a default empty object for sigma_levels.
+    const { current_pnl, spot_price, sigma_levels = {} } = payoffData;
+    // 2. NOW, destructure sigma_levels to bring plus_one and minus_one into scope.
+    //    Provide the spot_price as a fallback default if they don't exist.
     const { plus_one = spot_price, minus_one = spot_price } = sigma_levels;
-    const data = { labels: expiry_pnl.map(d => d.price), datasets: [ { label: 'P&L at Expiry', data: expiry_pnl.map(d => d.pnl), borderColor: '#E91E63', tension: 0.1, pointRadius: 0, fill: true, backgroundColor: (context) => { const chart = context.chart; const { ctx, chartArea } = chart; if (!chartArea) { return null; } let zeroPoint = (chart.scales.y.getPixelForValue(0) - chartArea.top) / (chartArea.bottom - chartArea.top); zeroPoint = Math.max(0, Math.min(1, zeroPoint)); const gradient = ctx.createLinearGradient(0, chartArea.top, 0, chartArea.bottom); const epsilon = 0.0001; gradient.addColorStop(0, 'rgba(76, 175, 80, 0.5)'); gradient.addColorStop(Math.max(0, zeroPoint - epsilon), 'rgba(76, 175, 80, 0.5)'); gradient.addColorStop(zeroPoint, 'rgba(244, 67, 54, 0.5)'); gradient.addColorStop(1, 'rgba(244, 67, 54, 0.5)'); return gradient; }, }, { label: 'Mark-to-Market P&L (T+0)', data: current_pnl.map(d => d.pnl), borderColor: '#2196F3', borderDash: [5, 5], tension: 0.4, pointRadius: 0 } ], };
+
+    const realizedPnl = pnlVerification.realized_pnl || 0;
+    const priceRange = current_pnl.map(d => d.price);
+    const expiry_pnl = calculateExpiryPnl(portfolio, priceRange, lotSize, realizedPnl);
+
+    const data = {
+        labels: priceRange,
+        datasets: [
+            {
+                label: 'P&L at Expiry',
+                data: expiry_pnl.map(d => d.pnl),
+                borderColor: '#E91E63',
+                tension: 0.1,
+                pointRadius: 0,
+                fill: true,
+                backgroundColor: (context) => {
+                    const chart = context.chart; const {ctx, chartArea} = chart; if (!chartArea) return null;
+                    const zero = chart.scales.y.getPixelForValue(0); if (zero < chartArea.top || zero > chartArea.bottom) { return Math.max(...expiry_pnl.map(d => d.pnl)) > 0 ? 'rgba(76, 175, 80, 0.4)' : 'rgba(244, 67, 54, 0.4)'; }
+                    const gradient = ctx.createLinearGradient(0, chartArea.top, 0, chartArea.bottom); const topPixel = chartArea.top; const bottomPixel = chartArea.bottom;
+                    const zeroPoint = (zero - topPixel) / (bottomPixel - topPixel);
+                    gradient.addColorStop(0, 'rgba(76, 175, 80, 0.5)'); gradient.addColorStop(zeroPoint, 'rgba(76, 175, 80, 0.5)');
+                    gradient.addColorStop(zeroPoint, 'rgba(244, 67, 54, 0.5)'); gradient.addColorStop(1, 'rgba(244, 67, 54, 0.5)');
+                    return gradient;
+                },
+            },
+            { label: 'Mark-to-Market P&L (T+0)', data: current_pnl.map(d => d.pnl), borderColor: '#2196F3', borderDash: [5, 5], tension: 0.4, pointRadius: 0, }
+        ],
+    };
+
     const allPnlValues = [...expiry_pnl.map(d => d.pnl), ...current_pnl.map(d => d.pnl)];
-    const minY = Math.min(...allPnlValues); const maxY = Math.max(...allPnlValues); const padding = Math.abs(maxY - minY) * 0.1;
-    const options = { responsive: true, maintainAspectRatio: false, scales: { x: { type: 'linear', ticks: { color: 'white', callback: (value) => '$' + value.toLocaleString() } }, y: { ticks: { color: 'white', callback: (value) => '$' + value.toLocaleString() }, min: minY - padding, max: maxY + padding, grid: { color: (c) => c.tick.value === 0 ? 'rgba(255, 255, 255, 0.8)' : 'rgba(255, 255, 255, 0.2)', lineWidth: (c) => c.tick.value === 0 ? 2 : 1 } } }, plugins: { legend: { labels: { color: 'white' } }, annotation: { annotations: { spotLine: { type: 'line', xMin: spot_price, xMax: spot_price, borderColor: '#4CAF50', borderWidth: 2, label: { content: `Spot: ${spot_price.toFixed(2)}`, enabled: true, position: 'start' } }, plusOneSigma: { type: 'line', xMin: plus_one, xMax: plus_one, borderColor: 'rgba(255, 255, 255, 0.3)', borderWidth: 1, borderDash: [6, 6] }, minusOneSigma: { type: 'line', xMin: minus_one, xMax: minus_one, borderColor: 'rgba(255, 255, 255, 0.3)', borderWidth: 1, borderDash: [6, 6] } } } } };
+    const minY = Math.min(...allPnlValues); const maxY = Math.max(...allPnlValues); const padding = (maxY - minY) * 0.1;
+
+    const options = {
+        responsive: true, maintainAspectRatio: false,
+        scales: { x: { type: 'linear', ticks: { color: 'white' } }, y: { ticks: { color: 'white' }, min: minY - padding, max: maxY + padding, grid: { color: (c) => c.tick.value === 0 ? 'rgba(255, 255, 255, 0.8)' : 'rgba(255, 255, 255, 0.2)', lineWidth: (c) => c.tick.value === 0 ? 2 : 1, } } },
+        plugins: {
+            legend: { labels: { color: 'white' }, align: 'end', position: 'bottom' },
+            annotation: {
+                annotations: {
+                    spotLine: { type: 'line', xMin: spot_price, xMax: spot_price, borderColor: '#4CAF50', borderWidth: 2, label: { content: `Spot: ${spot_price.toFixed(2)}`, enabled: true, position: 'start', font: {size: 10} } },
+                    // The variables plus_one and minus_one are now correctly defined in scope.
+                    plusOneSigma: { type: 'line', xMin: plus_one, xMax: plus_one, borderColor: 'rgba(255, 255, 255, 0.3)', borderWidth: 1, borderDash: [6, 6], label: { content: '+1σ', enabled: true, position: 'start', font: { size: 10 } } },
+                    minusOneSigma: { type: 'line', xMin: minus_one, xMax: minus_one, borderColor: 'rgba(255, 255, 255, 0.3)', borderWidth: 1, borderDash: [6, 6], label: { content: '-1σ', enabled: true, position: 'start', font: { size: 10 } } },
+                }
+            }
+        }
+    };
     return <div className="chart-container"><Line options={options} data={data} /></div>;
 }
 
@@ -230,7 +302,15 @@ function ReplayerView({ displayedStepData, replayData, currentStep, goToStep, ep
             <MetricsDashboard stepData={displayedStepData} lots={lots} envDefaults={envDefaults} />
             <div className="charts-container">
                 <div className="card chart-card"><h3>Agent Behavior</h3><AgentBehaviorChart episodeHistory={episodeHistory} historicalContext={historicalContext} deNormParams={deNormParams} envDefaults={envDefaults} /></div>
-                <div className="card chart-card"><h3>Portfolio P&L Diagram</h3><PayoffDiagram payoffData={displayedStepData.info.payoff_data} /></div>
+                <div className="card chart-card"><h3>Portfolio P&L Diagram</h3>
+                    {/* <<< --- Pass the new required props to the component --- >>> */}
+                    <PayoffDiagram 
+                        payoffData={displayedStepData.info.payoff_data}
+                        portfolio={displayedStepData.portfolio}
+                        pnlVerification={displayedStepData.info.pnl_verification}
+                        lotSize={deNormParams.lotSize} // Pass the de-normalized lot size
+                    />
+	        </div>
             </div>
             <div className="info-panels-container">
                <div className="card"><h3>Active Positions</h3><ActivePositions portfolio={displayedStepData.portfolio} /></div>
