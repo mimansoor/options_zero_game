@@ -27,7 +27,18 @@ def calculate_statistics(results: list, strategy_name: str) -> dict:
     avg_profit = sum(wins) / num_wins if num_wins > 0 else 0.0
     avg_loss = sum(losses) / num_losses if num_losses > 0 else 0.0
     expectancy = ((win_rate / 100) * avg_profit) + ((1 - win_rate / 100) * avg_loss)
-    profit_factor = sum(wins) / abs(sum(losses)) if sum(losses) != 0 else None
+
+    # <<< --- THE DEFINITIVE FIX AT THE SOURCE --- >>>
+    sum_of_wins = sum(wins)
+    sum_of_losses = abs(sum(losses))
+    if sum_of_wins > 0:
+        if sum_of_losses > 1e-6:
+            profit_factor = sum_of_wins / sum_of_losses
+        else: # Wins but no losses
+            profit_factor = 999.0 # Use a large number to represent infinity
+    else: # No wins
+        profit_factor = 0.0
+
     cvar_95 = 0.0
     if losses:
         pnl_array = np.array(pnls)
@@ -35,13 +46,28 @@ def calculate_statistics(results: list, strategy_name: str) -> dict:
         tail_losses = pnl_array[pnl_array <= var_95]
         if len(tail_losses) > 0: cvar_95 = np.mean(tail_losses)
         else: cvar_95 = var_95
+
     max_win_streak, max_loss_streak, current_win_streak, current_loss_streak = 0, 0, 0, 0
     for pnl in pnls:
         if pnl > 0: current_win_streak += 1; current_loss_streak = 0
         else: current_loss_streak += 1; current_win_streak = 0
         max_win_streak = max(max_win_streak, current_win_streak)
         max_loss_streak = max(max_loss_streak, current_loss_streak)
-    return {"Strategy": strategy_name, "Total_Trades": len(pnls), "Win_Rate_%": win_rate, "Expectancy_$": expectancy, "Profit_Factor": profit_factor, "Avg_Win_$": avg_profit, "Avg_Loss_$": avg_loss, "Max_Win_$": max(wins) if wins else 0.0, "Max_Loss_$": min(losses) if losses else 0.0, "CVaR_95%_$": cvar_95, "Win_Streak": max_win_streak, "Loss_Streak": max_loss_streak}
+
+    stats = {
+        "Strategy": strategy_name, "Total_Trades": len(pnls), "Win_Rate_%": win_rate,
+        "Expectancy_$": expectancy, "Profit_Factor": profit_factor,
+        "Avg_Win_$": avg_profit, "Avg_Loss_$": avg_loss,
+        "Max_Win_$": max(wins) if wins else 0.0, "Max_Loss_$": min(losses) if losses else 0.0,
+        "CVaR_95%_$": cvar_95, "Win_Streak": max_win_streak, "Loss_Streak": max_loss_streak
+    }
+
+    # Final sanitation pass to ensure all values are JSON-compatible
+    for key, value in stats.items():
+        if isinstance(value, (float, np.floating)) and not np.isfinite(value):
+            stats[key] = None # Convert NaN/inf to None for JSON null
+
+    return stats
 
 def calculate_trader_score(strategy_data):
     expectancy = strategy_data.get("Expectancy_$", 0)

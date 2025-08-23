@@ -132,8 +132,19 @@ def run_full_analysis():
 
         # 8. Save the final, complete report
         final_report_file = os.path.join(REPORTS_DIR, f"strategy_report_{timestamp}.json")
+        # Sanitize the final data one last time before saving to JSON.
+        sanitized_stats = []
+        for strategy_row in all_stats:
+            sanitized_row = {}
+            for key, value in strategy_row.items():
+                if isinstance(value, (float, np.floating)) and not np.isfinite(value):
+                    # Replace NaN/inf with None, which serializes to 'null' in JSON.
+                    sanitized_row[key] = None
+                else:
+                    sanitized_row[key] = value
+            sanitized_stats.append(sanitized_row)
         with open(final_report_file, 'w') as f:
-            json.dump(all_stats, f, indent=2)
+            json.dump(sanitized_stats, f, indent=2)
         
         os.remove(intermediate_file)
 
