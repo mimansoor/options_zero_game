@@ -2,6 +2,8 @@ import numpy as np
 import argparse
 import time
 import copy
+import json
+import os
 
 from lzero.entry import eval_muzero
 from zoo.options_zero_game.config.options_zero_game_muzero_config import main_config, create_config
@@ -16,6 +18,12 @@ if __name__ == "__main__":
     parser.add_argument('--strategy', type=str, default=None, help="Force a specific opening strategy for the replay.")
     parser.add_argument('--days', type=int, default=0, help="Force a specific episode length in days for the evaluation.")
     parser.add_argument('--agents_choice', action='store_true', help="Let the agent choose its own opening move (disables curriculum).")
+    parser.add_argument(
+        '--portfolio_setup_file', 
+        type=str, 
+        default=None, 
+        help="Path to a JSON file defining the portfolio to set up at Step 0."
+    )
 
     # <<< --- NEW: Add the override arguments --- >>>
     parser.add_argument('--profit_target_pct', type=float, default=None, help="Override the global profit target percentage (e.g., 3 for 3%).")
@@ -54,15 +62,45 @@ if __name__ == "__main__":
         eval_main_config.env.debit_strategy_take_profit_multiple = args.debit_tp_mult
         print(f"--- OVERRIDE: Setting Debit Take-Profit to {args.debit_tp_mult}x ---")
 
+    if args.portfolio_setup_file:
+        print(f"--- Custom Portfolio Setup Detected from file: {args.portfolio_setup_file} ---")
+        try:
+            # Check if the file exists before trying to open it
+            if not os.path.exists(args.portfolio_setup_file):
+                raise FileNotFoundError(f"The specified file was not found: {args.portfolio_setup_file}")
+
+            with open(args.portfolio_setup_file, 'r') as f:
+                parsed_portfolio = json.load(f)
+
+            if not isinstance(parsed_portfolio, list):
+                raise ValueError("JSON file must contain a list of leg dictionaries.")
+
+            # Inject the parsed portfolio definition into the environment config.
+            eval_main_config.env.forced_initial_portfolio = parsed_portfolio
+            print(f"Successfully parsed and will set up {len(parsed_portfolio)} leg(s) at Step 0.")
+
+            # A forced portfolio overrides any forced opening strategy.
+            if args.strategy:
+                print("(INFO) --portfolio_setup_file overrides --strategy.")
+                eval_main_config.env.forced_opening_strategy_name = None
+
+        except (json.JSONDecodeError, FileNotFoundError, ValueError) as e:
+            print(f"FATAL: Could not process portfolio setup file. Error: {e}")
+            exit(1)
+
     # --- Logic to control the opening move ---
-    if args.strategy:
+    # This logic now correctly respects that a forced portfolio might already be set.
+    if args.strategy and not args.portfolio_setup_file:
         print(f"--- Forcing opening strategy: {args.strategy} ---")
         eval_main_config.env.forced_opening_strategy_name = args.strategy
     elif args.agents_choice:
         print("--- Letting agent choose its opening move (curriculum disabled) ---")
         eval_main_config.env.disable_opening_curriculum = True
     else:
+        # If no strategy is forced and it's not agent's choice, we don't need to print anything.
+        # The environment will use its default curriculum logic.
         print("--- Using random curriculum for opening move ---")
+        pass
 
     if args.symbol:
         print(f"--- Forcing evaluation on historical symbol: {args.symbol} ---")

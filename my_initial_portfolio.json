@@ -1,0 +1,17 @@
+[
+  {
+    "type": "put",
+    "direction": "short",
+    "strike_price": 19500
+  },
+  {
+    "type": "put",
+    "direction": "short",
+    "strike_price": 19500
+  },
+  {
+    "type": "put",
+    "direction": "long",
+    "strike_price": 20500
+  }
+]

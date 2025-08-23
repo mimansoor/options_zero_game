@@ -272,21 +272,7 @@ class OptionsZeroGameEnv(gym.Env):
         self.final_eval_reward = 0.0
         self.illegal_action_count = 0
 
-        # --- 2. Determine Forced Opening Strategy (from Curriculum or Config) ---
-        if self.is_training_mode and self.training_curriculum:
-            self._episode_count += 1
-            approx_current_step = self._episode_count * self.total_steps
-            active_strategy = 'ALL'
-            sorted_phases = sorted(self.training_curriculum.keys())
-            for start_step in sorted_phases:
-                if approx_current_step >= start_step:
-                    active_strategy = self.training_curriculum[start_step]
-                else: break
-            self.forced_opening_strategy_name = active_strategy if active_strategy != 'ALL' else None
-        else:
-            self.forced_opening_strategy_name = self._cfg.get('forced_opening_strategy_name')
-
-        # --- 3. Determine Episode Length ---
+        # --- 2. Determine Episode Length & Market Conditions (Must happen before portfolio setup) ---
         forced_length = self._cfg.get('forced_episode_length', 0)
         if forced_length > 0:
             self.episode_time_to_expiry = forced_length
@@ -294,45 +280,97 @@ class OptionsZeroGameEnv(gym.Env):
             self.episode_time_to_expiry = random.randint(self._cfg.min_time_to_expiry_days, self._cfg.time_to_expiry_days)
         self.total_steps = self.episode_time_to_expiry * self._cfg.steps_per_day
 
-        # --- 4. Select IV Regime and Initialize Market Managers ---
-        # Select the starting IV regime for this episode
         if self.iv_stationary_dist is not None:
             self.current_iv_regime_index = np.random.choice(len(self.regimes), p=self.iv_stationary_dist)
         else:
             self.current_iv_regime_index = random.randint(0, len(self.regimes) - 1)
-        
-        # This single helper now correctly creates the MarketRulesManager.
         self._update_market_rules_for_regime()
-
-        # <<< --- MODIFIED: The new 3-way choice logic --- >>>
-        self.mirror_mode = 0 # Default to normal
-        #if self.is_training_mode:
-        #    # Choose one of the three modes with equal probability
-        #    self.mirror_mode = self.np_random.choice([0, 1, 2], p=[0.34, 0.33, 0.33])
-
-        # --- 5. Initialize the Portfolio Manager ---
-        # This must happen AFTER the MarketRulesManager is created.
-        self.portfolio_manager = PortfolioManager(
-            cfg=self._cfg, # This now automatically includes the new parameter
-            bs_manager=self.bs_manager,
-            market_rules_manager=self.market_rules_manager,
-            iv_calculator_func=self._get_dynamic_iv,
-            strategy_name_to_id=self.strategy_name_to_id
-        )
-        # Note: We do NOT call self.portfolio_manager.reset() because it's a new object.
         
-        # --- 6. Reset Remaining State and Get Initial Observation ---
         self.price_manager.reset(self.total_steps)
-        self.high_water_mark = self._cfg.initial_cash
         self.iv_bin_index = random.randint(0, len(self.market_rules_manager.iv_bins['call']['0']) - 1)
+        
+        # --- 3. THE DEFINITIVE FIX: Prioritized Initial State Setup ---
+        
+        # First, ensure the PortfolioManager is initialized, as it's needed for all paths.
+        self.portfolio_manager = PortfolioManager(
+            cfg=self._cfg, bs_manager=self.bs_manager, market_rules_manager=self.market_rules_manager,
+            iv_calculator_func=self._get_dynamic_iv, strategy_name_to_id=self.strategy_name_to_id
+        )
+        
+        self.fixed_profit_target_pnl = 0.0
+        self.initial_net_premium = 0.0
+        forced_portfolio = self._cfg.get('forced_initial_portfolio')
+
+        # PRIORITY 1: A forced portfolio setup from the evaluator via a JSON file.
+        if forced_portfolio and isinstance(forced_portfolio, list):
+            print("(INFO) Setting up forced initial portfolio in environment...")
+            
+            days_to_expiry_float = self.episode_time_to_expiry * (self.TOTAL_DAYS_IN_WEEK / self.TRADING_DAYS_IN_WEEK)
+            for leg_def in forced_portfolio:
+                leg_def['days_to_expiry'] = days_to_expiry_float
+                leg_def['entry_step'] = 0
+
+            priced_legs = self.portfolio_manager._price_legs(forced_portfolio, self.price_manager.start_price, self.iv_bin_index)
+            
+            if priced_legs:
+                num_legs = len(priced_legs)
+                strategy_key = f'CUSTOM_{num_legs}_LEGS' if num_legs > 1 else 'CUSTOM_HEDGED'
+                strategy_id = self.strategy_name_to_id.get(strategy_key, -1)
+
+                pnl_profile = self.portfolio_manager._calculate_universal_risk_profile(priced_legs, 0.0)
+                pnl_profile['strategy_id'] = strategy_id
+                
+                self.portfolio_manager._execute_trades(priced_legs, pnl_profile)
+
+                # After creating the portfolio, we must initialize the environment's
+                # premium and profit target attributes to prevent premature termination.
+                if not self.portfolio_manager.portfolio.empty:
+                    # 1. Copy the correctly calculated net premium from the manager.
+                    #    The manager's attribute already includes the lot size.
+                    new_portfolio = self.portfolio_manager.get_portfolio()
+                    per_share_net_premium = sum(
+                        leg['entry_premium'] * (1 if leg['direction'] == 'long' else -1)
+                        for _, leg in new_portfolio.iterrows()
+                    )
+                    # 2. Store the TRUE initial net premium, including the lot size.
+                    self.initial_net_premium = per_share_net_premium * self.portfolio_manager.lot_size
+
+                    # 2. Calculate and set the fixed profit target for this episode.
+                    self.fixed_profit_target_pnl = 0.0
+                    stats = self.portfolio_manager.get_raw_portfolio_stats(self.price_manager.start_price, self.iv_bin_index)
+
+                    if self.initial_net_premium < 0: # Credit strategy
+                        credit_tp_pct = self._cfg.get('credit_strategy_take_profit_pct', 0)
+                        if credit_tp_pct > 0:
+                            max_profit = stats.get('max_profit', 0.0)
+                            self.fixed_profit_target_pnl = max_profit * (credit_tp_pct / 100)
+                    elif self.initial_net_premium > 0: # Debit strategy
+                        debit_tp_mult = self._cfg.get('debit_strategy_take_profit_multiple', 0)
+                        if debit_tp_mult > 0:
+                            self.fixed_profit_target_pnl = self.initial_net_premium * debit_tp_mult
+                
+            self.forced_opening_strategy_name = None
+
+        # PRIORITY 2: A forced opening strategy from the curriculum or evaluator.
+        elif self.is_training_mode and self.training_curriculum:
+            self._episode_count += 1
+            approx_current_step = self._episode_count * self.total_steps
+            active_strategy = 'ALL'
+            sorted_phases = sorted(self.training_curriculum.keys())
+            for start_step in sorted_phases:
+                if approx_current_step >= start_step: active_strategy = self.training_curriculum[start_step]
+                else: break
+            self.forced_opening_strategy_name = active_strategy if active_strategy != 'ALL' else None
+        else:
+            self.forced_opening_strategy_name = self._cfg.get('forced_opening_strategy_name')
+        
+        # --- 4. Final State Reset ---
+        self.high_water_mark = self._cfg.initial_cash
         self.realized_vol_series = np.zeros(self.total_steps + 1, dtype=np.float32)
 
         obs = self._get_observation()
         action_mask = self._get_true_action_mask() if not self._cfg.ignore_legal_actions else np.ones(self.action_space_size, dtype=np.int8)
 
-        # <<< --- NEW: Reset the profit target for the new episode --- >>>
-        self.fixed_profit_target_pnl = 0.0
-        self.initial_net_premium = 0.0
         return {'observation': obs, 'action_mask': action_mask, 'to_play': -1}
 
     def _handle_day_change(self):
