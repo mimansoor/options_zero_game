@@ -18,29 +18,34 @@ const reSimulateStep = (rawStepData, deNormParams, envDefaults) => {
     const priceRatio = deNormParams.startPrice / envDefaults.startPrice;
     const pnlRatio = deNormParams.lotSize / envDefaults.lotSize;
 
-    // --- Ensure all necessary nested objects exist ---
+    // --- Definitive Guard Clauses: Ensure all nested structures exist ---
     newStepData.info = newStepData.info || {};
+    // Ensure portfolio is always an array, even if null in the raw log
     newStepData.portfolio = newStepData.portfolio || [];
     newStepData.info.pnl_verification = newStepData.info.pnl_verification || {};
     newStepData.info.portfolio_stats = newStepData.info.portfolio_stats || {};
-    newStepData.info.payoff_data = newStepData.info.payoff_data || { expiry_pnl: [], current_pnl: [], sigma_levels: {} };
+    
+    // This is the most critical fix: ensure payoff_data and its nested arrays exist
+    newStepData.info.payoff_data = newStepData.info.payoff_data || {};
+    newStepData.info.payoff_data.expiry_pnl = newStepData.info.payoff_data.expiry_pnl || [];
+    newStepData.info.payoff_data.current_pnl = newStepData.info.payoff_data.current_pnl || [];
+    newStepData.info.payoff_data.sigma_levels = newStepData.info.payoff_data.sigma_levels || {};
 
     // --- De-normalize all values, now safely ---
     newStepData.info.price = (newStepData.info.price || envDefaults.startPrice) * priceRatio;
     if(newStepData.info.initial_cash) newStepData.info.initial_cash *= pnlRatio;
 
     let totalUnrealizedPnl = 0;
-    if (newStepData.portfolio) {
-        newStepData.portfolio.forEach(leg => {
-            const originalOffset = (leg.strike_price - envDefaults.startPrice) / envDefaults.strikeDistance;
-            const rawNewStrike = deNormParams.startPrice + (originalOffset * deNormParams.strikeDistance);
-            leg.strike_price = Math.round(rawNewStrike / deNormParams.strikeDistance) * deNormParams.strikeDistance;
-            leg.entry_premium *= priceRatio;
-            leg.current_premium *= priceRatio;
-            leg.live_pnl *= pnlRatio;
-            totalUnrealizedPnl += leg.live_pnl;
-        });
-    }
+    // This forEach is now safe because newStepData.portfolio is guaranteed to be an array
+    newStepData.portfolio.forEach(leg => {
+        const originalOffset = (leg.strike_price - envDefaults.startPrice) / envDefaults.strikeDistance;
+        const rawNewStrike = deNormParams.startPrice + (originalOffset * deNormParams.strikeDistance);
+        leg.strike_price = Math.round(rawNewStrike / deNormParams.strikeDistance) * deNormParams.strikeDistance;
+        leg.entry_premium *= priceRatio;
+        leg.current_premium *= priceRatio;
+        leg.live_pnl *= pnlRatio;
+        totalUnrealizedPnl += leg.live_pnl;
+    });
 
     let totalRealizedPnl = (newStepData.info.pnl_verification.realized_pnl || 0) * pnlRatio;
     newStepData.info.pnl_verification.realized_pnl = totalRealizedPnl;
@@ -60,12 +65,13 @@ const reSimulateStep = (rawStepData, deNormParams, envDefaults) => {
         payoff.sigma_levels.plus_one *= priceRatio;
         payoff.sigma_levels.minus_one *= priceRatio;
     }
+    
+    // These forEach calls are now safe because the arrays are guaranteed to exist
     payoff.expiry_pnl.forEach(point => { point.price *= priceRatio; point.pnl *= pnlRatio; });
     payoff.current_pnl.forEach(point => { point.price *= priceRatio; point.pnl *= pnlRatio; });
 
     return newStepData;
 };
-
 
 // ===================================================================================
 //                            CHILD COMPONENTS

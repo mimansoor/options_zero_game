@@ -15,10 +15,24 @@ from ding.envs.env.base_env import BaseEnvTimestep
 # Helper class to handle any stray numpy types during JSON serialization
 class NumpyEncoder(json.JSONEncoder):
     def default(self, obj):
+        # 1. Handle all integer types from NumPy.
         if isinstance(obj, np.integer): return int(obj)
-        if isinstance(obj, np.floating): return float(obj)
+
+        # 2. Handle all floating-point types from NumPy or standard Python.
+        if isinstance(obj, (np.floating, float)):
+            # CRITICAL: Check for NaN, Infinity, or -Infinity.
+            # json.dump will crash on these, but we can convert them to `null`.
+            if not np.isfinite(obj):
+                return None # `None` in Python becomes `null` in JSON, which is valid.
+            return float(obj)
+
+        # 3. Handle NumPy arrays.
         if isinstance(obj, np.ndarray): return obj.tolist()
+
+        # 4. Handle NumPy booleans.
         if isinstance(obj, np.bool_): return bool(obj)
+
+        # 5. Let the base class default method raise the TypeError for other types.
         return super(NumpyEncoder, self).default(obj)
 
 @ENV_REGISTRY.register('log_replay')

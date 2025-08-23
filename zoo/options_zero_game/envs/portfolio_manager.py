@@ -51,51 +51,62 @@ def _numba_get_pnl_for_leg(leg_data, price, at_expiry, lot_size, risk_free_rate,
 # <<< --- NEW: THE NUMBA SIMULATION ENGINE (OUTER FUNCTION) --- >>>
 @jit(nopython=True)
 def _numba_run_pnl_simulation(legs_array, realized_pnl, start_price, lot_size, risk_free_rate, bid_ask_spread_pct):
-    """
-    Runs the full 500-point P&L simulation at EXPIRATION by calling the
-    canonical per-leg P&L function.
-    """
+    # ... (simulation setup is unchanged) ...
     sim_low = start_price * 0.25
     sim_high = start_price * 2.5
     price_range = np.linspace(sim_low, sim_high, 500)
-
     pnl_values = np.empty(len(price_range), dtype=np.float32)
     breakevens = []
-
     pnl_prev = 0.0
     for i in range(len(price_range)):
         price_curr = price_range[i]
         unrealized_pnl = 0.0
-
         for j in range(len(legs_array)):
             leg = legs_array[j]
-            # Call the inner function to get P&L for this leg at this price
             unrealized_pnl += _numba_get_pnl_for_leg(
                 leg, price_curr, at_expiry=True, lot_size=lot_size,
                 risk_free_rate=risk_free_rate, bid_ask_spread_pct=bid_ask_spread_pct,
-                bs_func=_numba_black_scholes # Pass the BS function pointer
+                bs_func=_numba_black_scholes
             )
-
         total_pnl = unrealized_pnl + realized_pnl
         pnl_values[i] = total_pnl
-
-        # ... (breakeven calculation logic remains the same) ...
         if i > 0:
             if np.sign(total_pnl) != np.sign(pnl_prev):
                 price_prev = price_range[i-1]
-                be = price_prev - pnl_prev * (price_curr - price_prev) / (total_pnl - pnl_prev)
-                breakevens.append(be)
+                # Add a failsafe for division by zero in breakeven calculation
+                denominator = total_pnl - pnl_prev
+                if abs(denominator) > 1e-9:
+                    be = price_prev - pnl_prev * (price_curr - price_prev) / denominator
+                    # Ensure the calculated breakeven is a finite number
+                    if np.isfinite(be):
+                        breakevens.append(be)
         pnl_prev = total_pnl
 
-    max_profit = np.max(pnl_values)
-    max_loss = np.min(pnl_values)
+    # --- THE DEFINITIVE FIX AT THE SOURCE ---
+    # 1. Calculate max profit and loss. If the array is empty or all NaN, default to realized_pnl.
+    if np.all(np.isnan(pnl_values)) or pnl_values.size == 0:
+        max_profit = realized_pnl
+        max_loss = realized_pnl
+    else:
+        max_profit = np.nanmax(pnl_values)
+        max_loss = np.nanmin(pnl_values)
 
-    sum_wins = np.sum(pnl_values[pnl_values > 0])
-    sum_losses = np.abs(np.sum(pnl_values[pnl_values <= 0]))
+    # 2. Calculate profit factor with robust checks.
+    wins = pnl_values[pnl_values > 0]
+    losses = pnl_values[pnl_values <= 0]
+    sum_wins = np.sum(wins)
+    sum_losses = np.abs(np.sum(losses))
 
-    profit_factor = 999.0
-    if sum_losses > 1e-6:
-        profit_factor = sum_wins / sum_losses
+    profit_factor = 0.0 # Default for loss-only or flat P&L
+    if sum_wins > 0:
+        if sum_losses > 1e-6:
+            profit_factor = sum_wins / sum_losses
+        else:
+            profit_factor = 999.0 # Effectively infinite if there are no losses
+
+    # Ensure all return values are finite.
+    max_profit = max_profit if np.isfinite(max_profit) else 0.0
+    max_loss = max_loss if np.isfinite(max_loss) else 0.0
 
     return max_profit, max_loss, profit_factor, breakevens
 
@@ -1178,15 +1189,20 @@ class PortfolioManager:
         max_loss = risk_profile['max_loss']
         breakevens = risk_profile['breakevens']
         
-        rr_ratio = 999.0  # Default to a high, safe value
+        # This new logic is completely robust against division-by-zero errors.
+        rr_ratio = 0.0  # Start with a safe default
         try:
-            if max_profit is not None and max_loss is not None and max_profit > 0:
-                if abs(max_loss) > 1e-6:
-                    calculated_rr = abs(max_profit / max_loss)
-                    if np.isfinite(calculated_rr):
-                        rr_ratio = calculated_rr
+            # Only calculate if there's a profit potential and a finite loss.
+            if max_profit > 0 and max_loss < 0:
+                calculated_rr = abs(max_profit / max_loss)
+                # If the loss is tiny, the ratio can be huge. Cap it for stability.
+                rr_ratio = min(calculated_rr, 999.0)
         except (TypeError, ZeroDivisionError):
-            rr_ratio = 999.0 # Fallback to the safe value on any error
+            # If max_loss is 0, we can consider it an infinite R:R.
+            if max_profit > 0:
+                rr_ratio = 999.0
+            else:
+                rr_ratio = 0.0
         
         days_to_expiry = self.portfolio.iloc[0]['days_to_expiry']
         vol = self.iv_calculator(0, 'call') # Use injected iv_calculator
@@ -1430,46 +1446,34 @@ class PortfolioManager:
 
     def _calculate_universal_risk_profile(self, legs: List[Dict], realized_pnl: float) -> Dict:
         """
-        Calculates the risk profile. This version correctly separates the
-        calculation of the STRATEGY's max profit from the TOTAL portfolio's.
+        Calculates the risk profile. This version includes a final validation
+        step to ensure no NaN values ever leave this function.
         """
+        # ... (initial logic is unchanged) ...
         if not legs:
-            # For the total portfolio view
-            return {'max_profit': realized_pnl, 'max_loss': realized_pnl, 'profit_factor': 0.0, 'breakevens': []}
+            return {'strategy_max_profit': realized_pnl, 'total_max_profit': realized_pnl, 'max_loss': realized_pnl, 'profit_factor': 0.0, 'breakevens': []}
 
-        # <<< --- THE DEFINITIVE FIX IS HERE --- >>>
-        # 1. Calculate the raw, theoretical max profit/loss of the LEGS ALONE.
-        # We pass a realized_pnl of 0 to isolate the strategy's profile.
+        # --- Call the (now hardened) Numba simulation ---
         strategy_max_profit, strategy_max_loss, _, _ = _numba_run_pnl_simulation(
-            self._prepare_legs_for_numba(legs),
-            0.0, # Use a neutral realized P&L for the theoretical calculation
-            self.start_price,
-            self.lot_size,
-            self.bs_manager.risk_free_rate,
-            self.bid_ask_spread_pct
+            self._prepare_legs_for_numba(legs), 0.0, self.start_price, self.lot_size,
+            self.bs_manager.risk_free_rate, self.bid_ask_spread_pct
         )
-
-        # 2. Separately, calculate the TOTAL portfolio's profile including past trades.
-        # This is used for the breakevens and profit factor.
         total_max_profit, total_max_loss, profit_factor, breakevens = _numba_run_pnl_simulation(
-            self._prepare_legs_for_numba(legs),
-            realized_pnl, # Use the real realized P&L here
-            self.start_price,
-            self.lot_size,
-            self.bs_manager.risk_free_rate,
-            self.bid_ask_spread_pct
+            self._prepare_legs_for_numba(legs), realized_pnl, self.start_price, self.lot_size,
+            self.bs_manager.risk_free_rate, self.bid_ask_spread_pct
         )
 
-        # 3. Return a dictionary containing BOTH values.
-        return {
-            # This is the pure, theoretical max profit of the strategy structure itself.
-            'strategy_max_profit': min(self.undefined_risk_cap, strategy_max_profit),
-            # This is the max profit of the entire episode's P&L curve.
-            'total_max_profit': min(self.undefined_risk_cap, total_max_profit),
-            'max_loss': max(-self.undefined_risk_cap, total_max_loss),
-            'profit_factor': profit_factor,
-            'breakevens': sorted(breakevens)
+        # <<< --- LAYER 2: FINAL VALIDATION --- >>>
+        # This acts as a final guard rail before returning the data.
+        final_profile = {
+            'strategy_max_profit': min(self.undefined_risk_cap, strategy_max_profit if np.isfinite(strategy_max_profit) else 0.0),
+            'total_max_profit': min(self.undefined_risk_cap, total_max_profit if np.isfinite(total_max_profit) else 0.0),
+            'max_loss': max(-self.undefined_risk_cap, total_max_loss if np.isfinite(total_max_loss) else 0.0),
+            'profit_factor': profit_factor if np.isfinite(profit_factor) else 0.0,
+            'breakevens': sorted([be for be in breakevens if np.isfinite(be)]) # Filter out any non-finite breakevens
         }
+        
+        return final_profile
 
     def _open_single_leg(self, action_name: str, current_price: float, iv_bin_index: int, current_step: int, days_to_expiry: float):
         # --- Defensive Assertion ---
