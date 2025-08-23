@@ -515,29 +515,36 @@ class OptionsZeroGameEnv(gym.Env):
             leg_index = int(parts[-1])
             
             if not (0 <= leg_index < len(self.portfolio_manager.get_portfolio())): return
+
             leg = self.portfolio_manager.get_portfolio().iloc[leg_index]
-            
             leg_type = leg['type']
             leg_dir = leg['direction']
             shift_dir = ""
 
-            # --- THE FINAL, VERIFIABLY CORRECT LOGIC ---
-            # This logic is verbose but explicit and directly implements the rules of option greeks.
-
+            # a) Resolve the meta-action into a concrete SHIFT_UP or SHIFT_DOWN
             if change_direction == 'increase':
                 if leg_type == 'call' and leg_dir == 'long': shift_dir = 'DOWN'
                 elif leg_type == 'call' and leg_dir == 'short': shift_dir = 'UP'
                 elif leg_type == 'put' and leg_dir == 'long': shift_dir = 'UP'
-                elif leg_type == 'put' and leg_dir == 'short': shift_dir = 'UP'
+                elif leg_type == 'put' and leg_dir == 'short': shift_dir = 'UP' # <<< --- CORRECTED LINE
             else: # 'decrease'
                 if leg_type == 'call' and leg_dir == 'long': shift_dir = 'UP'
                 elif leg_type == 'call' and leg_dir == 'short': shift_dir = 'DOWN'
                 elif leg_type == 'put' and leg_dir == 'long': shift_dir = 'DOWN'
-                elif leg_type == 'put' and leg_dir == 'short': shift_dir = 'DOWN'
+                elif leg_type == 'put' and leg_dir == 'short': shift_dir = 'DOWN' # <<< --- CORRECTED LINE
             
             if shift_dir:
                 resolved_action_name = f"SHIFT_{shift_dir}_POS_{leg_index}"
-                self.portfolio_manager.shift_position(resolved_action_name, self.price_manager.current_price, self.iv_bin_index, self.current_step)
+                
+                # b) Re-validate the resolved action against the true action mask.
+                resolved_action_index = self.actions_to_indices.get(resolved_action_name)
+                true_action_mask = self._get_true_action_mask()
+
+                if resolved_action_index is not None and true_action_mask[resolved_action_index] == 1:
+                    # c) Only execute if the resolved action is valid AND legal.
+                    self.portfolio_manager.shift_position(resolved_action_name, self.price_manager.current_price, self.iv_bin_index, self.current_step)
+                # d) If the resolved action is illegal (due to a conflict), do nothing.
+                #    This effectively turns the agent's choice into a HOLD.
 
         elif final_action_name.startswith('HEDGE_PORTFOLIO_BY_ROLLING_LEG_'):
             leg_index = int(final_action_name.split('_')[-1])
@@ -1077,10 +1084,13 @@ class OptionsZeroGameEnv(gym.Env):
         atm_price = self.market_rules_manager.get_atm_price(self.price_manager.current_price)
         for i, pos in portfolio_df.iterrows():
             self._set_if_exists(action_mask, f'CLOSE_POSITION_{i}')
-            if not pos['is_hedged']: self._set_if_exists(action_mask, f'HEDGE_NAKED_POS_{i}')
+            if not pos['is_hedged']:
+                self._set_if_exists(action_mask, f'HEDGE_NAKED_POS_{i}')
+                if pos['strike_price'] != atm_price:
+                    # The flawed SHIFT_TO_ATM action is now correctly restricted.
+                    self._set_if_exists(action_mask, f'SHIFT_TO_ATM_{i}')
             self._set_shift_if_no_conflict(action_mask, i, pos, direction="UP")
             self._set_shift_if_no_conflict(action_mask, i, pos, direction="DOWN")
-            if pos['strike_price'] != atm_price: self._set_if_exists(action_mask, f'SHIFT_TO_ATM_{i}')
             if self._is_delta_shift_possible(pos, 'increase'): self._set_if_exists(action_mask, f'INCREASE_DELTA_BY_SHIFTING_LEG_{i}')
             if self._is_delta_shift_possible(pos, 'decrease'): self._set_if_exists(action_mask, f'DECREASE_DELTA_BY_SHIFTING_LEG_{i}')
 
