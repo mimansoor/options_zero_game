@@ -749,54 +749,29 @@ class PortfolioManager:
     def get_payoff_data(self, current_price: float, iv_bin_index: int) -> dict:
         """
         Calculates a rich data set for the P&L payoff diagram.
-        MODIFIED: This version no longer pre-calculates the expiry P&L line,
-        leaving that responsibility to the frontend for optimization.
+        MODIFIED: This version is now fully optimized and only sends the bare
+        minimum data required for the frontend to render everything.
         """
         if self.portfolio.empty:
-            # Still return the same structure so the frontend doesn't break.
-            return {'expiry_pnl': [], 'current_pnl': [], 'spot_price': current_price, 'sigma_levels': {}}
+            return {'spot_price': current_price, 'sigma_levels': {}}
 
-        price_range = np.linspace(current_price * 0.85, current_price * 1.15, 100)
-        current_pnl_data = []
-        
+        # We still need to calculate the expected move for the sigma bands.
         current_dte = self.portfolio.iloc[0]['days_to_expiry']
-
-        for price in price_range:
-            pnl_at_today = 0
-            
-            for _, pos in self.portfolio.iterrows():
-                pnl_multiplier = 1 if pos['direction'] == 'long' else -1
-                
-                # --- P&L at T+0 (Today) Calculation (This part remains) ---
-                is_call = pos['type'] == 'call'
-                atm_price = self.market_rules_manager.get_atm_price(price)
-                offset = round((pos['strike_price'] - atm_price) / self.strike_distance)
-                vol = self.iv_calculator(offset, pos['type'])
-                
-                greeks = self.bs_manager.get_all_greeks_and_price(price, pos['strike_price'], current_dte, vol, is_call)
-                today_leg_pnl = (greeks['price'] - pos['entry_premium']) * pnl_multiplier * self.lot_size
-                pnl_at_today += today_leg_pnl
-            
-            current_pnl_data.append({'price': price, 'pnl': self.realized_pnl + pnl_at_today})
-        
-        # --- Standard Deviation Price Levels Calculation (This part remains) ---
         atm_iv = self.market_rules_manager.get_implied_volatility(0, 'call', iv_bin_index)
         expected_move_points = 0
         if current_dte > 0:
             expected_move_points = current_price * atm_iv * math.sqrt(current_dte / 365.25)
-        
+
         sigma_levels = {
             'plus_one': current_price + expected_move_points,
             'minus_one': current_price - expected_move_points,
-            'plus_two': current_price + (2 * expected_move_points),
-            'minus_two': current_price - (2 * expected_move_points),
         }
 
         # <<< --- THE DEFINITIVE FIX IS HERE --- >>>
-        # We no longer calculate and return 'expiry_pnl'.
-        # The frontend will reconstruct it from the main portfolio object.
+        # We no longer send 'expiry_pnl' OR 'current_pnl'.
+        # The frontend will reconstruct both from the portfolio state, which will
+        # now include the live_iv for each leg.
         return {
-            'current_pnl': current_pnl_data,
             'spot_price': current_price,
             'sigma_levels': sigma_levels
         }

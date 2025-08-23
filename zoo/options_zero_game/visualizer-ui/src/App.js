@@ -1,3 +1,4 @@
+import { blackScholes } from 'black-scholes';
 import React, { useState, useEffect, useMemo } from 'react';
 import './App.css';
 import { Line } from 'react-chartjs-2';
@@ -155,21 +156,53 @@ const calculateExpiryPnl = (portfolio, priceRange, lotSize, realizedPnl) => {
     });
 };
 
-function PayoffDiagram({ payoffData, portfolio, pnlVerification, lotSize }) {
-    if (!payoffData || !payoffData.current_pnl || payoffData.current_pnl.length === 0 || !portfolio || !pnlVerification) {
-        return <p className="empty-message">Portfolio is empty.</p>;
+const calculateT0Pnl = (portfolio, priceRange, lotSize, realizedPnl) => {
+    // This function now has everything it needs to be perfectly accurate.
+    if (!portfolio || portfolio.length === 0) {
+        return [];
     }
 
-    // <<< --- THE DEFINITIVE FIX IS HERE --- >>>
-    // 1. Destructure payoffData and provide a default empty object for sigma_levels.
-    const { current_pnl, spot_price, sigma_levels = {} } = payoffData;
-    // 2. NOW, destructure sigma_levels to bring plus_one and minus_one into scope.
-    //    Provide the spot_price as a fallback default if they don't exist.
-    const { plus_one = spot_price, minus_one = spot_price } = sigma_levels;
+    const RISK_FREE_RATE = 0.10; // Must match backend config
 
+    return priceRange.map(price => {
+        let unrealizedPnl = 0;
+        portfolio.forEach(leg => {
+            const pnlMultiplier = leg.direction === 'long' ? 1 : -1;
+
+            // The blackScholes function can return NaN if inputs are invalid (e.g., DTE is 0)
+            let bsPrice = 0;
+            if (leg.days_to_expiry > 0) {
+                 bsPrice = blackScholes(
+                    price,
+                    leg.strike_price,
+                    leg.days_to_expiry / 365.25,
+                    leg.live_iv, // <-- Use the IV provided directly from the backend log!
+                    RISK_FREE_RATE,
+                    leg.type
+                );
+            }
+
+            const pnlPerShare = (bsPrice || 0) - leg.entry_premium;
+            unrealizedPnl += pnlPerShare * pnlMultiplier * lotSize;
+        });
+        return { price: price, pnl: realizedPnl + unrealizedPnl };
+    });
+};
+
+function PayoffDiagram({ payoffData, portfolio, pnlVerification, lotSize }) {
+    // ... (the top part of the function is unchanged) ...
+    if (!payoffData || !portfolio || !pnlVerification || portfolio.length === 0) {
+        return <p className="empty-message">Awaiting data or portfolio is empty.</p>;
+    }
+    
+    const { spot_price, sigma_levels = {} } = payoffData;
+    const { plus_one = spot_price, minus_one = spot_price } = sigma_levels;
     const realizedPnl = pnlVerification.realized_pnl || 0;
-    const priceRange = current_pnl.map(d => d.price);
+    
+    const priceRange = Array.from({length: 100}, (_, i) => spot_price * 0.85 + (spot_price * 0.3 * (i/99)));
+
     const expiry_pnl = calculateExpiryPnl(portfolio, priceRange, lotSize, realizedPnl);
+    const current_pnl = calculateT0Pnl(portfolio, priceRange, lotSize, realizedPnl);
 
     const data = {
         labels: priceRange,
@@ -181,13 +214,37 @@ function PayoffDiagram({ payoffData, portfolio, pnlVerification, lotSize }) {
                 tension: 0.1,
                 pointRadius: 0,
                 fill: true,
+                // <<< --- THE DEFINITIVE FIX IS HERE --- >>>
                 backgroundColor: (context) => {
-                    const chart = context.chart; const {ctx, chartArea} = chart; if (!chartArea) return null;
-                    const zero = chart.scales.y.getPixelForValue(0); if (zero < chartArea.top || zero > chartArea.bottom) { return Math.max(...expiry_pnl.map(d => d.pnl)) > 0 ? 'rgba(76, 175, 80, 0.4)' : 'rgba(244, 67, 54, 0.4)'; }
-                    const gradient = ctx.createLinearGradient(0, chartArea.top, 0, chartArea.bottom); const topPixel = chartArea.top; const bottomPixel = chartArea.bottom;
-                    const zeroPoint = (zero - topPixel) / (bottomPixel - topPixel);
-                    gradient.addColorStop(0, 'rgba(76, 175, 80, 0.5)'); gradient.addColorStop(zeroPoint, 'rgba(76, 175, 80, 0.5)');
-                    gradient.addColorStop(zeroPoint, 'rgba(244, 67, 54, 0.5)'); gradient.addColorStop(1, 'rgba(244, 67, 54, 0.5)');
+                    const chart = context.chart;
+                    const { ctx, chartArea } = chart;
+
+                    // 1. Add a robust guard clause. If the chart area isn't ready, do nothing.
+                    if (!chartArea) {
+                        return null;
+                    }
+
+                    // 2. Safely get the zero-line pixel.
+                    const zero = chart.scales.y.getPixelForValue(0);
+
+                    // 3. If the zero line is completely off-screen, fill with a solid color.
+                    if (zero < chartArea.top || zero > chartArea.bottom) {
+                        const allValues = expiry_pnl.map(d => d.pnl);
+                        // If there are no PNL values yet, return a neutral color
+                        if (allValues.length === 0) return 'rgba(100, 100, 100, 0.3)';
+                        // Determine if the entire chart is profit or loss
+                        return Math.max(...allValues) > 0 ? 'rgba(76, 175, 80, 0.4)' : 'rgba(244, 67, 54, 0.4)';
+                    }
+                    
+                    // 4. If the zero line is on-screen, create the gradient.
+                    const gradient = ctx.createLinearGradient(0, chartArea.top, 0, chartArea.bottom);
+                    const zeroPoint = (zero - chartArea.top) / (chartArea.bottom - chartArea.top);
+                    
+                    gradient.addColorStop(0, 'rgba(76, 175, 80, 0.5)'); // Green for profit
+                    gradient.addColorStop(Math.max(0, zeroPoint - 0.001), 'rgba(76, 175, 80, 0.5)');
+                    gradient.addColorStop(zeroPoint, 'rgba(244, 67, 54, 0.5)'); // Red for loss
+                    gradient.addColorStop(1, 'rgba(244, 67, 54, 0.5)');
+                    
                     return gradient;
                 },
             },
@@ -303,13 +360,12 @@ function ReplayerView({ displayedStepData, replayData, currentStep, goToStep, ep
             <div className="charts-container">
                 <div className="card chart-card"><h3>Agent Behavior</h3><AgentBehaviorChart episodeHistory={episodeHistory} historicalContext={historicalContext} deNormParams={deNormParams} envDefaults={envDefaults} /></div>
                 <div className="card chart-card"><h3>Portfolio P&L Diagram</h3>
-                    {/* <<< --- Pass the new required props to the component --- >>> */}
-                    <PayoffDiagram 
-                        payoffData={displayedStepData.info.payoff_data}
-                        portfolio={displayedStepData.portfolio}
-                        pnlVerification={displayedStepData.info.pnl_verification}
-                        lotSize={deNormParams.lotSize} // Pass the de-normalized lot size
-                    />
+					<PayoffDiagram 
+						payoffData={displayedStepData.info.payoff_data}
+						portfolio={displayedStepData.portfolio}
+						pnlVerification={displayedStepData.info.pnl_verification}
+						lotSize={deNormParams.lotSize}
+					/>
 	        </div>
             </div>
             <div className="info-panels-container">

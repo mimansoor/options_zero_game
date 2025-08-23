@@ -205,9 +205,8 @@ class LogReplayEnv(gym.Wrapper):
 
     def _serialize_portfolio(self, portfolio_df: pd.DataFrame, current_price: float) -> list:
         """
-        Calculates the live, un-realized P&L for each individual leg in the
-        portfolio and returns a list of dictionaries ready for JSON logging.
-        This is the corrected, robust version.
+        Calculates the live, un-realized P&L and LIVE IV for each leg and
+        returns a list of dictionaries ready for JSON logging.
         """
         if portfolio_df.empty:
             return []
@@ -222,27 +221,30 @@ class LogReplayEnv(gym.Wrapper):
             # --- 1. Get the current, live market premium for the leg ---
             offset = round((leg['strike_price'] - atm_price) / self.env.strike_distance)
             
-            # Use the environment's official IV calculator for consistency
-            vol = self.env._get_dynamic_iv(offset, leg['type'])
+            # <<< --- THE DEFINITIVE FIX IS HERE --- >>>
+            # a) Calculate the definitive IV for this leg at this moment in time.
+            live_iv = self.env._get_dynamic_iv(offset, leg['type'])
             
+            # b) Use this exact IV for all subsequent calculations.
             greeks = self.env.bs_manager.get_all_greeks_and_price(
-                current_price, leg['strike_price'], leg['days_to_expiry'], vol, is_call
+                current_price, leg['strike_price'], leg['days_to_expiry'], live_iv, is_call
             )
             
-            # Determine the current market value (exit price), including the bid-ask spread
             current_premium = self.env.bs_manager.get_price_with_spread(
                 greeks['price'], is_buy=(leg['direction'] == 'short'), bid_ask_spread_pct=self.env.bid_ask_spread_pct
             )
 
-            # --- 2. Correctly calculate the Live P&L based on direction ---
+            # --- 2. Calculate Live P&L ---
             direction_multiplier = 1 if leg['direction'] == 'long' else -1
             pnl_per_share = current_premium - leg['entry_premium']
             live_pnl = pnl_per_share * direction_multiplier * lot_size
 
-            # --- 3. Create a dictionary with all necessary data for the UI ---
+            # --- 3. Create a dictionary with ALL necessary data for the UI ---
             leg_data = leg.to_dict()
             leg_data['current_premium'] = current_premium
             leg_data['live_pnl'] = live_pnl
+            # c) Add the live IV to the data being sent to the frontend.
+            leg_data['live_iv'] = live_iv 
             serialized_data.append(leg_data)
             
         return serialized_data
