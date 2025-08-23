@@ -548,7 +548,28 @@ class OptionsZeroGameEnv(gym.Env):
 
         elif final_action_name.startswith('HEDGE_PORTFOLIO_BY_ROLLING_LEG_'):
             leg_index = int(final_action_name.split('_')[-1])
-            self.portfolio_manager.hedge_portfolio_by_rolling_leg(leg_index, self.price_manager.current_price, self.iv_bin_index, self.current_step)
+            
+            # a) Resolve the meta-action: Find the optimal new strike first.
+            new_strike = self.portfolio_manager._find_portfolio_neutral_strike(
+                leg_index, self.price_manager.current_price, self.iv_bin_index
+            )
+
+            if new_strike is not None:
+                # b) Determine what the equivalent SHIFT action would be.
+                # This requires checking the original strike and the new strike.
+                original_strike = self.portfolio_manager.get_portfolio().iloc[leg_index]['strike_price']
+                shift_dir = "UP" if new_strike > original_strike else "DOWN"
+                
+                resolved_action_name = f"SHIFT_{shift_dir}_POS_{leg_index}"
+                resolved_action_index = self.actions_to_indices.get(resolved_action_name)
+                true_action_mask = self._get_true_action_mask()
+                
+                # c) Re-validate: Check if this equivalent SHIFT would have been legal.
+                # The _get_true_action_mask already contains the conflict check logic for shifts.
+                if resolved_action_index is not None and true_action_mask[resolved_action_index] == 1:
+                    # d) Only execute the roll if the equivalent shift is legal.
+                    self.portfolio_manager.hedge_portfolio_by_rolling_leg(leg_index, self.price_manager.current_price, self.iv_bin_index, self.current_step)
+                # e) If the roll would cause a conflict, do nothing (effectively a HOLD).
 
         # 4. Sort the portfolio and take the crucial snapshot.
         self.portfolio_manager.sort_portfolio()
@@ -1147,7 +1168,18 @@ class OptionsZeroGameEnv(gym.Env):
         greeks = self.portfolio_manager.get_portfolio_greeks(self.price_manager.current_price, self.iv_bin_index)
         if abs(greeks['delta_norm']) > self.delta_neutral_threshold:
             if len(portfolio_df) < self._cfg.max_positions:
-                self._set_if_exists(action_mask, 'HEDGE_DELTA_WITH_ATM_OPTION')
+                # a) Determine what the hedge leg WOULD be
+                hedge_leg_type = 'put' if greeks['delta_norm'] > 0 else 'call'
+                
+                # b) Check if this proposed leg would create a conflict
+                is_conflict = any(
+                    (leg['type'] == hedge_leg_type and leg['strike_price'] == atm_price)
+                    for _, leg in portfolio_df.iterrows()
+                )
+                
+                # c) Only make the action legal if there is NO conflict.
+                if not is_conflict:
+                    self._set_if_exists(action_mask, 'HEDGE_DELTA_WITH_ATM_OPTION')
             for i in range(len(portfolio_df)):
                 self._set_if_exists(action_mask, f'HEDGE_PORTFOLIO_BY_ROLLING_LEG_{i}')
         
