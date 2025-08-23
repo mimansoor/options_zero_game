@@ -137,7 +137,14 @@ def run_full_analysis():
         
         os.remove(intermediate_file)
 
-        # 9. Archive the checkpoint
+        # 9. Final Cleanup
+        print(f"Performing final cleanup of old '{ANALYZER_RUN_DIR}*' directories...")
+        for dir_path in glob.glob(f"{ANALYZER_RUN_DIR}*"):
+            if os.path.isdir(dir_path):
+                shutil.rmtree(dir_path)
+        print("Final cleanup complete.")
+
+        # 10. Archive the checkpoint
         archive_ckpt_path = os.path.join(REPORTS_DIR, f"ckpt_best_{timestamp}.pth.tar")
         shutil.copy(BEST_CKPT_DEST, archive_ckpt_path)
         print(f"Final report and checkpoint for this cycle saved to: {REPORTS_DIR}")

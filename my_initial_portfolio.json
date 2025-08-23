@@ -10,8 +10,14 @@
     "strike_price": 19500
   },
   {
-    "type": "put",
-    "direction": "long",
+    "type": "call",
+    "direction": "short",
+    "strike_price": 20500
+  },
+  {
+    "type": "call",
+    "direction": "short",
     "strike_price": 20500
   }
+
 ]

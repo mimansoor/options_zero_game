@@ -118,6 +118,9 @@ class OptionsZeroGameEnv(gym.Env):
         self._cfg = self.default_config()
         if cfg is not None: self._cfg.update(cfg)
 
+        # Add a flag to track if this specific instance has been reset yet.
+        self._has_printed_setup_info = False
+
         # The scaling factor is now proportional to a "standard" unit of P&L:
         # the max profit from a 1-strike-wide vertical spread.
         self.pnl_scaling_factor = self._cfg.strike_distance * self._cfg.lot_size
@@ -303,7 +306,9 @@ class OptionsZeroGameEnv(gym.Env):
 
         # PRIORITY 1: A forced portfolio setup from the evaluator via a JSON file.
         if forced_portfolio and isinstance(forced_portfolio, list):
-            print("(INFO) Setting up forced initial portfolio in environment...")
+            if not self._has_printed_setup_info:
+                print("(INFO) Setting up forced initial portfolio in environment...")
+                self._has_printed_setup_info = True # Set the flag so it doesn't print again.
             
             days_to_expiry_float = self.episode_time_to_expiry * (self.TOTAL_DAYS_IN_WEEK / self.TRADING_DAYS_IN_WEEK)
             for leg_def in forced_portfolio:
