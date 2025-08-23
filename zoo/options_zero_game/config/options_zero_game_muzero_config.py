@@ -158,9 +158,18 @@ TRAINING_CURRICULUM1 = {
     int(16e6): 'OPEN_BULL_PUT_SPREAD',
     int(17e6): 'OPEN_BEAR_CALL_SPREAD',
 
+    # === Phase 9: Train the Jade/Reverse_Jade/Big_Lizard/Reverse_Big/Put_Ration/Call_Ratio spreads (The Final Phase) ===
+    # Duration: 200k steps each
+    int(18e6): 'OPEN_JADE_LIZARD',
+    int(18.2e6): 'OPEN_REVERSE_JADE_LIZARD',
+    int(18.4e6): 'OPEN_BIG_LIZARD',
+    int(18.6e6): 'OPEN_REVERSE_BIG_LIZARD',
+    int(18.8e6): 'OPEN_PUT_RATIO_SPREAD',
+    int(18.8e6): 'OPEN_CALL_RATIO_SPREAD',
+
     # === Final Phase: Integration and Agent Autonomy ===
     # Allow the agent to use any of its learned strategies to maximize reward.
-    int(18e6): 'ALL'
+    int(19e6): 'ALL'
 }
 
 TRAINING_CURRICULUM = {
@@ -217,7 +226,7 @@ TRAINING_CURRICULUM = {
     int(17.6e6): 'OPEN_SHORT_CALL_ATM-1',
     int(17.8e6): 'OPEN_SHORT_CALL_ATM-2',
 
-    # === Phase 7: Refine Foundational Naked Put Skills (The Final Phase) ===
+    # === Phase 7: Refine Foundational Naked Put Skills ===
     # Duration: 200k steps each
     int(18e6): 'OPEN_SHORT_PUT_ATM+2',
     int(18.2e6): 'OPEN_SHORT_PUT_ATM+1',
@@ -225,6 +234,19 @@ TRAINING_CURRICULUM = {
     int(18.6e6): 'OPEN_SHORT_PUT_ATM-1',
     # This phase runs until the end of training
     int(18.8e6): 'OPEN_SHORT_PUT_ATM-2',
+
+    # === Phase 8: Train the Jade/Reverse_Jade/Big_Lizard/Reverse_Big/Put_Ration/Call_Ratio spreads (The Final Phase) ===
+    # Duration: 200k steps each
+    int(19e6): 'OPEN_JADE_LIZARD',
+    int(19.2e6): 'OPEN_REVERSE_JADE_LIZARD',
+    int(19.4e6): 'OPEN_BIG_LIZARD',
+    int(19.6e6): 'OPEN_REVERSE_BIG_LIZARD',
+    int(19.8e6): 'OPEN_PUT_RATIO_SPREAD',
+    int(19.8e6): 'OPEN_CALL_RATIO_SPREAD',
+
+    # === Final Phase: Integration and Agent Autonomy ===
+    # Allow the agent to use any of its learned strategies to maximize reward.
+    int(20e6): 'ALL'
 }
 
 # This class will "hide" the integer-keyed dictionary from EasyDict.
