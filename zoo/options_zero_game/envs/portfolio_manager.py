@@ -856,8 +856,8 @@ class PortfolioManager:
         is_reverse = 'REVERSE' in action_name
 
         # 1. Define the Strangle component based on delta
-        strangle_put_delta = -0.60 if is_reverse else -0.40
-        strangle_call_delta = 0.40 if is_reverse else 0.60
+        strangle_put_delta = -0.55 if is_reverse else -0.45
+        strangle_call_delta = 0.45 if is_reverse else 0.55
 
         strike_put = self._find_strike_for_delta(strangle_put_delta, 'put', current_price, iv_bin_index, days_to_expiry)
         strike_call = self._find_strike_for_delta(strangle_call_delta, 'call', current_price, iv_bin_index, days_to_expiry)
@@ -870,7 +870,7 @@ class PortfolioManager:
         
         # 2. Define the long hedge leg
         hedge_leg_type = 'put' if is_reverse else 'call'
-        hedge_leg_delta = -0.40 if is_reverse else 0.40
+        hedge_leg_delta = -0.45 if is_reverse else 0.45
         hedge_strike = self._find_strike_for_delta(hedge_leg_delta, hedge_leg_type, current_price, iv_bin_index, days_to_expiry)
         if hedge_strike is None: return
 
