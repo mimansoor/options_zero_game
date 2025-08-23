@@ -21,7 +21,8 @@ def run_full_analysis():
     """
     The main orchestrator for running a full strategy analysis.
     This script handles cleanup, checkpoint copying, calls the worker
-    script for each strategy, and performs all post-processing.
+    script for each strategy, and performs all post-processing, including
+    maintaining a persistent Elo rating file.
     """
     # --- Configuration ---
     REPORTS_DIR = "zoo/options_zero_game/visualizer-ui/build/reports"
@@ -29,7 +30,8 @@ def run_full_analysis():
     ANALYZER_RUN_DIR = 'eval/strategy_analyzer'
     BEST_CKPT_DEST = "best_ckpt/ckpt_best.pth.tar"
     EXPERIMENT_DIR = "experiments/options_zero_game_muzero_agent_v2.2-Final_ns50_upc2000_bs256"
-    
+    ELO_STATE_FILE = "zoo/options_zero_game/experts/elo_ratings.json"
+
     print(f"--- [ {datetime.now()} ] Starting Full Analysis Cycle ---")
 
     try:
@@ -48,7 +50,19 @@ def run_full_analysis():
         shutil.copy(latest_ckpt_path, BEST_CKPT_DEST)
         print(f"Successfully copied latest checkpoint to '{BEST_CKPT_DEST}'.")
 
-        # 3. Prepare the intermediate report file for raw PNL data
+        # 3. Load existing Elo ratings
+        existing_ratings = {}
+        if os.path.exists(ELO_STATE_FILE):
+            try:
+                with open(ELO_STATE_FILE, 'r') as f:
+                    existing_ratings = json.load(f)
+                print(f"Loaded {len(existing_ratings)} existing Elo ratings from {ELO_STATE_FILE}")
+            except (FileNotFoundError, json.JSONDecodeError):
+                print(f"Warning: Elo file at {ELO_STATE_FILE} is corrupted or empty. Starting fresh.")
+        else:
+            print("No existing Elo file found. Starting all strategies at default rating.")
+
+        # 4. Prepare the intermediate report file for raw PNL data
         os.makedirs(REPORTS_DIR, exist_ok=True)
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         intermediate_file = os.path.join(REPORTS_DIR, f"temp_pnl_data_{timestamp}.json")
@@ -56,11 +70,11 @@ def run_full_analysis():
         with open(intermediate_file, 'w') as f:
             json.dump([], f)
 
-        # 4. Get the clean list of strategies
+        # 5. Get the clean list of strategies
         strategy_list = get_valid_strategies()
         print(f"Found {len(strategy_list)} strategies to analyze.")
 
-        # 5. The Main Loop: Run one analysis per strategy
+        # 6. The Main Loop: Run one analysis per strategy
         for strategy in tqdm(strategy_list, desc="Overall Progress"):
             print(f"\n--- Analyzing strategy: {strategy} ---")
             command = [
@@ -81,50 +95,52 @@ def run_full_analysis():
                 print(e.stderr)
                 print("="*80 + "\n")
                 print("Continuing to next strategy...")
+            except KeyboardInterrupt:
+                print("\nAnalysis interrupted by user. Exiting.")
+                return
 
-        # --- Post-Processing Step ---
+        # 7. Post-Processing Step
         print("\n--- All strategies analyzed. Starting post-processing and Elo calculation... ---")
         
         with open(intermediate_file, 'r') as f:
             raw_pnl_data = json.load(f)
 
-        all_stats = []
-        all_pnl_by_strategy = {}
-        
+        all_stats, all_pnl_by_strategy = [], {}
         for item in raw_pnl_data:
-            strategy_name = item['strategy']
-            pnl_results_for_stats = [{'pnl': pnl} for pnl in item['pnl_results']]
-            stats = calculate_statistics(pnl_results_for_stats, strategy_name)
-            if stats:
-                all_stats.append(stats)
-            all_pnl_by_strategy[strategy_name] = item['pnl_results']
+            stats = calculate_statistics([{'pnl': pnl} for pnl in item['pnl_results']], item['strategy'])
+            if stats: all_stats.append(stats)
+            all_pnl_by_strategy[item['strategy']] = item['pnl_results']
 
-        elo_ratings = calculate_elo_ratings(all_pnl_by_strategy)
+        new_elo_ratings = calculate_elo_ratings(all_pnl_by_strategy, existing_ratings)
 
         for strategy_row in all_stats:
             strategy_row['Trader_Score'] = calculate_trader_score(strategy_row)
-            strategy_row['ELO_Rank'] = elo_ratings.get(strategy_row['Strategy'], 1200)
+            strategy_row['ELO_Rank'] = new_elo_ratings.get(strategy_row['Strategy'], 1200)
 
-        # Print the final, ranked table to the console
+        with open(ELO_STATE_FILE, 'w') as f:
+            json.dump(new_elo_ratings, f, indent=2)
+        print(f"Successfully updated and saved Elo ratings to {ELO_STATE_FILE}")
+        
         df = pd.DataFrame(all_stats).sort_values(by="ELO_Rank", ascending=False).set_index('Strategy')
+        pd.set_option('display.max_rows', None)
+        pd.set_option('display.width', 200)
         print("\n" + "="*120)
         print("--- FINAL RANKED STRATEGY REPORT (SORTED BY ELO) ---")
         print("="*120)
         print(df)
         print("="*120)
-        
-        # Save the final, complete report
+
+        # 8. Save the final, complete report
         final_report_file = os.path.join(REPORTS_DIR, f"strategy_report_{timestamp}.json")
         with open(final_report_file, 'w') as f:
             json.dump(all_stats, f, indent=2)
         
-        print(f"\nFinal report with Elo ratings saved to: {final_report_file}")
-        
         os.remove(intermediate_file)
 
+        # 9. Archive the checkpoint
         archive_ckpt_path = os.path.join(REPORTS_DIR, f"ckpt_best_{timestamp}.pth.tar")
         shutil.copy(BEST_CKPT_DEST, archive_ckpt_path)
-        print(f"Successfully archived checkpoint to '{archive_ckpt_path}'")
+        print(f"Final report and checkpoint for this cycle saved to: {REPORTS_DIR}")
 
     except Exception as e:
         print("\n" + "#"*80)

@@ -59,25 +59,43 @@ def calculate_trader_score(strategy_data):
     final_score = np.tanh(log_scaled_score)
     return final_score if np.isfinite(final_score) else 0.0
 
-def calculate_elo_ratings(all_pnl_by_strategy: dict, k_factor=32, initial_rating=1200):
-    elo_ratings = {strategy: initial_rating for strategy in all_pnl_by_strategy.keys()}
+def calculate_elo_ratings(all_pnl_by_strategy: dict, existing_ratings: dict, k_factor=32, initial_rating=1200):
+    """
+    Calculates Elo ratings for all strategies by simulating a round-robin tournament.
+    This version uses existing ratings as a starting point, creating a persistent league.
+    """
     strategies = list(all_pnl_by_strategy.keys())
     if not strategies: return {}
+
+    # --- 1. Initialize ratings for all strategies ---
+    # Use the existing rating if available, otherwise assign the default initial rating.
+    # This gracefully handles the addition of new strategies to the environment.
+    elo_ratings = {}
+    for strategy in strategies:
+        elo_ratings[strategy] = existing_ratings.get(strategy, initial_rating)
+
     num_episodes = len(list(all_pnl_by_strategy.values())[0])
+
     print(f"\n--- Starting Elo Tournament Simulation ({num_episodes} rounds) ---")
+
+    # --- 2. The Tournament Simulation Loop (Unchanged) ---
     for i in tqdm(range(num_episodes), desc="Elo Rounds"):
         for j in range(len(strategies)):
             for k in range(j + 1, len(strategies)):
                 player_a, player_b = strategies[j], strategies[k]
                 pnl_a, pnl_b = all_pnl_by_strategy[player_a][i], all_pnl_by_strategy[player_b][i]
+
                 actual_score_a = 0.5
                 if pnl_a > pnl_b: actual_score_a = 1.0
                 elif pnl_b > pnl_a: actual_score_a = 0.0
+
                 rating_a, rating_b = elo_ratings[player_a], elo_ratings[player_b]
                 expected_score_a = 1 / (1 + 10 ** ((rating_b - rating_a) / 400))
                 expected_score_b = 1 - expected_score_a
+
                 elo_ratings[player_a] += k_factor * (actual_score_a - expected_score_a)
                 elo_ratings[player_b] += k_factor * ((1 - actual_score_a) - expected_score_b)
+
     return {k: round(v) for k, v in elo_ratings.items()}
 
 if __name__ == "__main__":
