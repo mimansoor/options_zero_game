@@ -899,8 +899,8 @@ class PortfolioManager:
         short_strike = self._find_strike_for_delta(short_delta, option_type, current_price, iv_bin_index, days_to_expiry)
         if short_strike is None: return
         
-        # 2. Find the one long leg @ 35-40 delta
-        long_delta_range = [-0.40, -0.35] if option_type == 'put' else [0.35, 0.40]
+        # 2. Find the one long leg @ 30-35 delta
+        long_delta_range = [-0.30, -0.35] if option_type == 'put' else [0.30, 0.35]
         long_strike = self._find_strike_from_delta_list(long_delta_range, option_type, current_price, iv_bin_index, days_to_expiry)
         if long_strike is None: return
 
