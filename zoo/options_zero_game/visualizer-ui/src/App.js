@@ -177,7 +177,7 @@ function PortfolioRiskDashboard({ portfolioStats }) {
 }
 
 function StrategyReport({ reportData }) {
-    const [sortConfig, setSortConfig] = useState({ key: 'Trader_Score', direction: 'descending' });
+    const [sortConfig, setSortConfig] = useState({ key: 'ELO_Rank', direction: 'descending' });
     const sortedData = useMemo(() => {
         if (!reportData || !Array.isArray(reportData)) return [];
         let sortableData = [...reportData];
@@ -188,9 +188,7 @@ function StrategyReport({ reportData }) {
     const getSortIndicatorClass = (key) => { if (!sortConfig || sortConfig.key !== key) return 'sort-indicator-hidden'; return sortConfig.direction === 'ascending' ? 'sort-indicator' : 'sort-indicator descending'; };
     if (!reportData || !Array.isArray(reportData) || reportData.length === 0) return <p className="empty-message">No strategy data in this report.</p>;
     
-    // <<< --- NEW: Add 'CVaR_95%_$' to the columns list --- >>>
-    // Placing it right after Max Loss makes for a logical comparison.
-    const columns = ["Trader_Score", "Strategy", "Total_Trades", "Win_Rate_%", "Expectancy_$", "Profit_Factor", "Avg_Win_$", "Avg_Loss_$", "Max_Win_$", "Max_Loss_$", "CVaR_95%_$", "Win_Streak", "Loss_Streak"];
+    const columns = ["ELO_Rank", "Trader_Score", "Strategy", "Total_Trades", "Win_Rate_%", "Expectancy_$", "Profit_Factor", "Avg_Win_$", "Avg_Loss_$", "Max_Win_$", "Max_Loss_$", "CVaR_95%_$", "Win_Streak", "Loss_Streak"];
     
     return (<div className="card" style={{ flex: '1 1 100%', marginTop: '20px' }}><h3>Strategy Performance Report (Click Headers to Sort)</h3><div className="table-container"><table className="info-table sortable"><thead><tr>{columns.map(col => (<th key={col} onClick={() => requestSort(col)}>{col.replace(/_/g, ' ')}<span className={getSortIndicatorClass(col)}>▲</span></th>))}</tr></thead><tbody>
         {sortedData.map((row, index) => (
