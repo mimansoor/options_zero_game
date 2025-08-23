@@ -524,6 +524,13 @@ class PortfolioManager:
         disable_solver = self.cfg.get('disable_spread_solver', False)
 
         # Route by most complex/specific keywords first to avoid misrouting
+        # <<< --- NEW: Add routing for the new advanced strategies --- >>>
+        if 'JADE_LIZARD' in action_name:
+            self._open_jade_lizard(action_name, current_price, iv_bin_index, current_step, days_to_expiry)
+        elif 'BIG_LIZARD' in action_name:
+            self._open_big_lizard(action_name, current_price, iv_bin_index, current_step, days_to_expiry)
+        elif 'RATIO_SPREAD' in action_name:
+            self._open_ratio_spread(action_name, current_price, iv_bin_index, current_step, days_to_expiry)
         if 'SPREAD' in action_name and not disable_solver:
             self.open_best_available_vertical(action_name, current_price, iv_bin_index, current_step, days_to_expiry)
         elif 'CONDOR' in action_name and 'IRON' not in action_name:
@@ -806,6 +813,115 @@ class PortfolioManager:
         }
 
     # --- Private Methods ---
+    def _open_jade_lizard(self, action_name: str, current_price: float, iv_bin_index: int, current_step: int, days_to_expiry: float):
+        """Opens a 3-leg Jade Lizard or Reverse Jade Lizard."""
+        if len(self.portfolio) > self.max_positions - 3: return
+
+        is_reverse = 'REVERSE' in action_name
+        
+        # 1. Define the naked leg
+        naked_leg_type = 'call' if is_reverse else 'put'
+        
+        # <<< --- THE DEFINITIVE FIX IS HERE --- >>>
+        # The delta for a put must be negative, and for a call must be positive.
+        naked_leg_delta = 0.20 if naked_leg_type == 'call' else -0.20
+
+        naked_strike = self._find_strike_for_delta(naked_leg_delta, naked_leg_type, current_price, iv_bin_index, days_to_expiry)
+        if naked_strike is None: return
+
+        naked_leg_def = {'type': naked_leg_type, 'direction': 'short', 'strike_price': naked_strike}
+
+        # 2. Define the spread
+        spread_type = 'put' if is_reverse else 'call'
+        spread_direction = 'BULL_PUT_SPREAD' if is_reverse else 'BEAR_CALL_SPREAD'
+        
+        spread_legs_def = self._find_best_available_spread(spread_type, spread_direction, current_price, iv_bin_index, days_to_expiry, is_credit_spread=True)
+        if not spread_legs_def: return
+            
+        # 3. Assemble, price, and execute
+        final_legs_def = [naked_leg_def] + spread_legs_def
+        for leg in final_legs_def:
+            leg.update({'entry_step': current_step, 'days_to_expiry': days_to_expiry})
+        
+        priced_legs = self._price_legs(final_legs_def, current_price, iv_bin_index, check_short_rule=True)
+        if not priced_legs: return
+
+        pnl_profile = self._calculate_universal_risk_profile(priced_legs, self.realized_pnl)
+        pnl_profile['strategy_id'] = self.strategy_name_to_id.get(action_name, -1)
+        self._execute_trades(priced_legs, pnl_profile)
+
+    def _open_big_lizard(self, action_name: str, current_price: float, iv_bin_index: int, current_step: int, days_to_expiry: float):
+        """Opens a 3-leg Big Lizard or Reverse Big Lizard."""
+        if len(self.portfolio) > self.max_positions - 3: return
+
+        is_reverse = 'REVERSE' in action_name
+
+        # 1. Define the Strangle component based on delta
+        strangle_put_delta = -0.60 if is_reverse else -0.40
+        strangle_call_delta = 0.40 if is_reverse else 0.60
+
+        strike_put = self._find_strike_for_delta(strangle_put_delta, 'put', current_price, iv_bin_index, days_to_expiry)
+        strike_call = self._find_strike_for_delta(strangle_call_delta, 'call', current_price, iv_bin_index, days_to_expiry)
+        if strike_put is None or strike_call is None: return
+        
+        strangle_legs_def = [
+            {'type': 'put', 'direction': 'short', 'strike_price': strike_put},
+            {'type': 'call', 'direction': 'short', 'strike_price': strike_call}
+        ]
+        
+        # 2. Define the long hedge leg
+        hedge_leg_type = 'put' if is_reverse else 'call'
+        hedge_leg_delta = -0.40 if is_reverse else 0.40
+        hedge_strike = self._find_strike_for_delta(hedge_leg_delta, hedge_leg_type, current_price, iv_bin_index, days_to_expiry)
+        if hedge_strike is None: return
+
+        hedge_leg_def = {'type': hedge_leg_type, 'direction': 'long', 'strike_price': hedge_strike}
+
+        # 3. Assemble, price, and execute
+        final_legs_def = strangle_legs_def + [hedge_leg_def]
+        for leg in final_legs_def:
+            leg.update({'entry_step': current_step, 'days_to_expiry': days_to_expiry})
+            
+        priced_legs = self._price_legs(final_legs_def, current_price, iv_bin_index, check_short_rule=True)
+        if not priced_legs: return
+            
+        pnl_profile = self._calculate_universal_risk_profile(priced_legs, self.realized_pnl)
+        pnl_profile['strategy_id'] = self.strategy_name_to_id.get(action_name, -1)
+        self._execute_trades(priced_legs, pnl_profile)
+
+    def _open_ratio_spread(self, action_name: str, current_price: float, iv_bin_index: int, current_step: int, days_to_expiry: float):
+        """Opens a 1x2 ratio spread (1 long, 2 short)."""
+        if len(self.portfolio) > self.max_positions - 3: return
+        
+        option_type = 'put' if 'PUT' in action_name else 'call'
+
+        # 1. Find the two short legs @ 20 delta
+        short_delta = -0.20 if option_type == 'put' else 0.20
+        short_strike = self._find_strike_for_delta(short_delta, option_type, current_price, iv_bin_index, days_to_expiry)
+        if short_strike is None: return
+        
+        # 2. Find the one long leg @ 35-40 delta
+        long_delta_range = [-0.40, -0.35] if option_type == 'put' else [0.35, 0.40]
+        long_strike = self._find_strike_from_delta_list(long_delta_range, option_type, current_price, iv_bin_index, days_to_expiry)
+        if long_strike is None: return
+
+        # 3. Assemble the 3 legs (with two identical short legs)
+        final_legs_def = [
+            {'type': option_type, 'direction': 'short', 'strike_price': short_strike},
+            {'type': option_type, 'direction': 'short', 'strike_price': short_strike},
+            {'type': option_type, 'direction': 'long', 'strike_price': long_strike}
+        ]
+        
+        for leg in final_legs_def:
+            leg.update({'entry_step': current_step, 'days_to_expiry': days_to_expiry})
+            
+        priced_legs = self._price_legs(final_legs_def, current_price, iv_bin_index, check_short_rule=True)
+        if not priced_legs: return
+            
+        pnl_profile = self._calculate_universal_risk_profile(priced_legs, self.realized_pnl)
+        pnl_profile['strategy_id'] = self.strategy_name_to_id.get(action_name, -1)
+        self._execute_trades(priced_legs, pnl_profile)
+
     def _find_portfolio_neutral_strike(self, leg_index: int, current_price: float, iv_bin_index: int) -> float or None:
         """
         A powerful solver that finds the optimal new strike for a specific leg that

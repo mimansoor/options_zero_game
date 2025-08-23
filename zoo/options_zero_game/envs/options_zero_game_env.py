@@ -1004,6 +1004,14 @@ class OptionsZeroGameEnv(gym.Env):
         for j in range(self._cfg.max_positions):
             actions[f'HEDGE_PORTFOLIO_BY_ROLLING_LEG_{j}'] = i; i+=1
 
+        # <<< --- NEW: Add the six advanced strategies --- >>>
+        actions['OPEN_JADE_LIZARD'] = i; i += 1
+        actions['OPEN_REVERSE_JADE_LIZARD'] = i; i += 1
+        actions['OPEN_BIG_LIZARD'] = i; i += 1
+        actions['OPEN_REVERSE_BIG_LIZARD'] = i; i += 1
+        actions['OPEN_PUT_RATIO_SPREAD'] = i; i += 1
+        actions['OPEN_CALL_RATIO_SPREAD'] = i; i += 1
+
         actions['CLOSE_ALL'] = i
         return actions
         
@@ -1266,6 +1274,12 @@ class OptionsZeroGameEnv(gym.Env):
             if not is_legal:
                 continue
             name = self.indices_to_actions[index]
+
+            # 1. We add a new, more specific check for our 3-leg strategies.
+            #    This must come BEFORE the generic 'SPREAD' check.
+            if 'JADE_LIZARD' in name or 'BIG_LIZARD' in name or 'RATIO_SPREAD' in name:
+                if available_slots >= 3:
+                    final_mask[index] = 1
             if 'CONDOR' in name or 'FLY' in name:
                 if available_slots >= 4:
                     final_mask[index] = 1

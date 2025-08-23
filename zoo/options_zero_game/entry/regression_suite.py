@@ -24,7 +24,6 @@ def create_test_env(forced_opening_strategy: str):
     env_cfg.forced_opening_strategy_name = forced_opening_strategy
     env_cfg.forced_historical_symbol = 'SPY'
     
-    # <<< --- THE FIX --- >>>
     # For single-leg tests, disable the complex vertical spread solver 
     # to ensure the EXACT naked leg we ask for is opened.
     if 'SPREAD' not in forced_opening_strategy:
@@ -524,7 +523,7 @@ def test_greeks_and_risk_validation():
         print("\n--- Validating Max Profit / Max Loss ---")
         lot_size = env.portfolio_manager.lot_size
         brokerage_per_leg = env.portfolio_manager.brokerage_per_leg
-        net_credit = abs(env.initial_net_premium * lot_size)
+        net_credit = abs(env.initial_net_premium)
         total_brokerage = len(portfolio_df) * brokerage_per_leg
         theoretical_max_profit = net_credit - total_brokerage
         call_legs = portfolio_df[portfolio_df['type'] == 'call']
@@ -534,6 +533,7 @@ def test_greeks_and_risk_validation():
         max_spread_width = max(call_spread_width, put_spread_width)
         theoretical_max_loss = (max_spread_width * lot_size) - net_credit + total_brokerage
         portfolio_stats = env.portfolio_manager.get_raw_portfolio_stats(current_price, env.iv_bin_index)
+        print(f"Theoretical max_profit: {theoretical_max_profit} Actual max_profit: {portfolio_stats['max_profit']}")
         assert np.isclose(portfolio_stats['max_profit'], theoretical_max_profit)
         assert np.isclose(portfolio_stats['max_loss'], -theoretical_max_loss)
         print("  - PASSED: Max Profit and Max Loss are correct.")
@@ -1282,6 +1282,193 @@ def test_close_all_action():
         return False
     finally:
         env.close()
+
+# ==============================================================================
+#                 NEW REGRESSION TESTS FOR ADVANCED STRATEGIES
+# ==============================================================================
+
+def test_open_jade_lizard():
+    """Tests if OPEN_JADE_LIZARD opens the correct 3-leg structure."""
+    test_name = "test_open_jade_lizard"
+    print(f"\n--- RUNNING: {test_name} ---")
+    env = create_test_env('OPEN_JADE_LIZARD')
+    try:
+        env.reset(seed=66)
+        env.step(env.actions_to_indices['HOLD'])
+
+        portfolio = env.portfolio_manager.get_portfolio()
+        assert len(portfolio) == 3, f"Expected 3 legs for Jade Lizard, got {len(portfolio)}."
+
+        counts = portfolio['type'].value_counts()
+        assert counts.get('put', 0) == 1, "Expected 1 short put."
+        assert counts.get('call', 0) == 2, "Expected a 2-leg Bear Call Spread."
+
+        dir_counts = portfolio['direction'].value_counts()
+        assert dir_counts.get('short', 0) == 2, "Expected 2 short legs in total."
+        assert dir_counts.get('long', 0) == 1, "Expected 1 long leg (the spread's wing)."
+
+        assert portfolio.iloc[0]['strategy_id'] == env.strategy_name_to_id['OPEN_JADE_LIZARD'], "Incorrect strategy ID."
+
+        print(f"--- PASSED: {test_name} ---")
+        return True
+    except Exception:
+        traceback.print_exc()
+        print(f"--- FAILED: {test_name} ---")
+        return False
+    finally:
+        env.close()
+
+def test_open_reverse_jade_lizard():
+    """Tests if OPEN_REVERSE_JADE_LIZARD opens the correct 3-leg structure."""
+    test_name = "test_open_reverse_jade_lizard"
+    print(f"\n--- RUNNING: {test_name} ---")
+    env = create_test_env('OPEN_REVERSE_JADE_LIZARD')
+    try:
+        env.reset(seed=67)
+        env.step(env.actions_to_indices['HOLD'])
+
+        portfolio = env.portfolio_manager.get_portfolio()
+        assert len(portfolio) == 3, f"Expected 3 legs for Reverse Jade Lizard, got {len(portfolio)}."
+
+        counts = portfolio['type'].value_counts()
+        assert counts.get('call', 0) == 1, "Expected 1 short call."
+        assert counts.get('put', 0) == 2, "Expected a 2-leg Bull Put Spread."
+
+        dir_counts = portfolio['direction'].value_counts()
+        assert dir_counts.get('short', 0) == 2, "Expected 2 short legs in total."
+        assert dir_counts.get('long', 0) == 1, "Expected 1 long leg (the spread's wing)."
+
+        assert portfolio.iloc[0]['strategy_id'] == env.strategy_name_to_id['OPEN_REVERSE_JADE_LIZARD'], "Incorrect strategy ID."
+
+        print(f"--- PASSED: {test_name} ---")
+        return True
+    except Exception:
+        traceback.print_exc()
+        print(f"--- FAILED: {test_name} ---")
+        return False
+    finally:
+        env.close()
+
+def test_open_big_lizard():
+    """Tests if OPEN_BIG_LIZARD opens the correct 3-leg straddle + long call."""
+    test_name = "test_open_big_lizard"
+    print(f"\n--- RUNNING: {test_name} ---")
+    env = create_test_env('OPEN_BIG_LIZARD')
+    try:
+        env.reset(seed=68)
+        env.step(env.actions_to_indices['HOLD'])
+
+        portfolio = env.portfolio_manager.get_portfolio()
+        assert len(portfolio) == 3, f"Expected 3 legs for Big Lizard, got {len(portfolio)}."
+
+        type_counts = portfolio['type'].value_counts()
+        assert type_counts.get('call', 0) == 2, "Expected 2 call legs."
+        assert type_counts.get('put', 0) == 1, "Expected 1 put leg."
+
+        dir_counts = portfolio['direction'].value_counts()
+        assert dir_counts.get('short', 0) == 2, "Expected 2 short legs (the straddle)."
+        assert dir_counts.get('long', 0) == 1, "Expected 1 long leg (the hedge)."
+
+        assert portfolio.iloc[0]['strategy_id'] == env.strategy_name_to_id['OPEN_BIG_LIZARD'], "Incorrect strategy ID."
+
+        print(f"--- PASSED: {test_name} ---")
+        return True
+    except Exception:
+        traceback.print_exc()
+        print(f"--- FAILED: {test_name} ---")
+        return False
+    finally:
+        env.close()
+
+def test_open_reverse_big_lizard():
+    """Tests if OPEN_REVERSE_BIG_LIZARD opens the correct 3-leg straddle + long put."""
+    test_name = "test_open_reverse_big_lizard"
+    print(f"\n--- RUNNING: {test_name} ---")
+    env = create_test_env('OPEN_REVERSE_BIG_LIZARD')
+    try:
+        env.reset(seed=69)
+        env.step(env.actions_to_indices['HOLD'])
+
+        portfolio = env.portfolio_manager.get_portfolio()
+        assert len(portfolio) == 3, f"Expected 3 legs for Reverse Big Lizard, got {len(portfolio)}."
+
+        type_counts = portfolio['type'].value_counts()
+        assert type_counts.get('put', 0) == 2, "Expected 2 put legs."
+        assert type_counts.get('call', 0) == 1, "Expected 1 call leg."
+
+        dir_counts = portfolio['direction'].value_counts()
+        assert dir_counts.get('short', 0) == 2, "Expected 2 short legs (the straddle)."
+        assert dir_counts.get('long', 0) == 1, "Expected 1 long leg (the hedge)."
+
+        assert portfolio.iloc[0]['strategy_id'] == env.strategy_name_to_id['OPEN_REVERSE_BIG_LIZARD'], "Incorrect strategy ID."
+
+        print(f"--- PASSED: {test_name} ---")
+        return True
+    except Exception:
+        traceback.print_exc()
+        print(f"--- FAILED: {test_name} ---")
+        return False
+    finally:
+        env.close()
+
+def test_open_put_ratio_spread():
+    """Tests if OPEN_PUT_RATIO_SPREAD opens the correct 1x2 put ratio spread."""
+    test_name = "test_open_put_ratio_spread"
+    print(f"\n--- RUNNING: {test_name} ---")
+    env = create_test_env('OPEN_PUT_RATIO_SPREAD')
+    try:
+        env.reset(seed=70)
+        env.step(env.actions_to_indices['HOLD'])
+
+        portfolio = env.portfolio_manager.get_portfolio()
+        assert len(portfolio) == 3, f"Expected 3 legs for Put Ratio Spread, got {len(portfolio)}."
+
+        assert all(portfolio['type'] == 'put'), "All legs must be puts."
+
+        dir_counts = portfolio['direction'].value_counts()
+        assert dir_counts.get('short', 0) == 2, "Expected 2 short legs."
+        assert dir_counts.get('long', 0) == 1, "Expected 1 long leg."
+
+        assert portfolio.iloc[0]['strategy_id'] == env.strategy_name_to_id['OPEN_PUT_RATIO_SPREAD'], "Incorrect strategy ID."
+
+        print(f"--- PASSED: {test_name} ---")
+        return True
+    except Exception:
+        traceback.print_exc()
+        print(f"--- FAILED: {test_name} ---")
+        return False
+    finally:
+        env.close()
+
+def test_open_call_ratio_spread():
+    """Tests if OPEN_CALL_RATIO_SPREAD opens the correct 1x2 call ratio spread."""
+    test_name = "test_open_call_ratio_spread"
+    print(f"\n--- RUNNING: {test_name} ---")
+    env = create_test_env('OPEN_CALL_RATIO_SPREAD')
+    try:
+        env.reset(seed=71)
+        env.step(env.actions_to_indices['HOLD'])
+
+        portfolio = env.portfolio_manager.get_portfolio()
+        assert len(portfolio) == 3, f"Expected 3 legs for Call Ratio Spread, got {len(portfolio)}."
+
+        assert all(portfolio['type'] == 'call'), "All legs must be calls."
+
+        dir_counts = portfolio['direction'].value_counts()
+        assert dir_counts.get('short', 0) == 2, "Expected 2 short legs."
+        assert dir_counts.get('long', 0) == 1, "Expected 1 long leg."
+
+        assert portfolio.iloc[0]['strategy_id'] == env.strategy_name_to_id['OPEN_CALL_RATIO_SPREAD'], "Incorrect strategy ID."
+
+        print(f"--- PASSED: {test_name} ---")
+        return True
+    except Exception:
+        traceback.print_exc()
+        print(f"--- FAILED: {test_name} ---")
+        return False
+    finally:
+        env.close()
+
 # ==============================================================================
 #                                TEST SUITE RUNNER
 # ==============================================================================
@@ -1320,6 +1507,14 @@ if __name__ == "__main__":
         test_hedge_portfolio_by_rolling_leg,
         test_recenter_volatility_position,
         test_no_recenter_on_long_volatility_position,
+
+        # <<< --- NEW: Add the 6 new tests to the runner --- >>>
+        test_open_jade_lizard,
+        test_open_reverse_jade_lizard,
+        test_open_big_lizard,
+        test_open_reverse_big_lizard,
+        test_open_put_ratio_spread,
+        test_open_call_ratio_spread,
     ]
 
     failures = []

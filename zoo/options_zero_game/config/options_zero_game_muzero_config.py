@@ -322,6 +322,25 @@ for direction in ['LONG', 'SHORT']:
             strategy_name_to_id[internal_name] = next_id; next_id += 1
             strategy_name_to_id[f'OPEN_{internal_name}'] = strategy_name_to_id[internal_name]
 
+# <<< --- NEW: Section for Advanced Multi-Leg Strategies --- >>>
+strategy_name_to_id['JADE_LIZARD'] = next_id; next_id += 1
+strategy_name_to_id['OPEN_JADE_LIZARD'] = strategy_name_to_id['JADE_LIZARD']
+
+strategy_name_to_id['REVERSE_JADE_LIZARD'] = next_id; next_id += 1
+strategy_name_to_id['OPEN_REVERSE_JADE_LIZARD'] = strategy_name_to_id['REVERSE_JADE_LIZARD']
+
+strategy_name_to_id['BIG_LIZARD'] = next_id; next_id += 1
+strategy_name_to_id['OPEN_BIG_LIZARD'] = strategy_name_to_id['BIG_LIZARD']
+
+strategy_name_to_id['REVERSE_BIG_LIZARD'] = next_id; next_id += 1
+strategy_name_to_id['OPEN_REVERSE_BIG_LIZARD'] = strategy_name_to_id['REVERSE_BIG_LIZARD']
+
+strategy_name_to_id['PUT_RATIO_SPREAD'] = next_id; next_id += 1
+strategy_name_to_id['OPEN_PUT_RATIO_SPREAD'] = strategy_name_to_id['PUT_RATIO_SPREAD']
+
+strategy_name_to_id['CALL_RATIO_SPREAD'] = next_id; next_id += 1
+strategy_name_to_id['OPEN_CALL_RATIO_SPREAD'] = strategy_name_to_id['CALL_RATIO_SPREAD']
+
 # --- 5. Custom / Post-Adjustment States ---
 strategy_name_to_id['CUSTOM_HEDGED'] = next_id; next_id += 1
 strategy_name_to_id['CUSTOM_2_LEGS'] = next_id; next_id += 1
