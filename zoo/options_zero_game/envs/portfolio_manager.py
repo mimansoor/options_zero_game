@@ -524,14 +524,13 @@ class PortfolioManager:
         disable_solver = self.cfg.get('disable_spread_solver', False)
 
         # Route by most complex/specific keywords first to avoid misrouting
-        # <<< --- NEW: Add routing for the new advanced strategies --- >>>
         if 'JADE_LIZARD' in action_name:
             self._open_jade_lizard(action_name, current_price, iv_bin_index, current_step, days_to_expiry)
         elif 'BIG_LIZARD' in action_name:
             self._open_big_lizard(action_name, current_price, iv_bin_index, current_step, days_to_expiry)
         elif 'RATIO_SPREAD' in action_name:
             self._open_ratio_spread(action_name, current_price, iv_bin_index, current_step, days_to_expiry)
-        if 'SPREAD' in action_name and not disable_solver:
+        elif 'SPREAD' in action_name and not disable_solver:
             self.open_best_available_vertical(action_name, current_price, iv_bin_index, current_step, days_to_expiry)
         elif 'CONDOR' in action_name and 'IRON' not in action_name:
             self._open_condor(action_name, current_price, iv_bin_index, current_step, days_to_expiry)
