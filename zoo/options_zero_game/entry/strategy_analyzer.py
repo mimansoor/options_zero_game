@@ -55,12 +55,110 @@ def calculate_statistics(results: list, strategy_name: str) -> dict:
         max_win_streak = max(max_win_streak, current_win_streak)
         max_loss_streak = max(max_loss_streak, current_loss_streak)
 
+    # <<< --- NEW: Calculate Cumulative PnL, Drawdown, and CORRECTED Kelly Ratio --- >>>
+    
+    # 1. Cumulative PnL
+    cumulative_pnl = sum(pnls)
+
+    # 2. Max Drawdown and Highest High
+    highest_high = 0.0
+    max_drawdown = 0.0
+    equity_curve = 0.0
+    for pnl in pnls:
+        equity_curve += pnl
+        highest_high = max(highest_high, equity_curve)
+        drawdown = highest_high - equity_curve
+        max_drawdown = max(max_drawdown, drawdown)
+
+    # 3. Half Kelly Ratio (Corrected Implementation)
+    half_kelly_ratio = 0.0
+    # Check for a positive edge (avg_profit > 0) and that avg_loss is a meaningful number
+    if avg_profit > 0 and abs(avg_loss) > 1e-6:
+        win_percentage = win_rate / 100.0
+        # b = win/loss ratio
+        win_loss_ratio = avg_profit / abs(avg_loss)
+        
+        # F = p - (q / b)
+        kelly_criterion = win_percentage - ((1 - win_percentage) / win_loss_ratio)
+        
+        # Calculate Half Kelly and then apply the user's 30% maximum risk cap.
+        calculated_half_kelly = max(0, kelly_criterion / 2.0) * 100 # Expressed as a percentage
+        half_kelly_ratio = min(30.0, calculated_half_kelly)
+
+    # <<< --- NEW: Calculation of Advanced Performance Ratios --- >>>
+    # Define the annual risk-free rate
+    ANNUAL_RISK_FREE_RATE = 0.10 # 10%
+
+    # We need to convert the annual rate to a per-episode rate.
+    # The analyzer runs for a fixed 20 trading days per episode.
+    TRADING_DAYS_PER_YEAR = 252
+    EPISODE_LENGTH_DAYS = 20
+    risk_free_return_per_episode = (1 + ANNUAL_RISK_FREE_RATE)**(EPISODE_LENGTH_DAYS / TRADING_DAYS_PER_YEAR) - 1
+    
+    # The risk-free P&L is based on the initial capital. Using the config default.
+    initial_capital = main_config.env.initial_cash
+    risk_free_pnl_per_episode = initial_capital * risk_free_return_per_episode
+
+    # 1. Sharpe Ratio
+    sharpe_ratio = 0.0
+    # Calculate excess returns over the risk-free rate
+    excess_returns = pnl_array - risk_free_pnl_per_episode
+    std_dev_excess_returns = np.std(excess_returns)
+    if std_dev_excess_returns > 1e-6:
+        sharpe_ratio = np.mean(excess_returns) / std_dev_excess_returns
+
+    # 2. Sortino Ratio
+    sortino_ratio = 0.0
+    # Downside deviation is calculated only on the excess returns that are negative.
+    negative_excess_returns = excess_returns[excess_returns < 0]
+    if len(negative_excess_returns) > 1:
+        downside_deviation = np.std(negative_excess_returns)
+        if downside_deviation > 1e-6:
+            sortino_ratio = np.mean(excess_returns) / downside_deviation
+        elif np.mean(excess_returns) > 0:
+            sortino_ratio = 999.0 
+    elif np.mean(excess_returns) > 0:
+        sortino_ratio = 999.0
+
+    # 3. Calmar Ratio
+    calmar_ratio = 0.0
+    num_episodes = len(pnls)
+    total_days = num_episodes * EPISODE_LENGTH_DAYS
+    total_years = total_days / TRADING_DAYS_PER_YEAR
+    if total_years > 0 and max_drawdown > 1e-6:
+        # Annualized return must also be in excess of the risk-free rate
+        annualized_total_return = (cumulative_pnl / initial_capital) / total_years
+        annualized_excess_return = annualized_total_return - ANNUAL_RISK_FREE_RATE
+        calmar_ratio = annualized_excess_return / (max_drawdown / initial_capital)
+
+    # ... (RoMaD and the rest of the function are unchanged) ...
+    romad = 0.0
+    if max_drawdown > 1e-6:
+        romad = cumulative_pnl / max_drawdown
+    elif cumulative_pnl > 0:
+        romad = 999.0
+
     stats = {
-        "Strategy": strategy_name, "Total_Trades": len(pnls), "Win_Rate_%": win_rate,
-        "Expectancy_$": expectancy, "Profit_Factor": profit_factor,
-        "Avg_Win_$": avg_profit, "Avg_Loss_$": avg_loss,
-        "Max_Win_$": max(wins) if wins else 0.0, "Max_Loss_$": min(losses) if losses else 0.0,
-        "CVaR_95%_$": cvar_95, "Win_Streak": max_win_streak, "Loss_Streak": max_loss_streak
+        "Strategy": strategy_name,
+        "Total_Trades": len(pnls),
+        "Cumulative_PnL_$": cumulative_pnl,
+        "Win_Rate_%": win_rate,
+        "Expectancy_$": expectancy,
+        "Profit_Factor": profit_factor,
+        "Sharpe_Ratio": sharpe_ratio,       # <-- NEW
+        "Sortino_Ratio": sortino_ratio,     # <-- NEW
+        "Calmar_Ratio": calmar_ratio,       # <-- NEW
+        "RoMaD": romad,                     # <-- NEW
+        "Avg_Win_$": avg_profit,
+        "Avg_Loss_$": avg_loss,
+        "Max_Win_$": max(wins) if wins else 0.0,
+        "Max_Loss_$": min(losses) if losses else 0.0,
+        "Highest_High_$": highest_high,
+        "Max_Drawdown_$": max_drawdown,
+        "CVaR_95%_$": cvar_95,
+        "Win_Streak": max_win_streak,
+        "Loss_Streak": max_loss_streak,
+        "Half_Kelly_%": half_kelly_ratio,
     }
 
     # Final sanitation pass to ensure all values are JSON-compatible
@@ -74,6 +172,8 @@ def calculate_trader_score(strategy_data):
     expectancy = strategy_data.get("Expectancy_$", 0)
     if expectancy <= 0: return np.tanh(expectancy / 50000)
     profit_factor = strategy_data.get("Profit_Factor", 1.0) or 1.0
+    if profit_factor is None:
+        profit_factor = 999.0 # Treat 'None' (infinite) as a very high number
     win_rate = strategy_data.get("Win_Rate_%", 0)
     avg_loss = 1 + abs(strategy_data.get("Avg_Loss_$", 0))
     max_loss = 1 + abs(strategy_data.get("Max_Loss_$", 0))
@@ -122,6 +222,56 @@ def calculate_elo_ratings(all_pnl_by_strategy: dict, existing_ratings: dict, k_f
 
                 elo_ratings[player_a] += k_factor * (actual_score_a - expected_score_a)
                 elo_ratings[player_b] += k_factor * ((1 - actual_score_a) - expected_score_b)
+
+    return {k: round(v) for k, v in elo_ratings.items()}
+
+# <<< --- NEW: The PnL-Weighted Elo Calculation Function --- >>>
+def calculate_pnl_weighted_elo(all_pnl_by_strategy: dict, existing_ratings: dict, k_factor=32, initial_rating=1200, pnl_weight=0.5, base_pnl_unit=10000.0):
+    """
+    Calculates Elo ratings where the points exchanged are weighted by the
+    log-scaled average PNL outperformance between the two strategies.
+    """
+    strategies = list(all_pnl_by_strategy.keys())
+    if not strategies: return {}
+
+    # Initialize ratings, using existing ones as a baseline.
+    elo_ratings = {strategy: existing_ratings.get(strategy, initial_rating) for strategy in strategies}
+
+    num_episodes = len(list(all_pnl_by_strategy.values())[0])
+    if num_episodes == 0: return elo_ratings
+
+    print(f"\n--- Starting PnL-Weighted Elo Calculation ---")
+
+    # This is a single round-robin tournament based on average performance.
+    for i in tqdm(range(len(strategies)), desc="PnL Elo Matchups"):
+        for j in range(i + 1, len(strategies)):
+            player_a, player_b = strategies[i], strategies[j]
+
+            # 1. Calculate Average PNL Outperformance
+            pnl_a = all_pnl_by_strategy[player_a]
+            pnl_b = all_pnl_by_strategy[player_b]
+            pnl_diffs = [pnl_a[k] - pnl_b[k] for k in range(num_episodes)]
+            avg_outperformance = np.mean(pnl_diffs)
+
+            # 2. Determine Win/Loss/Draw
+            actual_score_a = 0.5 # Default to draw
+            if avg_outperformance > 0: actual_score_a = 1.0 # Player A wins
+            elif avg_outperformance < 0: actual_score_a = 0.0 # Player B wins
+
+            # 3. Calculate Log-Scaled Multiplier
+            pnl_diff_abs = abs(avg_outperformance)
+            multiplier = math.log(1 + pnl_diff_abs / base_pnl_unit)
+
+            # 4. Calculate Dynamic K-Factor
+            dynamic_k = k_factor * (1 + pnl_weight * multiplier)
+
+            # 5. Update Elo Ratings
+            rating_a, rating_b = elo_ratings[player_a], elo_ratings[player_b]
+            expected_score_a = 1 / (1 + 10 ** ((rating_b - rating_a) / 400))
+            expected_score_b = 1 - expected_score_a
+
+            elo_ratings[player_a] += dynamic_k * (actual_score_a - expected_score_a)
+            elo_ratings[player_b] += dynamic_k * ((1 - actual_score_a) - expected_score_b)
 
     return {k: round(v) for k, v in elo_ratings.items()}
 

@@ -323,7 +323,16 @@ function StrategyReport({ reportData }) {
     const getSortIndicatorClass = (key) => { if (!sortConfig || sortConfig.key !== key) return 'sort-indicator-hidden'; return sortConfig.direction === 'ascending' ? 'sort-indicator' : 'sort-indicator descending'; };
     if (!reportData || !Array.isArray(reportData) || reportData.length === 0) return <p className="empty-message">No strategy data in this report.</p>;
     
-    const columns = ["ELO_Rank", "Trader_Score", "Strategy", "Total_Trades", "Win_Rate_%", "Expectancy_$", "Profit_Factor", "Avg_Win_$", "Avg_Loss_$", "Max_Win_$", "Max_Loss_$", "CVaR_95%_$", "Win_Streak", "Loss_Streak"];
+    const columns = [
+        "ELO_Rank", 
+        "PnL_ELO_Rank", // <-- NEW COLUMN
+        "Trader_Score", "Strategy", "Total_Trades", "Cumulative_PnL_$",
+        "Win_Rate_%", "Expectancy_$", "Profit_Factor", 
+        "Sharpe_Ratio", "Sortino_Ratio", "Calmar_Ratio", "RoMaD",
+        "Avg_Win_$", "Avg_Loss_$", "Max_Win_$", "Max_Loss_$", 
+        "Highest_High_$", "Max_Drawdown_$", "CVaR_95%_$", 
+        "Win_Streak", "Loss_Streak", "Half_Kelly_%"
+    ];
     
     return (<div className="card" style={{ flex: '1 1 100%', marginTop: '20px' }}><h3>Strategy Performance Report (Click Headers to Sort)</h3><div className="table-container"><table className="info-table sortable"><thead><tr>{columns.map(col => (<th key={col} onClick={() => requestSort(col)}>{col.replace(/_/g, ' ')}<span className={getSortIndicatorClass(col)}>▲</span></th>))}</tr></thead><tbody>
         {sortedData.map((row, index) => (

@@ -131,21 +131,28 @@ def run_full_analysis():
             if stats: all_stats.append(stats)
             all_pnl_by_strategy[item['strategy']] = item['pnl_results']
 
-        new_elo_ratings = calculate_elo_ratings(all_pnl_by_strategy, existing_ratings)
+        # a) Calculate both standard and PnL-weighted Elo ratings.
+        standard_elo = calculate_elo_ratings(all_pnl_by_strategy, existing_ratings)
+        pnl_weighted_elo = calculate_pnl_weighted_elo(all_pnl_by_strategy, existing_ratings)
 
+        # b) Add all metrics to the final stats dictionary.
         for strategy_row in all_stats:
+            strategy_name = strategy_row['Strategy']
             strategy_row['Trader_Score'] = calculate_trader_score(strategy_row)
-            strategy_row['ELO_Rank'] = new_elo_ratings.get(strategy_row['Strategy'], 1200)
+            strategy_row['ELO_Rank'] = standard_elo.get(strategy_name, 1200)
+            strategy_row['PnL_ELO_Rank'] = pnl_weighted_elo.get(strategy_name, 1200) # <-- Add the new rank
 
+        # c) Update the persistent Elo file with the STANDARD Elo ratings for next time.
         with open(ELO_STATE_FILE, 'w') as f:
-            json.dump(new_elo_ratings, f, indent=2)
-        print(f"Successfully updated and saved Elo ratings to {ELO_STATE_FILE}")
+            json.dump(standard_elo, f, indent=2)
+        print(f"Successfully updated and saved standard Elo ratings to {ELO_STATE_FILE}")
         
-        df = pd.DataFrame(all_stats).sort_values(by="ELO_Rank", ascending=False).set_index('Strategy')
+        # d) Sort the final DataFrame by the new PnL-Weighted Elo Rank for display.
+        df = pd.DataFrame(all_stats).sort_values(by="PnL_ELO_Rank", ascending=False).set_index('Strategy')
         pd.set_option('display.max_rows', None)
         pd.set_option('display.width', 200)
         print("\n" + "="*120)
-        print("--- FINAL RANKED STRATEGY REPORT (SORTED BY ELO) ---")
+        print("--- FINAL RANKED STRATEGY REPORT (SORTED BY PNL-WEIGHTED ELO) ---")
         print("="*120)
         print(df)
         print("="*120)

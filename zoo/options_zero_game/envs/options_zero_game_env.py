@@ -85,7 +85,7 @@ class OptionsZeroGameEnv(gym.Env):
         # For debit strategies, target is a multiple of the initial debit paid.
         debit_strategy_take_profit_multiple=0, # Target 2x the debit paid (200% return). Set to 0 to disable.
 
-        stop_loss_multiple_of_cost=10.0, # NEW: Added stop loss multiple
+        stop_loss_multiple_of_cost=1.0, # NEW: Added stop loss multiple
         use_stop_loss=True,
         forced_opening_strategy_name=None,
         disable_opening_curriculum=False,
