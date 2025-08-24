@@ -7,6 +7,7 @@ from tqdm import tqdm
 import shutil
 import glob
 import pandas as pd
+import numpy as np
 
 # Add the project root to the Python path to ensure imports work
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '..'))
