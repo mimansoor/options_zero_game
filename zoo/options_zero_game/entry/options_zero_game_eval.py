@@ -29,6 +29,13 @@ if __name__ == "__main__":
     parser.add_argument('--profit_target_pct', type=float, default=None, help="Override the global profit target percentage (e.g., 3 for 3%).")
     parser.add_argument('--credit_tp_pct', type=float, default=None, help="Override the take-profit percentage for credit strategies (e.g., 70 for 70%).")
     parser.add_argument('--debit_tp_mult', type=float, default=None, help="Override the take-profit multiple for debit strategies (e.g., 2 for 2x).")
+    parser.add_argument(
+        '--days_back', 
+        type=int, 
+        default=None, 
+        help="Force the historical evaluation to start a specific number of days from the LATEST possible date. "
+             "E.g., --days_back 1 starts on the last possible day, --days_back 25 starts 24 days before that."
+    )
     
     args = parser.parse_args()
 
@@ -50,6 +57,13 @@ if __name__ == "__main__":
     eval_main_config.env.n_evaluator_episode = 1
     eval_create_config.env_manager.type = 'base'
     eval_main_config.env.is_eval_mode = True
+
+    if args.days_back is not None:
+        if args.days_back > 0:
+            eval_main_config.env.forced_days_back = args.days_back
+            print(f"--- OVERRIDE: Forcing historical start date to {args.days_back} day(s) from the end of the dataset. ---")
+        else:
+            print("(WARNING) --days_back must be a positive integer. Ignoring.")
 
     # <<< --- NEW: Apply the overrides to the config --- >>>
     if args.profit_target_pct is not None:
