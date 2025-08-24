@@ -110,7 +110,7 @@ class PriceActionManager:
     def reset(self, total_steps: int):
         self.total_steps = total_steps
         self.start_price = self.start_price_config
-        source_to_use = random.choice(['garch', 'historical']) if self.price_source == 'mixed' else self.price_source
+        source_to_use = self.np_random.choice(['garch', 'historical']) if self.price_source == 'mixed' else self.price_source
         self.historical_context_path = np.array([])
 
         try:
@@ -231,25 +231,42 @@ class PriceActionManager:
 
     def _generate_historical_price_path(self):
         forced_symbol = self._cfg.get('forced_historical_symbol')
+
+        # <<< --- NEW: Get the days_back parameter from the config --- >>>
+        forced_days_back = self._cfg.get('forced_days_back')
         
         # <<< --- NEW: Add a failsafe loop --- >>>
         # Try up to 5 times to find a valid historical data segment.
         for _ in range(5):
             try:
+                selected_ticker = ""
                 if forced_symbol:
                     if forced_symbol in self._available_tickers:
                         selected_ticker = forced_symbol
                     else:
                         print(f"(WARNING) Forced symbol '{forced_symbol}' not found. Choosing random ticker.")
-                        selected_ticker = random.choice(self._available_tickers)
+                        selected_ticker = self.np_random.choice(self._available_tickers)
                 else:
-                    selected_ticker = random.choice(self._available_tickers)
+                    selected_ticker = self.np_random.choice(self._available_tickers)
 
                 file_path = os.path.join(self.historical_data_path, f"{selected_ticker}.csv")
-                data = pd.read_csv(file_path, index_col='Date', parse_dates=True)
-                data.rename(columns={data.columns[0]: 'Close'}, inplace=True)
 
                 # <<< --- NEW: More Robust Data Length Check --- >>>
+                # 1. Load the data, correctly identifying the 'Date' column as the index.
+                data = pd.read_csv(file_path, index_col='Date', parse_dates=True)
+                # 2. Robustly rename the single data column to 'Close'.
+                #    This works whether the original column is named 'SPY', 'Close', or anything else.
+                if len(data.columns) > 0:
+                    data.rename(columns={data.columns[0]: 'Close'}, inplace=True)
+                else:
+                    # If the file had no data columns, it's invalid.
+                    print(f"(WARNING) CSV file for {selected_ticker} appears to have no data columns. Skipping.")
+                    continue
+
+                # 3. Proceed with the now-standardized DataFrame.
+                data.dropna(subset=['Close'], inplace=True)
+                data.reset_index(drop=True, inplace=True)
+
                 required_length = self.total_steps + 1
                 if len(data) < required_length:
                     # Don't raise an error, just log a warning and try another ticker
@@ -263,13 +280,30 @@ class PriceActionManager:
                     print(f"(WARNING) Logic error for {selected_ticker}: max_start_index is negative. Trying another ticker.")
                     continue
                 
-                start_index = random.randint(0, max_start_index)
+                start_index = 0 # Default to 0
                 
+                if forced_days_back is not None:
+                    # Calculate the start index based on the user's request.
+                    # --days_back 1 means start at the last possible day.
+                    # --days_back 25 means start 24 days before that.
+                    desired_start_index = max_start_index - (forced_days_back - 1)
+                    
+                    # Add a safety clamp to prevent a negative index if days_back is too large.
+                    if desired_start_index < 0:
+                        print(f"(WARNING) --days_back {forced_days_back} is too large for the available data ({max_start_index+1} possible start days). Clamping to the earliest possible start date.")
+                        start_index = 0
+                    else:
+                        start_index = desired_start_index
+                else:
+                    # Replace the unseeded random.randint with the seeded NumPy generator.
+                    # The high value for np.integers is exclusive, so we add 1 to make it inclusive.
+                    start_index = self.np_random.integers(0, max_start_index + 1)
+
                 context_start_index = max(0, start_index - 30)
                 context_segment = data['Close'].iloc[context_start_index:start_index]
-                
+
                 price_segment = data['Close'].iloc[start_index : start_index + required_length]
-                
+               
                 raw_start_price = price_segment.iloc[0]
                 if raw_start_price > 1e-4:
                     normalization_factor = self.start_price_config / raw_start_price
@@ -305,7 +339,7 @@ class PriceActionManager:
         numerically stable, and correctly handles short episode lengths.
         """
         # --- 1. Setup ---
-        chosen_regime = random.choice(self.market_regimes)
+        chosen_regime = self.np_random.choice(self.market_regimes)
         self.current_regime_name = f"GARCH: {chosen_regime['name']}"
         prices = np.zeros(self.total_steps + 1, dtype=np.float32)
         prices[0] = self.start_price_config

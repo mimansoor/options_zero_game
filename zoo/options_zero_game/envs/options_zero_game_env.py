@@ -280,17 +280,23 @@ class OptionsZeroGameEnv(gym.Env):
         if forced_length > 0:
             self.episode_time_to_expiry = forced_length
         else:
-            self.episode_time_to_expiry = random.randint(self._cfg.min_time_to_expiry_days, self._cfg.time_to_expiry_days)
+            # Use the seeded NumPy random generator for a deterministic episode length.
+            # np.integers is exclusive of the high value, so we add 1.
+            self.episode_time_to_expiry = self.np_random.integers(
+                self._cfg.min_time_to_expiry_days, 
+                self._cfg.time_to_expiry_days + 1
+            )
+
         self.total_steps = self.episode_time_to_expiry * self._cfg.steps_per_day
 
         if self.iv_stationary_dist is not None:
-            self.current_iv_regime_index = np.random.choice(len(self.regimes), p=self.iv_stationary_dist)
+            self.current_iv_regime_index = self.np_random.choice(len(self.regimes), p=self.iv_stationary_dist)
         else:
-            self.current_iv_regime_index = random.randint(0, len(self.regimes) - 1)
+            self.current_iv_regime_index = self.np_random.integers(0, len(self.regimes))
         self._update_market_rules_for_regime()
         
         self.price_manager.reset(self.total_steps)
-        self.iv_bin_index = random.randint(0, len(self.market_rules_manager.iv_bins['call']['0']) - 1)
+        self.iv_bin_index = self.np_random.integers(0, len(self.market_rules_manager.iv_bins['call']['0']))
         
         # --- 3. THE DEFINITIVE FIX: Prioritized Initial State Setup ---
         
@@ -384,7 +390,7 @@ class OptionsZeroGameEnv(gym.Env):
             # Get the probability distribution for the next state
             transition_probs = self.iv_transition_matrix[self.current_iv_regime_index]
             # Choose the next regime based on these probabilities
-            self.current_iv_regime_index = np.random.choice(len(self.regimes), p=transition_probs)
+            self.current_iv_regime_index = self.np_random.choice(len(self.regimes), p=transition_probs)
             
             # Now that the regime has changed, we must rebuild the market rules
             self._update_market_rules_for_regime()
@@ -486,6 +492,7 @@ class OptionsZeroGameEnv(gym.Env):
         # 1. Determine the final action and if the agent's attempt was illegal.
         final_action, was_illegal_action = self._handle_action(action)
         final_action_name = self.indices_to_actions.get(final_action, 'INVALID')
+        print(f"DEBUG: action_name: {final_action_name} current_price: {self.price_manager.current_price}")
 
         # 2. Store this information for the second half of the step.
         self.last_action_info = {
@@ -803,7 +810,7 @@ class OptionsZeroGameEnv(gym.Env):
             if not legal_open_indices: # Failsafe
                 raise RuntimeError("No legal opening moves available on Step 0. Check action mask logic.")
             # We override the illegal action with a random valid opening.
-            return random.choice(legal_open_indices), True
+            return self.np_random.choice(legal_open_indices), True
 
         # Override Rule 4: Default fallback for all other mid-episode illegal moves
         return self.actions_to_indices['HOLD'], True
@@ -1391,7 +1398,7 @@ class OptionsZeroGameEnv(gym.Env):
             "BUTTERFLY": lambda name: 'FLY' in name and 'IRON' not in name,
         }
 
-        chosen_family_name = random.choice(list(strategy_families.keys()))
+        chosen_family_name = self.np_random.choice(list(strategy_families.keys()))
         is_in_family = strategy_families[chosen_family_name]
         curriculum_mask = np.zeros_like(final_mask)
 
