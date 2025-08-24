@@ -8,6 +8,7 @@ import shutil
 import glob
 import pandas as pd
 import numpy as np
+import argparse
 
 # Add the project root to the Python path to ensure imports work
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '..'))
@@ -34,6 +35,19 @@ def run_full_analysis():
     ELO_STATE_FILE = "zoo/options_zero_game/experts/elo_ratings.json"
 
     print(f"--- [ {datetime.now()} ] Starting Full Analysis Cycle ---")
+
+    # <<< --- NEW: Add a command-line argument for determinism --- >>>
+    parser = argparse.ArgumentParser(description="Run a full, deterministic strategy analysis with Elo ratings.")
+    parser.add_argument(
+        '--deterministic',
+        action='store_true',
+        help="Run the analysis in a fully deterministic mode by disabling the C++ MCTS. Slower but reproducible."
+    )
+    args, remaining_argv = parser.parse_known_args()
+
+    print(f"--- [ {datetime.now()} ] Starting Full Analysis Cycle ---")
+    if args.deterministic:
+        print("--- RUNNING IN DETERMINISTIC MODE ---")
 
     try:
         # 1. Initial Cleanup
@@ -84,7 +98,12 @@ def run_full_analysis():
                 "--report_file", intermediate_file,
                 "--exp_name", ANALYZER_RUN_DIR
             ]
-            command.extend(sys.argv[1:])
+
+            # <<< --- NEW: Pass the deterministic flag to the worker script --- >>>
+            if args.deterministic:
+                command.append("--deterministic")
+
+            command.extend(remaining_argv)
 
             try:
                 subprocess.run(command, check=True, capture_output=True, text=True)

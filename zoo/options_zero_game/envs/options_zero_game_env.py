@@ -259,6 +259,11 @@ class OptionsZeroGameEnv(gym.Env):
     def seed(self, seed: int, dynamic_seed: int = None) -> List[int]:
         self.np_random, seed = seeding.np_random(seed)
         random.seed(seed)
+
+        # We must also seed the global NumPy random number generator, as it is used
+        # by the IV regime selection logic (np.random.choice).
+        np.random.seed(seed)
+
         self.price_manager.np_random = self.np_random
         return [seed]
 
@@ -492,7 +497,6 @@ class OptionsZeroGameEnv(gym.Env):
         # 1. Determine the final action and if the agent's attempt was illegal.
         final_action, was_illegal_action = self._handle_action(action)
         final_action_name = self.indices_to_actions.get(final_action, 'INVALID')
-        print(f"DEBUG: action_name: {final_action_name} current_price: {self.price_manager.current_price}")
 
         # 2. Store this information for the second half of the step.
         self.last_action_info = {

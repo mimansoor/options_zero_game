@@ -3,6 +3,7 @@ import copy
 from tqdm import tqdm
 import json
 import numpy as np
+import torch
 
 from lzero.entry import eval_muzero
 from zoo.options_zero_game.config.options_zero_game_muzero_config import main_config, create_config
@@ -139,6 +140,12 @@ if __name__ == "__main__":
     parser.add_argument('--credit_tp_pct', type=float, default=None)
     parser.add_argument('--debit_tp_mult', type=float, default=None)
     parser.add_argument('--exp_name', type=str, default='eval/strategy_analyzer_runs', help="The experiment name prefix for temporary log files.")
+    # <<< --- NEW: Add the deterministic flag --- >>>
+    parser.add_argument(
+        '--deterministic',
+        action='store_true',
+        help="Enables all determinism flags for a reproducible run."
+    )
     args = parser.parse_args()
 
     all_episode_pnls = []
@@ -147,10 +154,25 @@ if __name__ == "__main__":
         current_create_config = copy.deepcopy(create_config)
         
         current_main_config.exp_name = args.exp_name
+        current_seed = args.start_seed + i
         
         if args.profit_target_pct is not None: current_main_config.env.profit_target_pct = args.profit_target_pct
         if args.credit_tp_pct is not None: current_main_config.env.credit_strategy_take_profit_pct = args.credit_tp_pct
         if args.debit_tp_mult is not None: current_main_config.env.debit_strategy_take_profit_multiple = args.debit_tp_mult
+
+        # <<< --- NEW: Apply all determinism settings if the flag is set --- >>>
+        if args.deterministic:
+            # 1. Set all PyTorch and CUDA seeds and flags
+            torch.manual_seed(current_seed)
+            if torch.cuda.is_available():
+                torch.cuda.manual_seed_all(current_seed)
+            torch.backends.cudnn.deterministic = True
+            torch.backends.cudnn.benchmark = False
+            
+            # 2. Disable the C++ MCTS to use the pure Python version
+            if 'policy' not in current_main_config:
+                current_main_config.policy = {}
+            current_main_config.policy.mcts_ctree = False
         
         current_main_config.env.price_source = 'historical'
         current_main_config.env.forced_historical_symbol = None if args.symbol.upper() == 'ANY' else args.symbol
@@ -159,8 +181,6 @@ if __name__ == "__main__":
         current_main_config.env.n_evaluator_episode = 1
         current_main_config.env.evaluator_env_num = 1
         current_main_config.env.forced_episode_length = args.days
-        
-        current_seed = args.start_seed + i
         
         _, returns = eval_muzero(
             [current_main_config, create_config],

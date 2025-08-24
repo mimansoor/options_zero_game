@@ -4,6 +4,7 @@ import time
 import copy
 import json
 import os
+import torch
 
 from lzero.entry import eval_muzero
 from zoo.options_zero_game.config.options_zero_game_muzero_config import main_config, create_config
@@ -42,6 +43,16 @@ if __name__ == "__main__":
     final_seed = int(time.time()) if args.seed < 0 else args.seed
     print(f"--- Running with seed: {final_seed} ---")
 
+    # Set all seeds and determinism flags for full reproducibility.
+    #if args.seed >= 0:
+        #print("--- ENABLING FULL DETERMINISM FOR PYTORCH ---")
+        #torch.manual_seed(final_seed)
+        #if torch.cuda.is_available():
+            #torch.cuda.manual_seed_all(final_seed)
+        ## These two lines are crucial for forcing cuDNN to use deterministic algorithms.
+        #torch.backends.cudnn.deterministic = True
+        #torch.backends.cudnn.benchmark = False
+
     # Create a deep copy of the configs to avoid modifying the global objects
     eval_main_config = copy.deepcopy(main_config)
     eval_create_config = copy.deepcopy(create_config)
@@ -49,6 +60,14 @@ if __name__ == "__main__":
     model_path = './best_ckpt/ckpt_best.pth.tar'
 
     eval_main_config.exp_name = 'eval/evaluator'
+
+    # Force the evaluator to use the pure Python MCTS implementation, which
+    # respects the Python-level seeds, rather than the non-deterministic C++ version.
+    # We must check if the policy key exists before trying to modify it.
+    if 'policy' not in eval_main_config:
+        eval_main_config.policy = {}
+    eval_main_config.policy.mcts_ctree = False
+    print("--- MCTS OVERRIDE: Forcing Python MCTS for deterministic evaluation. ---")
 
     # --- Standard Evaluation Setup ---
     eval_create_config.env.type = 'log_replay'
