@@ -86,7 +86,7 @@ class PriceActionManager:
                 num_heads=ExpertConfig['num_heads'], num_layers=vol_params['num_layers'],
                 output_dim=vol_params['output_dim']
             ).to(device)
-            state_dict = torch.load('zoo/options_zero_game/experts/volatility_expert.pth', map_location=device)
+            state_dict = torch.load('zoo/options_zero_game/experts/volatility_expert.pth', map_location=device, weights_only=True)
             self.volatility_expert.load_state_dict(state_dict)
             self.volatility_expert.eval()
             print("Successfully loaded Volatility Transformer expert.")
@@ -100,36 +100,39 @@ class PriceActionManager:
                 num_heads=ExpertConfig['num_heads'], num_layers=dir_params['num_layers'],
                 gru_layers=dir_params['gru_layers'], output_dim=dir_params['output_dim']
             ).to(device)
-            state_dict = torch.load('zoo/options_zero_game/experts/directional_expert.pth', map_location=device)
+            state_dict = torch.load('zoo/options_zero_game/experts/directional_expert.pth', map_location=device, weights_only=True)
             self.directional_expert.load_state_dict(state_dict)
             self.directional_expert.eval()
             print("Successfully loaded Directional Transformer expert.")
         except FileNotFoundError:
             print("Warning: Directional Transformer expert not found. Run trainer first.")
 
-    def reset(self, total_steps: int):
+    def reset(self, total_steps: int, chosen_regime: dict): # <-- Add the 'chosen_regime' argument
+        """
+        Resets the manager for a new episode.
+        MODIFIED: Now accepts the chosen_regime directly from the orchestrating environment.
+        """
         self.total_steps = total_steps
         self.start_price = self.start_price_config
-        source_to_use = self.np_random.choice(['garch', 'historical']) if self.price_source == 'mixed' else self.price_source
-        self.historical_context_path = np.array([])
+        # The Price Manager no longer makes its own choice.
+        source_to_use = self._cfg.price_source
 
         try:
-            # ... (the try/except block for calling _generate_*_price_path) ...
-            if source_to_use == 'garch' and self.market_regimes:
-                self._generate_garch_price_path()
-            elif source_to_use == 'historical' and self._available_tickers:
+            if source_to_use == 'garch':
+                # It now uses the regime passed in from the environment.
+                self._generate_garch_price_path(chosen_regime)
+            elif source_to_use == 'historical':
                 self._generate_historical_price_path()
-            else:
-                raise ValueError("No valid price source could be selected.")
-                
-            # --- THE FIX: Add an explicit check for NaN and Inf ---
+            else: # Mixed mode or other fallbacks
+                 # Fallback to GARCH if 'mixed' is selected but historical fails
+                self._generate_garch_price_path(chosen_regime)
+
             if not np.all(np.isfinite(self.price_path)):
                 raise ValueError("Generated path contains NaN or Inf values.")
             if np.any(self.price_path <= 0):
                 raise ValueError("Generated path contains non-positive prices.")
 
         except Exception as e:
-            # ... (the except block) ...
             print(f"--- PRICE GENERATION FAILED: {type(e).__name__}: {e}. USING FAILSAFE (FLAT) PATH. ---")
             self.current_regime_name = "Failsafe (Flat)"
             self.price_path = np.full(self.total_steps + 1, self.start_price, dtype=np.float32)

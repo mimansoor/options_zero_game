@@ -380,7 +380,7 @@ options_zero_game_muzero_config = dict(
         # --- Collector-Specific Settings ---
         collector_env_num=collector_env_num,
         # The collector uses the opening curriculum.
-        disable_opening_curriculum=False,
+        disable_opening_curriculum=True,
         
         # --- Evaluator-Specific Settings ---
         evaluator_env_num=evaluator_env_num,

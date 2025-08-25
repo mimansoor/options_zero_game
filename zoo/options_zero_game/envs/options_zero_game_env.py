@@ -88,7 +88,7 @@ class OptionsZeroGameEnv(gym.Env):
         stop_loss_multiple_of_cost=1.0, # NEW: Added stop loss multiple
         use_stop_loss=True,
         forced_opening_strategy_name=None,
-        disable_opening_curriculum=False,
+        disable_opening_curriculum=True,
 
         disable_spread_solver=False,
         
@@ -294,15 +294,46 @@ class OptionsZeroGameEnv(gym.Env):
 
         self.total_steps = self.episode_time_to_expiry * self._cfg.steps_per_day
 
-        if self.iv_stationary_dist is not None:
-            self.current_iv_regime_index = self.np_random.choice(len(self.regimes), p=self.iv_stationary_dist)
+        # The logic for setting up the initial state and market is now fully integrated.
+        
+        forced_atm_iv = self._cfg.get('forced_atm_iv')
+        chosen_regime_for_episode = None
+
+        # PRIORITY 1: A forced IV setup from the evaluator file. This overrides everything.
+        if forced_atm_iv:
+            if not self._has_printed_setup_info:
+                 print(f"(INFO) Using forced ATM IV of {forced_atm_iv}% for this episode.")
+            
+            chosen_regime_for_episode = {
+                'name': f"Custom IV @ {forced_atm_iv}",
+                'mu': 0.00001, 'omega': 0.000002, 'alpha': 0.05, 'beta': 0.92, 'overnight_vol_multiplier': 1.1,
+                'atm_iv': forced_atm_iv,
+                'far_otm_put_iv': forced_atm_iv * 1.5,
+                'far_otm_call_iv': forced_atm_iv * 0.9,
+            }
+        
+        # PRIORITY 2: If no forced IV, check if we are in historical mode.
+        elif self._cfg.price_source == 'historical':
+            # Use the 'Normal' regime as a consistent, sensible baseline for all historical runs.
+            # This prevents random, high-volatility IVs from polluting historical tests.
+            chosen_regime_for_episode = next((reg for reg in self.regimes if reg['name'] == 'Normal (Medium Vol, Bullish)'), self.regimes[0])
+
+        # PRIORITY 3: If not forced and not historical, it must be a GARCH run. Select randomly.
         else:
-            self.current_iv_regime_index = self.np_random.integers(0, len(self.regimes))
-        self._update_market_rules_for_regime()
+            if self.iv_stationary_dist is not None:
+                self.current_iv_regime_index = np.random.choice(len(self.regimes), p=self.iv_stationary_dist)
+            else:
+                self.current_iv_regime_index = random.randint(0, len(self.regimes) - 1)
+            chosen_regime_for_episode = self.regimes[self.current_iv_regime_index]
+
+        # Now that the one true regime is chosen, update all managers with it for consistency.
+        self._update_market_rules_for_regime(override_regime=chosen_regime_for_episode)
         
-        self.price_manager.reset(self.total_steps)
-        self.iv_bin_index = self.np_random.integers(0, len(self.market_rules_manager.iv_bins['call']['0']))
+        # The PriceActionManager still needs the regime to know its name for logging.
+        self.price_manager.reset(self.total_steps, chosen_regime=chosen_regime_for_episode)
         
+        self.iv_bin_index = random.randint(0, len(self.market_rules_manager.iv_bins['call']['0']) - 1)
+       
         # --- 3. THE DEFINITIVE FIX: Prioritized Initial State Setup ---
         
         # First, ensure the PortfolioManager is initialized, as it's needed for all paths.
@@ -403,9 +434,16 @@ class OptionsZeroGameEnv(gym.Env):
             self.portfolio_manager.iv_calculator = self._get_dynamic_iv
 
     # <<< NEW: Create a helper to generate the skew table on the fly >>>
-    def _update_market_rules_for_regime(self):
-        """Generates and applies the skew table for the current IV regime."""
-        chosen_regime = self.regimes[self.current_iv_regime_index]
+    def _update_market_rules_for_regime(self, override_regime: dict = None):
+        """
+        Generates and applies the skew table for the current IV regime.
+        MODIFIED: Can now accept an 'override_regime' for deterministic evaluations.
+        """
+        if override_regime:
+            chosen_regime = override_regime
+        else:
+            chosen_regime = self.regimes[self.current_iv_regime_index]
+        
         self.current_iv_regime_name = chosen_regime['name']
         
         episode_skew_table = generate_dynamic_iv_skew_table(

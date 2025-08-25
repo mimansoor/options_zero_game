@@ -96,7 +96,7 @@ def calculate_statistics(results: list, strategy_name: str) -> dict:
     risk_free_return_per_episode = (1 + ANNUAL_RISK_FREE_RATE)**(EPISODE_LENGTH_DAYS / TRADING_DAYS_PER_YEAR) - 1
     
     # The risk-free P&L is based on the initial capital. Using the config default.
-    initial_capital = main_config.env.initial_cash
+    initial_capital = main_config.env.portfolio_manager.initial_cash
     risk_free_pnl_per_episode = initial_capital * risk_free_return_per_episode
 
     # 1. Sharpe Ratio

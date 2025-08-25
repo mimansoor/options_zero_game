@@ -150,7 +150,7 @@ def evaluate_transformers(X_raw, y_vol, y_dir, device):
         num_heads=TransformerConfig['num_heads'], num_layers=vol_params['num_layers'],
         output_dim=vol_params['output_dim']
     ).to(device)
-    vol_model.load_state_dict(torch.load(os.path.join(TransformerConfig['model_save_path'], 'volatility_expert.pth'), map_location=device))
+    vol_model.load_state_dict(torch.load(os.path.join(TransformerConfig['model_save_path'], 'volatility_expert.pth'), map_location=device, weights_only=True))
     vol_model.eval()
 
     with torch.no_grad():
@@ -176,7 +176,7 @@ def evaluate_transformers(X_raw, y_vol, y_dir, device):
         num_heads=TransformerConfig['num_heads'], num_layers=dir_params['num_layers'],
         gru_layers=dir_params['gru_layers'], output_dim=dir_params['output_dim']
     ).to(device)
-    dir_model.load_state_dict(torch.load(os.path.join(TransformerConfig['model_save_path'], 'directional_expert.pth'), map_location=device))
+    dir_model.load_state_dict(torch.load(os.path.join(TransformerConfig['model_save_path'], 'directional_expert.pth'), map_location=device, weights_only=True))
     dir_model.eval()
 
     with torch.no_grad():

@@ -1380,46 +1380,43 @@ class PortfolioManager:
     def _price_legs(self, legs: List[Dict], current_price: float, iv_bin_index: int, check_short_rule: bool = False) -> List[Dict] or None:
         """
         Calculates the entry premium for a list of legs.
-        MODIFIED: Now with extensive debugging prints.
+        MODIFIED: Now supports an optional 'entry_premium' override. If a leg
+        dictionary contains this key, its value will be used directly instead
+        of being calculated via Black-Scholes.
         """
-        # <<< --- DEBUG PRINT 1: Entry Point --- >>>
-        #print(f"\n[DEBUG] --- Entering _price_legs ---")
-        #print(f"[DEBUG] check_short_rule = {check_short_rule}")
-        #print(f"[DEBUG] Legs to price ({len(legs)} total):")
-        #for leg in legs:
-            #print(f"  -> {leg}")
-
         atm_price = self.market_rules_manager.get_atm_price(current_price)
         priced_legs = []
-        for i, leg in enumerate(legs):
-            try:
-                offset = round((leg['strike_price'] - atm_price) / self.strike_distance)
-                vol = self.iv_calculator(offset, leg['type'])
-                greeks = self.bs_manager.get_all_greeks_and_price(current_price, leg['strike_price'], leg['days_to_expiry'], vol, leg['type'] == 'call')
-                
-                is_opening_a_long_position = (leg['direction'] == 'long')
-                entry_premium = self.bs_manager.get_price_with_spread(greeks['price'], is_buy=is_opening_a_long_position, bid_ask_spread_pct=self.bid_ask_spread_pct)
+        for leg in legs:
+            # Always work with a copy to avoid side effects on the original list
+            new_leg = leg.copy()
 
-                # <<< --- DEBUG PRINT 2: Pricing Details --- >>>
-                #print(f"[DEBUG] Leg {i+1}: {leg['direction']} {leg['type']} @ {leg['strike_price']:.2f} | Calculated Premium = {entry_premium:.4f}")
+            # <<< --- THE DEFINITIVE FIX IS HERE --- >>>
+            # Check if the user has provided a manual entry premium.
+            if 'entry_premium' in new_leg and new_leg['entry_premium'] is not None:
+                # If a premium is provided, we skip the Black-Scholes calculation for this leg.
+                # The user's value is treated as the source of truth.
+                pass 
+            else:
+                # If no premium is provided, calculate it using the standard market logic.
+                try:
+                    offset = round((new_leg['strike_price'] - atm_price) / self.strike_distance)
+                    vol = self.iv_calculator(offset, new_leg['type'])
+                    greeks = self.bs_manager.get_all_greeks_and_price(current_price, new_leg['strike_price'], new_leg['days_to_expiry'], vol, new_leg['type'] == 'call')
+                    
+                    is_opening_a_long_position = (new_leg['direction'] == 'long')
+                    calculated_premium = self.bs_manager.get_price_with_spread(greeks['price'], is_buy=is_opening_a_long_position, bid_ask_spread_pct=self.bid_ask_spread_pct)
+                    new_leg['entry_premium'] = calculated_premium
+                except Exception as e:
+                    print(f"[ERROR] in _price_legs calculation: {e}")
+                    return None # Abort if any leg fails pricing
 
-                if check_short_rule and not is_opening_a_long_position:
-                    if entry_premium < self.close_short_leg_on_profit_threshold:
-                        # <<< --- DEBUG PRINT 3: Failure Point (Rule) --- >>>
-                        #print(f"[DEBUG] !!! RULE VIOLATION: Short leg premium {entry_premium:.4f} is below threshold {self.close_short_leg_on_profit_threshold}. Aborting.")
-                        return None
+            # This rule applies regardless of whether the premium was calculated or provided.
+            if check_short_rule and new_leg['direction'] == 'short':
+                if new_leg['entry_premium'] < self.close_short_leg_on_profit_threshold:
+                    return None
 
-                new_leg = leg.copy()
-                new_leg['entry_premium'] = entry_premium
-                priced_legs.append(new_leg)
-            except Exception as e:
-                # <<< --- DEBUG PRINT 4: Failure Point (Exception) --- >>>
-                print(f"[DEBUG] !!! EXCEPTION during pricing leg {i+1}: {e}")
-                traceback.print_exc()
-                return None
+            priced_legs.append(new_leg)
         
-        # <<< --- DEBUG PRINT 5: Success Point --- >>>
-        #print(f"[DEBUG] --- _price_legs successful. Returning {len(priced_legs)} legs. ---")
         return priced_legs
 
     def _prepare_legs_for_numba(self, legs: List[Dict]) -> np.ndarray:

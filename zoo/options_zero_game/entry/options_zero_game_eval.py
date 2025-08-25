@@ -64,10 +64,10 @@ if __name__ == "__main__":
     # Force the evaluator to use the pure Python MCTS implementation, which
     # respects the Python-level seeds, rather than the non-deterministic C++ version.
     # We must check if the policy key exists before trying to modify it.
-    if 'policy' not in eval_main_config:
-        eval_main_config.policy = {}
-    eval_main_config.policy.mcts_ctree = False
-    print("--- MCTS OVERRIDE: Forcing Python MCTS for deterministic evaluation. ---")
+    #if 'policy' not in eval_main_config:
+    #    eval_main_config.policy = {}
+    #eval_main_config.policy.mcts_ctree = False
+    #print("--- MCTS OVERRIDE: Forcing Python MCTS for deterministic evaluation. ---")
 
     # --- Standard Evaluation Setup ---
     eval_create_config.env.type = 'log_replay'
@@ -98,26 +98,34 @@ if __name__ == "__main__":
     if args.portfolio_setup_file:
         print(f"--- Custom Portfolio Setup Detected from file: {args.portfolio_setup_file} ---")
         try:
-            # Check if the file exists before trying to open it
             if not os.path.exists(args.portfolio_setup_file):
                 raise FileNotFoundError(f"The specified file was not found: {args.portfolio_setup_file}")
 
             with open(args.portfolio_setup_file, 'r') as f:
-                parsed_portfolio = json.load(f)
+                setup_data = json.load(f)
+            
+            # 1. Validate the new object-based format.
+            if not isinstance(setup_data, dict) or 'legs' not in setup_data:
+                raise ValueError("JSON file must be an object with a 'legs' key.")
+            if not isinstance(setup_data['legs'], list):
+                raise ValueError("The 'legs' key must contain a list of leg dictionaries.")
+            
+            # 2. Inject the portfolio definition from the 'legs' key.
+            eval_main_config.env.forced_initial_portfolio = setup_data['legs']
+            print(f"Successfully parsed and will set up {len(setup_data['legs'])} leg(s) at Step 0.")
+            
+            # 3. Inject the optional ATM IV override if it exists.
+            if 'atm_iv' in setup_data:
+                forced_iv = float(setup_data['atm_iv'])
+                if forced_iv > 0:
+                    eval_main_config.env.forced_atm_iv = forced_iv
+                    print(f"Successfully parsed and will force ATM IV to {forced_iv}%.")
 
-            if not isinstance(parsed_portfolio, list):
-                raise ValueError("JSON file must contain a list of leg dictionaries.")
-
-            # Inject the parsed portfolio definition into the environment config.
-            eval_main_config.env.forced_initial_portfolio = parsed_portfolio
-            print(f"Successfully parsed and will set up {len(parsed_portfolio)} leg(s) at Step 0.")
-
-            # A forced portfolio overrides any forced opening strategy.
             if args.strategy:
                 print("(INFO) --portfolio_setup_file overrides --strategy.")
                 eval_main_config.env.forced_opening_strategy_name = None
 
-        except (json.JSONDecodeError, FileNotFoundError, ValueError) as e:
+        except (json.JSONDecodeError, FileNotFoundError, ValueError, TypeError) as e:
             print(f"FATAL: Could not process portfolio setup file. Error: {e}")
             exit(1)
 

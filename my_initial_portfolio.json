@@ -1,23 +1,17 @@
-[
-  {
-    "type": "put",
-    "direction": "short",
-    "strike_price": 20500
-  },
-  {
-    "type": "put",
-    "direction": "short",
-    "strike_price": 20500
-  },
-  {
-    "type": "call",
-    "direction": "short",
-    "strike_price": 20500
-  },
-  {
-    "type": "call",
-    "direction": "short",
-    "strike_price": 20500
-  }
-
-]
+{
+  "atm_iv": 26.5,
+  "legs": [
+    {
+      "type": "put",
+      "direction": "short",
+      "strike_price": 20000,
+      "entry_premium": 416.9
+    },
+    {
+      "type": "call",
+      "direction": "short",
+      "strike_price": 20000,
+      "entry_premium": 416.5
+    }
+  ]
+}
