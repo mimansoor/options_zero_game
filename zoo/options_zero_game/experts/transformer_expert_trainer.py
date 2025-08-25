@@ -1,5 +1,5 @@
 # zoo/options_zero_game/experts/transformer_expert_trainer.py
-# <<< DEFINITIVE SOTA VERSION >>>
+# <<< DEFINITIVE SOTA VERSION with "Council of Experts" Architecture >>>
 
 import torch
 import torch.nn as nn
@@ -10,8 +10,11 @@ import glob
 import os
 import math
 import random
+import joblib # <-- Import joblib to load LightGBM models
 from tqdm import tqdm
 from torch.utils.data import DataLoader, TensorDataset
+# Import the feature engineering function from the other trainer
+from zoo.options_zero_game.experts.holy_trinity_trainer import create_holy_trinity_features_and_targets, CONFIG as HolyTrinityConfig
 
 # ==============================================================================
 #                            CONFIGURATION
@@ -19,21 +22,20 @@ from torch.utils.data import DataLoader, TensorDataset
 CONFIG = {
     "data_path": "zoo/options_zero_game/data/market_data_cache",
     "model_save_path": "zoo/options_zero_game/experts/",
-
     "embedding_dim": 128,
     "num_heads": 4,
     "dropout": 0.1,
 
     "volatility_expert_params": {
         "num_layers": 3,
-        "input_dim": 2,
+        "input_dim": 2, # [log_return, volatility]
         "output_dim": 1,
     },
+    # <<< --- UPDATED: The new directional expert configuration --- >>>
     "directional_expert_params": {
-        "num_layers": 2, # Note: Fewer Transformer layers are often better in a hybrid
-        "gru_layers": 2,
-        "input_dim": 2 + 128, # base_features + vol_embedding
-        "output_dim": 3,
+        "num_layers": 4, # A slightly deeper model for the complex features
+        "input_dim": 128 + 1 + 3, # 128 (vol_embed) + 1 (ema_pred) + 3 (rsi_probs) = 132
+        "output_dim": 3, # DOWN, NEUTRAL, UP
     },
 
     "sequence_length": 60,
@@ -51,125 +53,145 @@ CONFIG = {
 # ==============================================================================
 
 class TransformerExpert(nn.Module):
-    """Standard Transformer Encoder for the Volatility Analyst."""
+    # This class is unchanged, but will now be used for BOTH models.
     def __init__(self, input_dim, model_dim, num_heads, num_layers, output_dim, dropout=0.1):
         super().__init__()
         self.model_dim = model_dim
         self.input_embedding = nn.Linear(input_dim, model_dim)
-
-        # <<< THE FIX: The self.pos_encoder line has been completely removed >>>
-
         encoder_layers = nn.TransformerEncoderLayer(d_model=model_dim, nhead=num_heads, dropout=dropout, batch_first=True)
         self.transformer_encoder = nn.TransformerEncoder(encoder_layers, num_layers=num_layers)
         self.output_head = nn.Linear(model_dim, output_dim)
 
     def forward(self, src: torch.Tensor) -> torch.Tensor:
         embedding = self.encode(src)
-        return self.output_head(embedding)
+        # For classification, we use the last token's output for prediction
+        return self.output_head(embedding[:, -1, :])
 
     def encode(self, src: torch.Tensor) -> torch.Tensor:
-        # The logic is simpler and cleaner without the unused encoder.
         x = self.input_embedding(src) * math.sqrt(self.model_dim)
-        x = self.transformer_encoder(x)
-        return x.mean(dim=1)
+        return self.transformer_encoder(x)
 
-class HybridGRUTransformerExpert(nn.Module):
-    """SOTA GRU-Transformer Hybrid for the Directional Strategist."""
-    def __init__(self, input_dim, model_dim, num_heads, num_layers, gru_layers, output_dim, dropout=0.1):
-        super().__init__()
-        self.model_dim = model_dim
-
-        self.gru = nn.GRU(
-            input_size=input_dim,
-            hidden_size=model_dim,
-            num_layers=gru_layers,
-            batch_first=True
-        )
-
-        encoder_layers = nn.TransformerEncoderLayer(d_model=model_dim, nhead=num_heads, dropout=dropout, batch_first=True)
-        self.transformer_encoder = nn.TransformerEncoder(encoder_layers, num_layers=num_layers)
-        self.output_head = nn.Linear(model_dim, output_dim)
-
-    def forward(self, src: torch.Tensor) -> torch.Tensor:
-        gru_out, _ = self.gru(src)
-        transformer_out = self.transformer_encoder(gru_out)
-        final_embedding = transformer_out[:, -1, :] # Use last hidden state
-        return self.output_head(final_embedding)
+# The HybridGRUTransformerExpert is no longer needed for this new architecture.
 
 # ==============================================================================
 #                         DATA PREPARATION PIPELINE
 # ==============================================================================
-def create_sequences(df: pd.DataFrame, config: dict, device: torch.device, vol_expert_model: TransformerExpert = None):
+def create_sequences(df: pd.DataFrame, config: dict, device: torch.device, model_type: str, vol_expert_model=None, ema_expert=None, rsi_expert=None):
     """
-    Creates sequences and targets for training. This is a robust, multi-pass version.
+    Creates sequences and targets. This function now has two distinct modes.
     """
-    # --- Pass 1: Calculate all base features and targets on the full DataFrame ---
-    df['log_return'] = np.log(df['Close'] / df['Close'].shift(1))
-    df['volatility'] = df['log_return'].rolling(window=config['volatility_period']).std()
-
-    df['volatility_target'] = df['volatility'].shift(-config['prediction_horizon'])
-
+    # --- Universal Target Engineering ---
     future_return = np.log(df['Close'].shift(-config['prediction_horizon']) / df['Close'])
     conditions = [future_return > config['directional_threshold'], future_return < -config['directional_threshold']]
     choices = [2, 0] # 2=UP, 0=DOWN
     df['direction_target'] = np.select(conditions, choices, default=1) # 1=NEUTRAL
 
-    df.dropna(inplace=True)
-    df.reset_index(drop=True, inplace=True)
+    df['log_return'] = np.log(df['Close'] / df['Close'].shift(1))
+    df['volatility'] = df['log_return'].rolling(window=config['volatility_period']).std()
+    df['volatility_target'] = df['volatility'].shift(-config['prediction_horizon'])
 
-    if len(df) < config['sequence_length']:
-        return [], [], []
+    # --- MODE 1: Training the Volatility Expert (uses raw price data) ---
+    if model_type == 'volatility':
+        df.dropna(subset=['log_return', 'volatility', 'volatility_target'], inplace=True)
+        df.reset_index(drop=True, inplace=True)
+        if len(df) < config['sequence_length']: return [], [], []
 
-    # --- Pass 2: Create the raw numpy arrays for sequences and targets ---
-    base_features = ['log_return', 'volatility']
-    feature_data = df[base_features].values
-    vol_targets = df['volatility_target'].values
-    dir_targets = df['direction_target'].values
+        feature_data = df[['log_return', 'volatility']].values
+        targets = df['volatility_target'].values
+        X, y = [], []
+        for i in range(len(df) - config['sequence_length']):
+            X.append(feature_data[i : i + config['sequence_length']])
+            y.append(targets[i + config['sequence_length'] - 1])
+        return np.array(X), np.array(y)
 
-    X_raw, y_vol, y_dir = [], [], []
-    for i in range(len(df) - config['sequence_length']):
-        X_raw.append(feature_data[i : i + config['sequence_length']])
-        y_vol.append(vol_targets[i + config['sequence_length'] - 1])
-        y_dir.append(dir_targets[i + config['sequence_length'] - 1])
+    # --- MODE 2: Training the Directional Expert (uses other experts' outputs) ---
+    elif model_type == 'directional':
+        if not all([vol_expert_model, ema_expert, rsi_expert]):
+            raise ValueError("All three expert models must be provided for directional training.")
 
-    X_raw = np.array(X_raw)
+        # a) Create the features needed for the Holy Trinity models
+        ht_df = create_holy_trinity_features_and_targets(df.copy())
 
-    # --- Pass 3: If in directional mode, perform hierarchical fusion ---
-    if vol_expert_model:
-        # print("Performing hierarchical feature fusion...") # You can uncomment for debugging
+        # b) Combine all necessary data and drop NaNs
+        df = df.join(ht_df[[col for col in ht_df.columns if 'lag' in col]])
+        df.dropna(inplace=True)
+        df.reset_index(drop=True, inplace=True)
+        if len(df) < config['sequence_length']: return [], [], []
+
+        # c) Pre-calculate all expert predictions for the entire DataFrame
         vol_expert_model.eval()
-        
         with torch.no_grad():
-            # <<< THE FIX: Create the tensor and immediately move it to the correct device >>>
-            X_raw_tensor = torch.FloatTensor(X_raw).to(device)
-            
-            vol_embeddings = vol_expert_model.encode(X_raw_tensor).cpu().numpy() # Move back to CPU for numpy
-        
-        vol_embeddings_tiled = np.expand_dims(vol_embeddings, axis=1)
-        vol_embeddings_tiled = np.tile(vol_embeddings_tiled, (1, config['sequence_length'], 1))
+            # Create sequences of raw features for the vol expert
+            raw_vol_features = df[['log_return', 'volatility']].values
+            vol_sequences = np.array([raw_vol_features[i:i+config['sequence_length']] for i in range(len(df) - config['sequence_length'])])
 
-        X_fused = np.concatenate([X_raw, vol_embeddings_tiled], axis=2)
-        return X_fused, np.array(y_vol), np.array(y_dir)
-    else:
-        return X_raw, np.array(y_vol), np.array(y_dir)
+            # Get embeddings for all sequences in one batch
+            vol_embeddings = vol_expert_model.encode(torch.FloatTensor(vol_sequences).to(device)).cpu().numpy()
+
+        ht_feature_names = [f'log_return_lag_{i}' for i in range(1, 31)] + [f'rsi_lag_{i}' for i in range(1, 31)]
+        ht_features = df[ht_feature_names].values
+
+        ema_preds = ema_expert.predict(ht_features).reshape(-1, 1)
+        rsi_probs = rsi_expert.predict_proba(ht_features)
+
+        # d) Assemble the final sequences from the pre-calculated expert outputs
+        X, y_dir = [], []
+        num_samples = len(df) - config['sequence_length']
+
+        for i in range(num_samples):
+            # The input for each timestep is the concatenated expert opinions at that time
+            ema_sequence = ema_preds[i : i + config['sequence_length']]
+            rsi_sequence = rsi_probs[i : i + config['sequence_length']]
+
+            # The volatility embedding is for the whole sequence, so we use the pre-calculated one
+            vol_embedding_for_sequence = vol_embeddings[i]
+
+            # We need to tile the embedding to match the sequence length
+            vol_embedding_tiled = np.tile(vol_embedding_for_sequence.mean(axis=0), (config['sequence_length'], 1))
+
+            # Concatenate to form the final feature vector for the sequence
+            combined_sequence = np.concatenate([vol_embedding_tiled, ema_sequence, rsi_sequence], axis=1)
+            X.append(combined_sequence)
+            y_dir.append(df['direction_target'].iloc[i + config['sequence_length'] - 1])
+
+        return np.array(X), np.array(y_dir)
 
 # ==============================================================================
 #                              MAIN TRAINING SCRIPT
 # ==============================================================================
 def main(model_type: str):
-    """
-    Main function to orchestrate the training process. This version uses the
-    appropriate SOTA model for each expert.
-    """
-    # --- 1. Setup ---
     print(f"--- Starting Training for: {model_type.upper()} EXPERT ---")
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
 
-    # --- 2. Define Model and Optimizer ---
+    # --- Load prerequisite models ---
+    vol_expert_for_fusion = None
+    ema_expert = None
+    rsi_expert = None
+
+    if model_type == 'directional':
+        try:
+            print("Loading prerequisite expert models for directional training...")
+            # Load Volatility Transformer
+            vol_params = CONFIG['volatility_expert_params']
+            vol_expert_for_fusion = TransformerExpert(
+                input_dim=vol_params['input_dim'], model_dim=CONFIG['embedding_dim'],
+                num_heads=CONFIG['num_heads'], num_layers=vol_params['num_layers'],
+                output_dim=vol_params['output_dim']
+            ).to(device)
+            vol_expert_for_fusion.load_state_dict(torch.load(os.path.join(CONFIG['model_save_path'], 'volatility_expert.pth'), weights_only=True))
+
+            # Load Holy Trinity Models
+            ema_expert = joblib.load(os.path.join(CONFIG['model_save_path'], 'ema_expert.joblib'))
+            rsi_expert = joblib.load(os.path.join(CONFIG['model_save_path'], 'rsi_expert.joblib'))
+            print("All prerequisite models loaded successfully.")
+        except FileNotFoundError as e:
+            print(f"FATAL ERROR: Could not load a prerequisite model. Please ensure volatility, ema, and rsi experts are trained first. Details: {e}")
+            return
+
+    # --- Define Model and Optimizer ---
     if model_type == 'volatility':
         params = CONFIG['volatility_expert_params']
-        # Use the standard Transformer for the proven volatility task
         model = TransformerExpert(
             input_dim=params['input_dim'], model_dim=CONFIG['embedding_dim'],
             num_heads=CONFIG['num_heads'], num_layers=params['num_layers'],
@@ -178,77 +200,46 @@ def main(model_type: str):
         criterion = nn.MSELoss()
     elif model_type == 'directional':
         params = CONFIG['directional_expert_params']
-        # Use the new, more powerful SOTA Hybrid model for the difficult directional task
-        model = HybridGRUTransformerExpert(
+        # The directional expert now also uses the standard Transformer architecture
+        model = TransformerExpert(
             input_dim=params['input_dim'], model_dim=CONFIG['embedding_dim'],
             num_heads=CONFIG['num_heads'], num_layers=params['num_layers'],
-            gru_layers=params['gru_layers'], output_dim=params['output_dim'],
-            dropout=CONFIG['dropout']
+            output_dim=params['output_dim'], dropout=CONFIG['dropout']
         ).to(device)
         criterion = nn.CrossEntropyLoss()
     else:
         raise ValueError("Invalid model_type specified.")
-        
+
     optimizer = torch.optim.Adam(model.parameters(), lr=CONFIG['lr'])
     model.train()
 
-    # --- 3. Training Loop with Streaming Data Processing ---
+    # --- Training Loop ---
     print(f"\nStarting training for {CONFIG['epochs']} epochs...")
     all_files = glob.glob(os.path.join(CONFIG['data_path'], "*.csv"))
-    
-    vol_expert_for_fusion = None # Will be loaded if needed
 
     for epoch in range(CONFIG['epochs']):
         epoch_loss = 0.0
         num_batches = 0
         random.shuffle(all_files)
-        
-        # Load the vol expert once per epoch if in directional mode
-        if model_type == 'directional' and vol_expert_for_fusion is None:
-            vol_params = CONFIG['volatility_expert_params']
-            try:
-                # We need to load the *standard* TransformerExpert here for fusion
-                vol_expert_for_fusion = TransformerExpert(
-                    input_dim=vol_params['input_dim'], model_dim=CONFIG['embedding_dim'],
-                    num_heads=CONFIG['num_heads'], num_layers=vol_params['num_layers'],
-                    output_dim=vol_params['output_dim']
-                ).to(device)
-                vol_expert_for_fusion.load_state_dict(torch.load(os.path.join(CONFIG['model_save_path'], 'volatility_expert.pth')))
-                print("Successfully loaded pre-trained Volatility Expert for feature generation.")
-            except FileNotFoundError:
-                print("ERROR: Could not find 'volatility_expert.pth'. Please train the volatility model first.")
-                return
 
         file_iterator = tqdm(all_files, desc=f"Epoch {epoch+1}/{CONFIG['epochs']}")
         for f in file_iterator:
-            df = pd.read_csv(f)
-            # ... (Robust data cleaning) ...
-            close_col_name = df.columns[1] if 'Date' in df.columns else df.columns[0]
-            df.rename(columns={close_col_name: 'Close'}, inplace=True)
-            df['Close'] = pd.to_numeric(df['Close'], errors='coerce')
-            df.dropna(subset=['Close'], inplace=True)
+            df = pd.read_csv(f, index_col='Date', parse_dates=True)
+            df.rename(columns={df.columns[0]: 'Close'}, inplace=True)
             df = df[df['Close'] > 0]
-            df.reset_index(drop=True, inplace=True)
-            
-            if len(df) <= CONFIG['sequence_length'] + CONFIG['prediction_horizon']:
+            if len(df) <= CONFIG['sequence_length'] + HolyTrinityConfig['lookback_window'] + 5:
                 continue
 
             # Process ONE file at a time
-            X, y_vol, y_dir = create_sequences(df.copy(), CONFIG, device, vol_expert_for_fusion)
-            
-            if len(X) == 0:
-                continue
+            X, y = create_sequences(df.copy(), CONFIG, device, model_type, vol_expert_for_fusion, ema_expert, rsi_expert)
+            if len(X) == 0: continue
 
-            # Select the correct target for this training run
-            y = y_dir if model_type == 'directional' else y_vol
+            # Select the correct target type
             y_tensor = torch.LongTensor(y) if model_type == 'directional' else torch.FloatTensor(y).view(-1, 1)
-
-            # Create a DataLoader for just this file's data
             X_tensor = torch.FloatTensor(X)
             dataset = TensorDataset(X_tensor, y_tensor)
             data_loader = DataLoader(dataset, batch_size=CONFIG['batch_size'], shuffle=True)
-            
-            # Train on the batches from this single file
+
             for inputs, targets in data_loader:
                 inputs, targets = inputs.to(device), targets.to(device)
                 optimizer.zero_grad()
@@ -258,15 +249,13 @@ def main(model_type: str):
                 optimizer.step()
                 epoch_loss += loss.item()
                 num_batches += 1
-        
-        # --- 4. Log Epoch Results ---
+
         if num_batches > 0:
             avg_epoch_loss = epoch_loss / num_batches
             print(f"Epoch {epoch+1}/{CONFIG['epochs']} complete. Average Loss: {avg_epoch_loss:.6f}")
         else:
             print(f"Epoch {epoch+1}/{CONFIG['epochs']} complete. No valid data processed.")
 
-    # --- 5. Save Final Model ---
     save_path = os.path.join(CONFIG['model_save_path'], f'{model_type}_expert.pth')
     torch.save(model.state_dict(), save_path)
     print(f"\nTraining complete. Final model saved to '{save_path}'")

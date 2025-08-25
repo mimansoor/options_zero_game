@@ -121,13 +121,10 @@ class OptionsZeroGameEnv(gym.Env):
         # Add a flag to track if this specific instance has been reset yet.
         self._has_printed_setup_info = False
 
-        # The scaling factor is now proportional to a "standard" unit of P&L:
-        # the max profit from a 1-strike-wide vertical spread.
-        self.pnl_scaling_factor = self._cfg.strike_distance * self._cfg.lot_size
-        # Add a failsafe for weird configs
-        if self.pnl_scaling_factor <= 0:
-            self.pnl_scaling_factor = 1000 # Fallback to the old default
-        
+        # portfolio_manager, which is not created yet.
+        # We will move this logic to the reset method.
+        self.pnl_scaling_factor = self._cfg.get('pnl_scaling_factor', 1000) # Use a default for now.
+       
         # The environment now knows its own role.
         self.is_eval_mode = self._cfg.get('is_eval_mode', False)
 
@@ -280,6 +277,13 @@ class OptionsZeroGameEnv(gym.Env):
         self.final_eval_reward = 0.0
         self.illegal_action_count = 0
 
+        # The scaling factor is now proportional to a "standard" unit of P&L:
+        # the max profit from a 1-strike-wide vertical spread.
+        self.pnl_scaling_factor = self._cfg.strike_distance * self._cfg.lot_size
+        # Add a failsafe for weird configs
+        if self.pnl_scaling_factor <= 0:
+            self.pnl_scaling_factor = 1000 # Fallback to the old default
+ 
         # --- 2. Determine Episode Length & Market Conditions (Must happen before portfolio setup) ---
         forced_length = self._cfg.get('forced_episode_length', 0)
         if forced_length > 0:

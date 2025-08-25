@@ -29,6 +29,9 @@ def calculate_statistics(results: list, strategy_name: str) -> dict:
     avg_loss = sum(losses) / num_losses if num_losses > 0 else 0.0
     expectancy = ((win_rate / 100) * avg_profit) + ((1 - win_rate / 100) * avg_loss)
 
+    temp_env_cfg = copy.deepcopy(main_config.env)
+    temp_env = zoo.options_zero_game.envs.options_zero_game_env.OptionsZeroGameEnv(cfg=temp_env_cfg)
+
     # <<< --- THE DEFINITIVE FIX AT THE SOURCE --- >>>
     sum_of_wins = sum(wins)
     sum_of_losses = abs(sum(losses))
@@ -96,7 +99,8 @@ def calculate_statistics(results: list, strategy_name: str) -> dict:
     risk_free_return_per_episode = (1 + ANNUAL_RISK_FREE_RATE)**(EPISODE_LENGTH_DAYS / TRADING_DAYS_PER_YEAR) - 1
     
     # The risk-free P&L is based on the initial capital. Using the config default.
-    initial_capital = main_config.env.portfolio_manager.initial_cash
+    initial_capital = temp_env._cfg.initial_cash
+    print(f"DEBUG: Initialial_capital = {initial_capital}")
     risk_free_pnl_per_episode = initial_capital * risk_free_return_per_episode
 
     # 1. Sharpe Ratio

@@ -16,7 +16,7 @@ sys.path.insert(0, project_root)
 
 # Import all necessary calculation functions from the worker script
 from zoo.options_zero_game.entry.strategy_analyzer import (
-    get_valid_strategies, calculate_statistics, calculate_trader_score, calculate_elo_ratings
+    get_valid_strategies, calculate_statistics, calculate_trader_score, calculate_elo_ratings, calculate_pnl_weighted_elo
 )
 
 def run_full_analysis():
@@ -43,11 +43,19 @@ def run_full_analysis():
         action='store_true',
         help="Run the analysis in a fully deterministic mode by disabling the C++ MCTS. Slower but reproducible."
     )
+    # <<< --- NEW: Add the debug flag --- >>>
+    parser.add_argument(
+        '--debug_one',
+        action='store_true',
+        help="Run the analysis for only ONE sample strategy for rapid debugging of the full pipeline."
+    )
     args, remaining_argv = parser.parse_known_args()
 
     print(f"--- [ {datetime.now()} ] Starting Full Analysis Cycle ---")
     if args.deterministic:
         print("--- RUNNING IN DETERMINISTIC MODE ---")
+
+    if args.debug_one: print("--- RUNNING IN DEBUG_ONE MODE (SINGLE STRATEGY) ---")
 
     try:
         # 1. Initial Cleanup
@@ -86,8 +94,12 @@ def run_full_analysis():
             json.dump([], f)
 
         # 5. Get the clean list of strategies
-        strategy_list = get_valid_strategies()
-        print(f"Found {len(strategy_list)} strategies to analyze.")
+        if args.debug_one:
+            strategy_list = ['OPEN_SHORT_STRADDLE']
+            print("DEBUG_ONE: Analyzing only one strategy: OPEN_SHORT_STRADDLE")
+        else:
+            strategy_list = get_valid_strategies()
+            print(f"Found {len(strategy_list)} strategies to analyze.")
 
         # 6. The Main Loop: Run one analysis per strategy
         for strategy in tqdm(strategy_list, desc="Overall Progress"):
