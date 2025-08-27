@@ -57,12 +57,7 @@ class BiasMeter:
         
         embedding_magnitude_score = math.tanh(np.linalg.norm(vol_embedding))
 
-        # --- Secondary Signal: The Volatility Mismatch ---
-        vol_mismatch_signal = self.obs[self.idx['VOL_MISMATCH_NORM']]
-        
-        # --- Final Score (Weighted Average) ---
-        final_score = (embedding_magnitude_score * 0.7) + (vol_mismatch_signal * 0.3)
-        return final_score
+        return embedding_magnitude_score
 
     @property
     def directional_bias(self) -> str:
