@@ -117,7 +117,6 @@ class PriceActionManager:
         self.features_df = calculate_advanced_features(pd.DataFrame({'Close': self.price_path}, index=pd.to_datetime(pd.RangeIndex(start=0, stop=len(self.price_path), step=1), unit='D')))
         self.current_price = self.price_path[0]
 
-    # <<< --- THE DEFINITIVE FIX: RESTORE THE MISSING METHODS --- >>>
     def _generate_historical_price_path(self):
         """Generates a price path from a random slice of historical data."""
         forced_symbol = self._cfg.get('forced_historical_symbol')

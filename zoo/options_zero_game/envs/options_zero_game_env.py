@@ -344,17 +344,30 @@ class OptionsZeroGameEnv(gym.Env):
         # PRIORITY 3: If not forced and not historical, it must be a GARCH run. Select randomly.
         else:
             if self.iv_stationary_dist is not None:
-                self.current_iv_regime_index = np.random.choice(len(self.regimes), p=self.iv_stationary_dist)
+                self.current_iv_regime_index = self.np.random.choice(len(self.regimes), p=self.iv_stationary_dist)
             else:
-                self.current_iv_regime_index = random.randint(0, len(self.regimes) - 1)
+                self.current_iv_regime_index = self.np_random.integers(0, len(self.regimes))
             chosen_regime_for_episode = self.regimes[self.current_iv_regime_index]
 
-        # Now that the one true regime is chosen, update all managers with it for consistency.
+        # After determining the regime, we MUST synchronize the environment's state index.
+        # We find the index of the chosen regime in our master list.
+        # This handles all cases: forced, historical, and random GARCH.
+        try:
+            # Find the index by matching the unique 'name' of the regime.
+            self.current_iv_regime_index = [i for i, r in enumerate(self.regimes) if r['name'] == chosen_regime_for_episode['name']][0]
+        except IndexError:
+            # This is a failsafe for the custom_regime case, where the name won't be in the list.
+            # In this case, the index doesn't matter as transitions are disabled anyway.
+            if not self.is_custom_iv_episode:
+                print(f"WARNING: Could not find chosen regime '{chosen_regime_for_episode['name']}' in master list. Defaulting to index 0.")
+                self.current_iv_regime_index = 0
+        
+        # --- Now that state is consistent, update all managers ---
         self._update_market_rules_for_regime(override_regime=chosen_regime_for_episode)
-        # The PriceActionManager still needs the regime to know its name for logging.
         self.price_manager.reset(self.total_steps, chosen_regime=chosen_regime_for_episode)
-        self.iv_bin_index = random.randint(0, len(self.market_rules_manager.iv_bins['call']['0']) - 1)
-       
+        
+        self.iv_bin_index = self.np_random.integers(0, len(self.market_rules_manager.iv_bins['call']['0']))
+      
         # --- 3. THE DEFINITIVE FIX: Prioritized Initial State Setup ---
         
         # First, ensure the PortfolioManager is initialized, as it's needed for all paths.
