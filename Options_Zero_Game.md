@@ -47,7 +47,7 @@ graph TD
     *   **GARCH or Historical Price Paths**: The `PriceActionManager` can generate new, unique price paths using a GARCH model or create episodes from random slices of a decade's worth of historical ticker data.
 
 ### Sophisticated & Intelligent Action Space
-The agent possesses a powerful set of over 200 actions, including not just opening trades, but intelligently managing them.
+The agent possesses a powerful set of approximatly 100 actions, including not just opening trades, but intelligently managing them.
 *   **Complex Openings**: Opens a wide variety of strategies, from naked calls/puts to delta-neutral strangles, iron condors, and advanced structures like Jade Lizards.
 *   **Risk-Based Adjustments**: A full suite of delta management actions that allow the agent to re-center its strategy (`RECENTER_VOLATILITY_POSITION`), roll a challenged leg to a more neutral strike (`HEDGE_PORTFOLIO_BY_ROLLING_LEG`), or add a new leg to neutralize delta (`HEDGE_DELTA_WITH_ATM_OPTION`).
 *   **Strategy Morphing**: A full suite of `CONVERT_TO_*` actions that allow the agent to dynamically transform its position's structure (e.g., Strangle → Iron Condor, Butterfly → Vertical Spread) to adapt to changing market conditions.
@@ -205,7 +205,7 @@ cd ../../../.. # Return to project root
 ```
 Then, run the Python server to view the results.
 ```bash
-python3 zoo/options_zero_game/serve.py
+python3 zoo/options_zero_game/entry/visualizer_replayer.py
 ```
 Now, open your web browser to `http://<your-ip-address>:5001` to view the replay.
 
