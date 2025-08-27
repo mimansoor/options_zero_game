@@ -270,6 +270,10 @@ class OptionsZeroGameEnv(gym.Env):
         self.fixed_profit_target_pnl: float = 0.0
         self.initial_net_premium: float = 0.0
 
+        # Pre-calculate the daily opportunity cost penalty once at initialization.
+        daily_risk_free_rate = self._cfg.risk_free_rate / 365.25
+        self.daily_opportunity_cost_penalty = self._cfg.initial_cash * daily_risk_free_rate
+
     def seed(self, seed: int, dynamic_seed: int = None) -> List[int]:
         self.np_random, seed = seeding.np_random(seed)
         random.seed(seed)
@@ -758,13 +762,11 @@ class OptionsZeroGameEnv(gym.Env):
         self._update_realized_vol()
         self.portfolio_manager.update_positions_after_time_step(time_decay_days, self.price_manager.current_price, self.iv_bin_index, self.current_step)
 
-        # <<< NEW: Call the debug print method here >>>
-        # This will only print if the env is in eval_mode.
         self.portfolio_manager.debug_print_portfolio(
             current_price=self.price_manager.current_price,
             step=self.current_step,
             day=self.current_day_index,
-            action_taken=action_taken # Pass the action name here
+            action_taken=action_taken
         )
 
         # --- FINAL, THREE-TIERED TERMINATION LOGIC ---
@@ -823,14 +825,18 @@ class OptionsZeroGameEnv(gym.Env):
 
         # --- Calculate Reward ---
         equity_after = self.portfolio_manager.get_current_equity(self.price_manager.current_price, self.iv_bin_index)
-        shaped_reward, raw_reward = self._calculate_shaped_reward(equity_before, equity_after)
-        self.final_eval_reward += raw_reward
+        
+        # <<< --- THE DEFINITIVE FIX (Part 1): Calculate the Daily Opportunity Cost --- >>>
+        opportunity_cost_penalty = 0.0
+        # This penalty is applied at the end of each trading day.
+        is_end_of_day = (self.current_step % self.steps_per_day) == 0
+        if is_end_of_day:
+            opportunity_cost_penalty = self.daily_opportunity_cost_penalty
 
-        # Use the stored action info to determine the final reward
-        was_illegal_action = self.last_action_info['was_illegal_action']
-        if final_shaped_reward_override is not None: final_reward = final_shaped_reward_override
-        elif was_illegal_action: final_reward = self._cfg.illegal_action_penalty
-        else: final_reward = shaped_reward
+        # Pass this cost to the reward function.
+        shaped_reward, raw_reward = self._calculate_shaped_reward(equity_before, equity_after, opportunity_cost_penalty)
+        
+        self.final_eval_reward += raw_reward
 
         # --- Prepare and Return Timestep ---
         obs = self._get_observation()
@@ -870,7 +876,6 @@ class OptionsZeroGameEnv(gym.Env):
         assert portfolio_size <= max_size, \
             f"FATAL INVARIANT VIOLATION: Portfolio size ({portfolio_size}) has exceeded max_positions ({max_size}). Action taken: '{action_taken}'"
 
-        # <<< THE FIX: Add the new check for invalid Strategy IDs >>>
         # 2. Check for invalid or temporary Strategy IDs
         if not self.portfolio_manager.portfolio.empty:
             # Check if any leg in the portfolio has a negative strategy_id
@@ -1045,13 +1050,10 @@ class OptionsZeroGameEnv(gym.Env):
         # 3. Return the fully validated final vector
         return final_obs_vec
 
-    def _calculate_shaped_reward(self, equity_before: float, equity_after: float) -> Tuple[float, float]:
+    def _calculate_shaped_reward(self, equity_before: float, equity_after: float, opportunity_cost_penalty: float) -> Tuple[float, float]:
         """
-        Calculates the final shaped reward for the agent. This definitive version
-        includes:
-        1. The raw P&L change (raw_reward).
-        2. A penalty for drawdown from the high-water mark.
-        3. A bonus for preserving existing capital (positive P&L).
+        Calculates the final shaped reward for the agent.
+        MODIFIED: Now includes a penalty for the opportunity cost of capital.
         """
         # --- 1. Calculate Raw P&L Change ---
         raw_reward = equity_after - equity_before
@@ -1063,28 +1065,22 @@ class OptionsZeroGameEnv(gym.Env):
         # --- 3. Calculate the Drawdown Penalty ---
         drawdown_penalty = self._cfg.drawdown_penalty_weight * drawdown
         
-        # --- 4. THE FIX: Calculate the Capital Preservation Bonus ---
+        # --- 4. Calculate the Capital Preservation Bonus ---
         capital_preservation_bonus = 0.0
-        # Check if we are in a profitable state
         current_pnl = equity_after - self._cfg.initial_cash
         if self.capital_preservation_bonus_pct > 0 and current_pnl > 0:
-            # The bonus is a small percentage of the profit being preserved
             capital_preservation_bonus = current_pnl * self.capital_preservation_bonus_pct
             
         # --- 5. Combine Components into the Final Reward ---
-        # The agent's reward is the P&L it made, minus the drawdown risk, plus the bonus for being patient.
-        risk_adjusted_reward = raw_reward - drawdown_penalty + capital_preservation_bonus
+        # The agent's reward is now its P&L, adjusted for risk, and "taxed" by the risk-free rate.
+        risk_adjusted_reward = raw_reward - drawdown_penalty + capital_preservation_bonus - opportunity_cost_penalty
         
         # --- 6. Scale and Squash the Reward ---
-        # Scaling helps stabilize the learning process.
         scaled_reward = risk_adjusted_reward / self.pnl_scaling_factor
-
-        # Defensive Assertion
         if not math.isfinite(scaled_reward):
-            print(f"WARNING: Calculated a non-finite reward. Raw: {raw_reward}, Drawdown: {drawdown_penalty}, Bonus: {capital_preservation_bonus}")
-            scaled_reward = 0.0 # Prevent crash
+            print(f"WARNING: Calculated a non-finite reward. Raw: {raw_reward}, Drawdown: {drawdown_penalty}, Bonus: {capital_preservation_bonus}, OppCost: {opportunity_cost_penalty}")
+            scaled_reward = 0.0
 
-        # tanh squashes the reward to a [-1, 1] range, which is ideal for the MuZero model.
         return math.tanh(scaled_reward), raw_reward
 
     def _calculate_time_decay(self) -> float:

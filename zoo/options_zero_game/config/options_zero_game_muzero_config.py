@@ -115,19 +115,19 @@ UNIFIED_REGIMES = [
 TRAINING_CURRICULUM1 = {
     # === Phase 1: Master Naked Puts (Bullish Premium Selling) ===
     # Give the agent 1 million steps to learn this core concept.
-    0: 'OPEN_SHORT_PUT_ATM-2',
+    0: 'OPEN_SHORT_PUT_ATM-1',
     int(2e5): 'OPEN_SHORT_PUT_ATM-1',
     int(4e5): 'OPEN_SHORT_PUT_ATM+0',
     int(6e5): 'OPEN_SHORT_PUT_ATM+1',
-    int(8e5): 'OPEN_SHORT_PUT_ATM+2',
+    int(8e5): 'OPEN_SHORT_PUT_ATM+1',
 
     # === Phase 2: Master Naked Calls (Bearish Premium Selling) ===
     # Another 1 million steps for the opposite side.
-    int(1e6): 'OPEN_SHORT_CALL_ATM-2',
+    int(1e6): 'OPEN_SHORT_CALL_ATM-1',
     int(1.2e6): 'OPEN_SHORT_CALL_ATM-1',
     int(1.4e6): 'OPEN_SHORT_CALL_ATM+0',
     int(1.6e6): 'OPEN_SHORT_CALL_ATM+1',
-    int(1.8e6): 'OPEN_SHORT_CALL_ATM+2',
+    int(1.8e6): 'OPEN_SHORT_CALL_ATM+1',
 
     # === Phase 3: Master Volatility Selling (Undefined Risk) ===
     # Now that it knows calls and puts, learn to combine them.
@@ -220,20 +220,20 @@ TRAINING_CURRICULUM = {
 
     # === Phase 6: Refine Foundational Naked Call Skills ===
     # Duration: 200k steps each (e.g., 2e6 - 1.8e6)
-    int(17e6): 'OPEN_SHORT_CALL_ATM+2',
+    int(17e6): 'OPEN_SHORT_CALL_ATM+1',
     int(17.2e6): 'OPEN_SHORT_CALL_ATM+1',
     int(17.4e6): 'OPEN_SHORT_CALL_ATM+0',
     int(17.6e6): 'OPEN_SHORT_CALL_ATM-1',
-    int(17.8e6): 'OPEN_SHORT_CALL_ATM-2',
+    int(17.8e6): 'OPEN_SHORT_CALL_ATM-1',
 
     # === Phase 7: Refine Foundational Naked Put Skills ===
     # Duration: 200k steps each
-    int(18e6): 'OPEN_SHORT_PUT_ATM+2',
+    int(18e6): 'OPEN_SHORT_PUT_ATM+1',
     int(18.2e6): 'OPEN_SHORT_PUT_ATM+1',
     int(18.4e6): 'OPEN_SHORT_PUT_ATM+0',
     int(18.6e6): 'OPEN_SHORT_PUT_ATM-1',
     # This phase runs until the end of training
-    int(18.8e6): 'OPEN_SHORT_PUT_ATM-2',
+    int(18.8e6): 'OPEN_SHORT_PUT_ATM-1',
 
     # === Phase 8: Train the Jade/Reverse_Jade/Big_Lizard/Reverse_Big/Put_Ration/Call_Ratio spreads (The Final Phase) ===
     # Duration: 200k steps each
@@ -265,7 +265,7 @@ class CurriculumHolder:
 # This makes the script runnable from anywhere.
 # <<< NEW: Define high-level volatility parameters >>>
 MAX_STRIKE_OFFSET = 50
-AGENT_MAX_OPEN_OFFSET = 2
+AGENT_MAX_OPEN_OFFSET = 1
 ATM_IV = 25.0  # Volatility at the money is 25%
 FAR_OTM_PUT_IV = 50.0 # Volatility for the -30 strike put is 50%
 FAR_OTM_CALL_IV = 20.0 # Volatility for the +30 strike call is 20% (creating a "smirk")
