@@ -103,7 +103,7 @@ class OptionsZeroGameEnv(gym.Env):
         # <<< --- NEW: The Liquidity Window Parameter --- >>>
         # The max number of strikes away from the ATM that the portfolio hedge solver
         # is allowed to search. Prevents rolling to illiquid, far OTM options.
-        hedge_roll_search_width=10, # ATM +/- 10 strikes seems like a reasonable default
+        hedge_roll_search_width=20, # ATM +/- 20 strikes seems like a reasonable default
 
         strategy_name_to_id={}, # Can be left empty, as it's populated from the main config
     )
@@ -117,6 +117,8 @@ class OptionsZeroGameEnv(gym.Env):
     def __init__(self, cfg: dict = None) -> None:
         self._cfg = self.default_config()
         if cfg is not None: self._cfg.update(cfg)
+
+        self.is_custom_iv_episode = False
 
         # Add a flag to track if this specific instance has been reset yet.
         self._has_printed_setup_info = False
@@ -317,9 +319,11 @@ class OptionsZeroGameEnv(gym.Env):
         
         forced_atm_iv = self._cfg.get('forced_atm_iv')
         chosen_regime_for_episode = None
+        self.is_custom_iv_episode = False # Reset the flag for each new episode
 
         # PRIORITY 1: A forced IV setup from the evaluator file. This overrides everything.
         if forced_atm_iv:
+            self.is_custom_iv_episode = True # Set the flag for this episode
             if not self._has_printed_setup_info:
                  print(f"(INFO) Using forced ATM IV of {forced_atm_iv}% for this episode.")
             
@@ -347,10 +351,8 @@ class OptionsZeroGameEnv(gym.Env):
 
         # Now that the one true regime is chosen, update all managers with it for consistency.
         self._update_market_rules_for_regime(override_regime=chosen_regime_for_episode)
-        
         # The PriceActionManager still needs the regime to know its name for logging.
         self.price_manager.reset(self.total_steps, chosen_regime=chosen_regime_for_episode)
-        
         self.iv_bin_index = random.randint(0, len(self.market_rules_manager.iv_bins['call']['0']) - 1)
        
         # --- 3. THE DEFINITIVE FIX: Prioritized Initial State Setup ---
@@ -397,6 +399,10 @@ class OptionsZeroGameEnv(gym.Env):
 
     def _handle_day_change(self):
         """Called when a day passes. Evolves the IV regime using the Markov chain."""
+        # If this is a custom run, do NOT change the regime.
+        if self.is_custom_iv_episode:
+            return
+
         if self.iv_transition_matrix is not None:
             # Get the probability distribution for the next state
             transition_probs = self.iv_transition_matrix[self.current_iv_regime_index]
@@ -529,9 +535,21 @@ class OptionsZeroGameEnv(gym.Env):
             
             self.portfolio_manager._execute_trades(priced_legs, pnl_profile)
             
-            # This is the crucial part that was missing before.
+            # <<< --- THE DEFINITIVE FIX IS HERE --- >>>
             if not self.portfolio_manager.portfolio.empty:
-                self.initial_net_premium = self.portfolio_manager.initial_net_premium
+                # 1. Calculate the net premium directly from the newly created portfolio.
+                new_portfolio = self.portfolio_manager.get_portfolio()
+                per_share_net_premium = sum(
+                    leg['entry_premium'] * (1 if leg['direction'] == 'long' else -1)
+                    for _, leg in new_portfolio.iterrows()
+                )
+                # 2. Store the TRUE initial net premium in the environment, including lot size.
+                self.initial_net_premium = per_share_net_premium * self.portfolio_manager.lot_size
+                
+                # 3. Correctly set the portfolio_manager's attribute for consistency.
+                self.portfolio_manager.initial_net_premium = self.initial_net_premium
+
+                # 4. Now, the profit target logic can safely use this correct value.
                 self.fixed_profit_target_pnl = 0.0
                 stats = self.portfolio_manager.get_raw_portfolio_stats(self.price_manager.start_price, self.iv_bin_index)
                 if self.initial_net_premium < 0: # Credit

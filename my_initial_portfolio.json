@@ -1,17 +1,17 @@
 {
-  "atm_iv": 26.5,
+  "atm_iv": 14.5,
   "legs": [
     {
       "type": "put",
       "direction": "short",
       "strike_price": 20000,
-      "entry_premium": 416.9
+      "entry_premium": 478.02
     },
     {
       "type": "call",
       "direction": "short",
       "strike_price": 20000,
-      "entry_premium": 416.5
+      "entry_premium": 631.06
     }
   ]
 }
