@@ -121,6 +121,9 @@ class OptionsZeroGameEnv(gym.Env):
         # Add a flag to track if this specific instance has been reset yet.
         self._has_printed_setup_info = False
 
+        # <<< --- NEW: Add a variable to hold the portfolio definition --- >>>
+        self.portfolio_to_setup_on_step_0 = None
+
         # portfolio_manager, which is not created yet.
         # We will move this logic to the reset method.
         self.pnl_scaling_factor = self._cfg.get('pnl_scaling_factor', 1000) # Use a default for now.
@@ -142,6 +145,43 @@ class OptionsZeroGameEnv(gym.Env):
         self.regimes = self._cfg.get('unified_regimes', [])
         self.current_iv_regime_name = "N/A" # For logging
         self.current_iv_regime_index = 0 # Start with a default
+
+        # 1. Define the sizes of all embedding blocks FIRST.
+        self.vol_embedding_size = 128
+        self.mlp_embedding_size = 64
+        
+        # 2. THEN, define the layout of the base summary block.
+        self.OBS_IDX = {
+            'PRICE_NORM': 0, 'TIME_NORM': 1, 'PNL_NORM': 2,
+            'LOG_RETURN': 3,
+            'EXPECTED_MOVE_NORM': 4,
+            'PORTFOLIO_DELTA': 5,
+            'PORTFOLIO_GAMMA': 6,
+            'PORTFOLIO_THETA': 7,
+            'PORTFOLIO_VEGA': 8,
+            'PORTFOLIO_MAX_PROFIT_NORM': 9,
+            'PORTFOLIO_MAX_LOSS_NORM': 10,
+            'PORTFOLIO_RR_RATIO_NORM': 11,
+            'PORTFOLIO_PROB_PROFIT': 12,
+            'PORTFOLIO_PROFIT_FACTOR_NORM': 13,
+            'MTM_PNL_HIGH_NORM': 14,
+            'MTM_PNL_LOW_NORM': 15,
+            'DIR_EXPERT_PROB_DOWN': 16,
+            'DIR_EXPERT_PROB_NEUTRAL': 17,
+            'DIR_EXPERT_PROB_UP': 18,
+        }
+       
+        # 3. NOW, we can safely calculate all start indices and total size.
+        base_summary_size = len(self.OBS_IDX)
+        
+        self.OBS_IDX['VOL_EMBEDDING_START'] = base_summary_size
+        self.OBS_IDX['TREND_EMBEDDING_START'] = self.OBS_IDX['VOL_EMBEDDING_START'] + self.vol_embedding_size
+        self.OBS_IDX['OSCILLATOR_EMBEDDING_START'] = self.OBS_IDX['TREND_EMBEDDING_START'] + self.mlp_embedding_size
+        self.OBS_IDX['DEVIATION_EMBEDDING_START'] = self.OBS_IDX['OSCILLATOR_EMBEDDING_START'] + self.mlp_embedding_size
+        self.OBS_IDX['CYCLE_EMBEDDING_START'] = self.OBS_IDX['DEVIATION_EMBEDDING_START'] + self.mlp_embedding_size
+        self.OBS_IDX['PATTERN_EMBEDDING_START'] = self.OBS_IDX['CYCLE_EMBEDDING_START'] + self.mlp_embedding_size
+        
+        self.summary_block_size = self.OBS_IDX['PATTERN_EMBEDDING_START'] + self.mlp_embedding_size
         
         # <<< NEW: Load the Markov Chain model >>>
         try:
@@ -165,11 +205,6 @@ class OptionsZeroGameEnv(gym.Env):
         self.action_space_size = len(self.actions_to_indices)
         self._action_space = spaces.Discrete(self.action_space_size)
 
-        # 1. Define the sizes of the different observation blocks
-        self.vol_embedding_size = 128
-        self.dir_prediction_size = 1
-        
-        # 2. Define the layout of the per-position block
         self.POS_IDX = {
             'IS_OCCUPIED': 0, 'TYPE_NORM': 1, 'DIRECTION_NORM': 2, 'STRIKE_DIST_NORM': 3,
             'DAYS_HELD_NORM': 4, 'PROB_OF_PROFIT': 5, 'MAX_PROFIT_NORM': 6, 'MAX_LOSS_NORM': 7,
@@ -178,32 +213,12 @@ class OptionsZeroGameEnv(gym.Env):
         self.PORTFOLIO_STATE_SIZE_PER_POS = len(self.POS_IDX)
         self.positions_block_size = self._cfg.max_positions * self.PORTFOLIO_STATE_SIZE_PER_POS
 
-        # 3. Define the layout of the main summary/market block
-        self.OBS_IDX = {
-            'PRICE_NORM': 0, 'TIME_NORM': 1, 'PNL_NORM': 2, 'VOL_MISMATCH_NORM': 3,
-            'LOG_RETURN': 4, 'MOMENTUM_NORM': 5, 'EXPECTED_MOVE_NORM': 6,
-            'PORTFOLIO_DELTA': 7, 'PORTFOLIO_GAMMA': 8, 'PORTFOLIO_THETA': 9, 'PORTFOLIO_VEGA': 10,
-            'PORTFOLIO_MAX_PROFIT_NORM': 11, 'PORTFOLIO_MAX_LOSS_NORM': 12,
-            'PORTFOLIO_RR_RATIO_NORM': 13, 'PORTFOLIO_PROB_PROFIT': 14,
-            'PORTFOLIO_PROFIT_FACTOR_NORM': 15, 'MTM_PNL_HIGH_NORM': 16, 'MTM_PNL_LOW_NORM': 17,
-            'EXPERT_EMA_RATIO': 18, 'EXPERT_RSI_OVERSOLD': 19,
-            'EXPERT_RSI_NEUTRAL': 20, 'EXPERT_RSI_OVERBOUGHT': 21,
-            'EXPERT_TAIL_RISK_PROB': 22,
-        }
-        
-        # 4. Calculate the TRUE sizes and start indices robustly
-        base_summary_size = len(self.OBS_IDX)
-        self.summary_block_size = base_summary_size + self.vol_embedding_size + self.dir_prediction_size
-
-        # Add start indices to the dictionary for easy lookup and self-documentation
-        self.OBS_IDX['VOL_EMBEDDING_START'] = base_summary_size
-
-        # This is the single source of truth for where the per-position data begins.
+        # The portfolio block starts after the summary block
         self.PORTFOLIO_START_IDX = self.summary_block_size
-        
+
         # The model sees the complete state: the summary block + the positions block.
         self.model_observation_size = self.summary_block_size + self.positions_block_size
-        
+       
         # The full vector passed in the timestep includes the model's observation + the action mask.
         self.framework_vec_size = self.model_observation_size + self.action_space_size
         
@@ -348,58 +363,14 @@ class OptionsZeroGameEnv(gym.Env):
         
         self.fixed_profit_target_pnl = 0.0
         self.initial_net_premium = 0.0
-        forced_portfolio = self._cfg.get('forced_initial_portfolio')
+        self.portfolio_to_setup_on_step_0 = self._cfg.get('forced_initial_portfolio')
 
         # PRIORITY 1: A forced portfolio setup from the evaluator via a JSON file.
-        if forced_portfolio and isinstance(forced_portfolio, list):
+        if self.portfolio_to_setup_on_step_0:
             if not self._has_printed_setup_info:
                 print("(INFO) Setting up forced initial portfolio in environment...")
                 self._has_printed_setup_info = True # Set the flag so it doesn't print again.
-            
-            days_to_expiry_float = self.episode_time_to_expiry * (self.TOTAL_DAYS_IN_WEEK / self.TRADING_DAYS_IN_WEEK)
-            for leg_def in forced_portfolio:
-                leg_def['days_to_expiry'] = days_to_expiry_float
-                leg_def['entry_step'] = 0
 
-            priced_legs = self.portfolio_manager._price_legs(forced_portfolio, self.price_manager.start_price, self.iv_bin_index)
-            
-            if priced_legs:
-                num_legs = len(priced_legs)
-                strategy_key = f'CUSTOM_{num_legs}_LEGS' if num_legs > 1 else 'CUSTOM_HEDGED'
-                strategy_id = self.strategy_name_to_id.get(strategy_key, -1)
-
-                pnl_profile = self.portfolio_manager._calculate_universal_risk_profile(priced_legs, 0.0)
-                pnl_profile['strategy_id'] = strategy_id
-                
-                self.portfolio_manager._execute_trades(priced_legs, pnl_profile)
-
-                # After creating the portfolio, we must initialize the environment's
-                # premium and profit target attributes to prevent premature termination.
-                if not self.portfolio_manager.portfolio.empty:
-                    # 1. Copy the correctly calculated net premium from the manager.
-                    #    The manager's attribute already includes the lot size.
-                    new_portfolio = self.portfolio_manager.get_portfolio()
-                    per_share_net_premium = sum(
-                        leg['entry_premium'] * (1 if leg['direction'] == 'long' else -1)
-                        for _, leg in new_portfolio.iterrows()
-                    )
-                    # 2. Store the TRUE initial net premium, including the lot size.
-                    self.initial_net_premium = per_share_net_premium * self.portfolio_manager.lot_size
-
-                    # 2. Calculate and set the fixed profit target for this episode.
-                    self.fixed_profit_target_pnl = 0.0
-                    stats = self.portfolio_manager.get_raw_portfolio_stats(self.price_manager.start_price, self.iv_bin_index)
-
-                    if self.initial_net_premium < 0: # Credit strategy
-                        credit_tp_pct = self._cfg.get('credit_strategy_take_profit_pct', 0)
-                        if credit_tp_pct > 0:
-                            max_profit = stats.get('max_profit', 0.0)
-                            self.fixed_profit_target_pnl = max_profit * (credit_tp_pct / 100)
-                    elif self.initial_net_premium > 0: # Debit strategy
-                        debit_tp_mult = self._cfg.get('debit_strategy_take_profit_multiple', 0)
-                        if debit_tp_mult > 0:
-                            self.fixed_profit_target_pnl = self.initial_net_premium * debit_tp_mult
-                
             self.forced_opening_strategy_name = None
 
         # PRIORITY 2: A forced opening strategy from the curriculum or evaluator.
@@ -503,32 +474,72 @@ class OptionsZeroGameEnv(gym.Env):
 
     def _get_dynamic_iv(self, offset: int, option_type: str) -> float:
         """
-        Calculates the dynamic IV using the pre-trained Volatility Expert's
-        forward-looking prediction. This is a more realistic and sophisticated
-        approach to modeling implied volatility.
+        Calculates the dynamic IV.
+        MODIFIED: This version now uses the embedding from the new, full
+        Council of Experts pipeline for a more robust prediction.
         """
-        # 1. Get the floor IV from the static skew table.
-        # This preserves the "volatility smile" and provides a safe minimum.
+        # 1. Get the floor IV from the static skew table. This remains the same.
         iv_from_table = self.market_rules_manager.get_implied_volatility(
             offset, option_type, self.iv_bin_index
         )
         
-        # 2. Get the expert's forward-looking volatility prediction.
-        # This value is already calculated and stored in the PriceActionManager every step.
-        predicted_vol = self.price_manager.volatility_transformer_prediction
+        # <<< --- THE DEFINITIVE FIX IS HERE --- >>>
+        # 2. Get the expert's prediction from the new architecture.
+        vol_embedding = self.price_manager.volatility_embedding
         
-        # We need to ensure the predicted vol is a sensible number (e.g., between 5% and 300%)
-        # and has a default value for the initial steps before the expert has enough data.
-        if predicted_vol is None or not (0.05 < predicted_vol < 3.0):
-            # Fallback to a simple default if the expert isn't ready
-            predicted_vol = 0.20 
+        predicted_vol = 0.20 # A safe, neutral default
 
-        # 3. Calculate the dynamic base IV by adding the market's risk premium.
+        # If the embedding has been calculated, derive a prediction from it.
+        if vol_embedding is not None:
+            # The magnitude (L2 norm) of the embedding is a good proxy for volatility intensity.
+            magnitude = np.linalg.norm(vol_embedding)
+            
+            # Scale the magnitude to a realistic IV range (e.g., 5% to 150%).
+            # We use tanh to squash the magnitude into a predictable (0, 1) range first.
+            # Then we scale it to our desired IV range.
+            scaled_magnitude = math.tanh(magnitude)
+            predicted_vol = 0.05 + scaled_magnitude * 1.45 # Maps [0, 1] -> [0.05, 1.50]
+
+        # 3. Add the market's risk premium.
         base_iv = predicted_vol + self.volatility_premium_abs
         
-        # 4. Return the greater of the dynamic base and the static floor from the table.
-        # This elegantly combines the forward-looking ATM prediction with the static skew.
+        # 4. Return the greater of the dynamic base and the static floor.
         return max(base_iv, iv_from_table)
+
+    # <<< --- NEW: A dedicated helper method for setting up the portfolio --- >>>
+    def _setup_initial_portfolio(self, portfolio_def: list):
+        """
+        Prices and executes the creation of a portfolio from a definition list.
+        This is called only on Step 0 when a setup file is provided.
+        """
+        days_to_expiry_float = self.episode_time_to_expiry * (self.TOTAL_DAYS_IN_WEEK / self.TRADING_DAYS_IN_WEEK)
+        for leg_def in portfolio_def:
+            leg_def['days_to_expiry'] = days_to_expiry_float
+            leg_def['entry_step'] = 0
+
+        priced_legs = self.portfolio_manager._price_legs(portfolio_def, self.price_manager.start_price, self.iv_bin_index)
+        
+        if priced_legs:
+            num_legs = len(priced_legs)
+            strategy_key = f'CUSTOM_{num_legs}_LEGS' if num_legs > 1 else 'CUSTOM_HEDGED'
+            strategy_id = self.strategy_name_to_id.get(strategy_key, -1)
+
+            pnl_profile = self.portfolio_manager._calculate_universal_risk_profile(priced_legs, 0.0)
+            pnl_profile['strategy_id'] = strategy_id
+            
+            self.portfolio_manager._execute_trades(priced_legs, pnl_profile)
+            
+            # This is the crucial part that was missing before.
+            if not self.portfolio_manager.portfolio.empty:
+                self.initial_net_premium = self.portfolio_manager.initial_net_premium
+                self.fixed_profit_target_pnl = 0.0
+                stats = self.portfolio_manager.get_raw_portfolio_stats(self.price_manager.start_price, self.iv_bin_index)
+                if self.initial_net_premium < 0: # Credit
+                    credit_tp_pct = self._cfg.get('credit_strategy_take_profit_pct', 0)
+                    if credit_tp_pct > 0: self.fixed_profit_target_pnl = stats.get('max_profit', 0.0) * (credit_tp_pct / 100)
+                elif self.initial_net_premium > 0: # Debit
+                    debit_tp_mult = self._cfg.get('debit_strategy_take_profit_multiple', 0)
+                    if debit_tp_mult > 0: self.fixed_profit_target_pnl = self.initial_net_premium * debit_tp_mult
 
     def _take_action_on_state(self, action: int):
         """
@@ -536,6 +547,21 @@ class OptionsZeroGameEnv(gym.Env):
         updates the portfolio,
         It does NOT advance time or the market price.
         """
+
+        # Intercept the call at Step 0 if a portfolio setup is pending.
+        if self.current_step == 0 and self.portfolio_to_setup_on_step_0:
+            self._setup_initial_portfolio(self.portfolio_to_setup_on_step_0)
+            
+            # Set the action info for a clean log file, then exit this method.
+            self.last_action_info = {
+                'final_action': -1, # Use a dummy action index
+                'final_action_name': 'SETUP_PORTFOLIO_FROM_FILE',
+                'total_steps_in_episode': self.total_steps,
+                'was_illegal_action': False
+            }
+            self.portfolio_manager.sort_portfolio()
+            return # Skip all other action handling
+
         # 1. Determine the final action and if the agent's attempt was illegal.
         final_action, was_illegal_action = self._handle_action(action)
         final_action_name = self.indices_to_actions.get(final_action, 'INVALID')
@@ -778,21 +804,32 @@ class OptionsZeroGameEnv(gym.Env):
         # --- Prepare and Return Timestep ---
         obs = self._get_observation()
         action_mask = self._get_true_action_mask() if not self._cfg.ignore_legal_actions else np.ones(self.action_space_size, dtype=np.int8)
-        meter = BiasMeter(obs[:self.model_observation_size], self.OBS_IDX)
 
+        # --- Create the base info dictionary ---
         info = {
             'price': self.price_manager.current_price,
             'eval_episode_return': self.final_eval_reward,
             'illegal_actions_in_episode': self.illegal_action_count,
             'was_illegal_action': bool(was_illegal_action),
             'executed_action_name': self.last_action_info['final_action_name'],
-            'directional_bias': meter.directional_bias,
-            'volatility_bias': meter.volatility_bias,
             'portfolio_stats': self.portfolio_manager.get_raw_portfolio_stats(self.price_manager.current_price, self.iv_bin_index),
             'total_steps_in_episode': self.total_steps,
             'market_regime': self.current_iv_regime_name,
             'termination_reason': termination_reason
         }
+
+        # <<< --- THE DEFINITIVE FIX IS HERE --- >>>
+        # Only calculate and add the BiasMeter diagnostics if we are in evaluation mode.
+        if self.is_eval_mode:
+            meter = BiasMeter(obs[:self.model_observation_size], self.OBS_IDX)
+            info['directional_bias'] = meter.directional_bias
+            info['volatility_bias'] = meter.volatility_bias
+        else:
+            # During training, we provide default placeholder values.
+            info['directional_bias'] = "N/A (Training)"
+            info['volatility_bias'] = "N/A (Training)"
+
+        if terminated: info['episode_duration'] = self.current_step
 
         # --- FINAL STATE VALIDATION (The Definitive Safety Net) ---
         
@@ -867,11 +904,8 @@ class OptionsZeroGameEnv(gym.Env):
         vec[self.OBS_IDX['PRICE_NORM']] = (self.price_manager.current_price / self.price_manager.start_price) - 1.0
         vec[self.OBS_IDX['TIME_NORM']] = (self.total_steps - self.current_step) / self.total_steps
         vec[self.OBS_IDX['PNL_NORM']] = math.tanh(self.portfolio_manager.get_total_pnl(self.price_manager.current_price, self.iv_bin_index) / self._cfg.initial_cash)
-        iv_anchor = self.price_manager.episode_iv_anchor
-        vec[self.OBS_IDX['VOL_MISMATCH_NORM']] = math.tanh((self.realized_vol_series[self.current_step] / iv_anchor) - 1.0) if iv_anchor > 0 else 0.0
         log_return = math.log(self.price_manager.current_price / (self.price_manager.price_path[self.current_step - 1] + 1e-8)) if self.current_step > 0 else 0.0
         vec[self.OBS_IDX['LOG_RETURN']] = np.clip(log_return, -0.1, 0.1) * 10
-        vec[self.OBS_IDX['MOMENTUM_NORM']] = self.price_manager.momentum_signal
 
         # --- NEW: Calculate the Market's Expected Move ---
         current_price = self.price_manager.current_price
@@ -909,15 +943,7 @@ class OptionsZeroGameEnv(gym.Env):
         vec[self.OBS_IDX['PORTFOLIO_RR_RATIO_NORM']] = math.tanh(summary['rr_ratio'])
         # Probability is already in a [0, 1] range, we can scale it to [-1, 1]
         vec[self.OBS_IDX['PORTFOLIO_PROB_PROFIT']] = (summary['prob_profit'] * 2) - 1.0
-
-        # --- NEW: Add Holy Trinity predictions ---
-        vec[self.OBS_IDX['EXPERT_EMA_RATIO']] = math.tanh(self.price_manager.expert_ema_pred - 1.0)
-        
-        rsi_probs = self.price_manager.expert_rsi_pred
-        vec[self.OBS_IDX['EXPERT_RSI_OVERSOLD']] = rsi_probs[0]
-        vec[self.OBS_IDX['EXPERT_RSI_NEUTRAL']] = rsi_probs[1]
-        vec[self.OBS_IDX['EXPERT_RSI_OVERBOUGHT']] = rsi_probs[2]
-        
+       
         # 2. Get the complete portfolio risk profile in one go.
         stats = self.portfolio_manager.get_raw_portfolio_stats(self.price_manager.current_price, self.iv_bin_index)
 
@@ -931,17 +957,36 @@ class OptionsZeroGameEnv(gym.Env):
         vec[self.OBS_IDX['MTM_PNL_HIGH_NORM']] = high_water_mark_norm
         vec[self.OBS_IDX['MTM_PNL_LOW_NORM']] = max_drawdown_norm
 
-        # The value is already a probability [0, 1], so we can scale it to [-1, 1]
-        # to match the range of other features.
-        if self.price_manager.directional_prediction is not None:
-             vec[self.OBS_IDX['EXPERT_TAIL_RISK_PROB']] = (self.price_manager.directional_prediction * 2) - 1.0
+        # 1. Add the final probabilities from the Master Directional Expert
+        dir_probs = self.price_manager.directional_prediction_probs
+        if dir_probs is not None and len(dir_probs) == 3:
+            vec[self.OBS_IDX['DIR_EXPERT_PROB_DOWN']] = dir_probs[0]
+            vec[self.OBS_IDX['DIR_EXPERT_PROB_NEUTRAL']] = dir_probs[1]
+            vec[self.OBS_IDX['DIR_EXPERT_PROB_UP']] = dir_probs[2]
+        else: # Failsafe
+            vec[self.OBS_IDX['DIR_EXPERT_PROB_DOWN']] = 0.33
+            vec[self.OBS_IDX['DIR_EXPERT_PROB_NEUTRAL']] = 0.34
+            vec[self.OBS_IDX['DIR_EXPERT_PROB_UP']] = 0.33
 
-        # Add Volatility Embedding
-        if self.price_manager.volatility_embedding is not None:
-            start_idx = self.OBS_IDX['VOL_EMBEDDING_START']
-            end_idx = start_idx + self.vol_embedding_size
-            vec[start_idx:end_idx] = self.price_manager.volatility_embedding
+        # 2. Add the embedding from EACH expert in the council
+        expert_embeddings = {
+            'volatility': self.price_manager.volatility_embedding,
+            'trend': self.price_manager.trend_embedding,
+            'oscillator': self.price_manager.oscillator_embedding,
+            'deviation': self.price_manager.deviation_embedding,
+            'cycle': self.price_manager.cycle_embedding,
+            'pattern': self.price_manager.pattern_embedding,
+        }
+
+        for name, embedding in expert_embeddings.items():
+            start_idx_key = f'{name.upper()}_EMBEDDING_START'
+            embedding_size = self.vol_embedding_size if name == 'volatility' else self.mlp_embedding_size
             
+            if embedding is not None and len(embedding) == embedding_size:
+                start_idx = self.OBS_IDX[start_idx_key]
+                end_idx = start_idx + embedding_size
+                vec[start_idx:end_idx] = embedding           
+
         # Per-Position State
         self.portfolio_manager.get_positions_state(vec, self.PORTFOLIO_START_IDX, self.PORTFOLIO_STATE_SIZE_PER_POS, self.POS_IDX, self.price_manager.current_price, self.iv_bin_index, self.current_step, self.total_steps)
 

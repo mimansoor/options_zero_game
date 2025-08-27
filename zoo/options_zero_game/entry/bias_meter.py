@@ -1,5 +1,5 @@
 # zoo/options_zero_game/entry/bias_meter.py
-# <<< DEFINITIVE SOTA VERSION >>>
+# <<< DEFINITIVE SOTA VERSION - SYNCHRONIZED WITH "COUNCIL OF EXPERTS" ARCHITECTURE >>>
 
 import numpy as np
 import math
@@ -7,7 +7,7 @@ import math
 class BiasMeter:
     """
     A definitive, SOTA Bias Meter that synthesizes the agent's observation
-    vector, including the powerful Transformer expert outputs, into a
+    vector, including the powerful outputs from the "Council of Experts", into a
     human-readable market bias.
     """
     def __init__(self, observation_vector: np.ndarray, obs_idx_map: dict):
@@ -20,72 +20,47 @@ class BiasMeter:
 
     def _calculate_directional_score(self) -> float:
         """
-        Calculates a directional score. For the SOTA version, this relies
-        almost entirely on the powerful Tail Risk Expert.
+        Calculates a directional score based on the final probabilities from
+        the master Directional Transformer.
         
         Score Interpretation:
-        - Highly Negative: Strong bearish signal (high tail risk).
+        - Highly Negative: Strong bearish signal (high P(DOWN)).
         - Around Zero: Neutral.
-        - Positive: Mildly bullish signal (low tail risk).
+        - Highly Positive: Strong bullish signal (high P(UP)).
         """
-        # --- Define Weights ---
-        # The new Tail Risk expert is our most powerful directional signal.
-        # Its prediction should dominate the calculation.
-        WEIGHT_TAIL_RISK = 0.8
-        
-        # The simple momentum signal is a good secondary confirmation.
-        WEIGHT_MOMENTUM = 0.2
-        
-        # --- Gather Signals ---
-        # 1. Tail Risk Signal (from the Directional Transformer)
-        # We get the probability of a "DOWN" move. This is a direct bearish signal.
-        # The observation is scaled to [-1, 1], so we need to un-scale it first.
-        tail_risk_prob_scaled = self.obs[self.idx['EXPERT_TAIL_RISK_PROB']]
-        tail_risk_prob = (tail_risk_prob_scaled + 1.0) / 2.0
-        
-        # We want a score from +1 (bullish) to -1 (bearish).
-        # So, we'll use (1 - prob_of_down) and scale it.
-        # A 50% tail risk prob -> 0 score. 100% -> -1 score. 0% -> +1 score.
-        tail_risk_signal = 1.0 - (2 * tail_risk_prob)
+        # <<< --- THE DEFINITIVE FIX IS HERE --- >>>
+        # 1. Get the final probabilities directly from the observation vector.
+        # These are now the primary source of truth for direction.
+        prob_down = self.obs[self.idx['DIR_EXPERT_PROB_DOWN']]
+        prob_up = self.obs[self.idx['DIR_EXPERT_PROB_UP']]
 
-        # 2. Current Momentum Signal (unchanged)
-        momentum_signal = self.obs[self.idx['MOMENTUM_NORM']]
+        # 2. The score is simply the net difference between the bullish and bearish probabilities.
+        # This naturally creates a score in the range [-1.0, 1.0].
+        # The old momentum signal is no longer needed, as it was an input to the experts.
+        final_score = prob_up - prob_down
         
-        # --- Calculate Final Score ---
-        final_score = (
-            (tail_risk_signal * WEIGHT_TAIL_RISK) +
-            (momentum_signal * WEIGHT_MOMENTUM)
-        )
-        return final_score
+        return float(final_score)
 
     def _calculate_volatility_score(self) -> float:
         """
-        Calculates a volatility score. The SOTA version uses the powerful
+        Calculates a volatility score. This version still uses the powerful
         128-dim embedding from the Volatility Transformer as its primary input.
+        This logic remains robust and does not need to change.
         """
         # --- Feature Extraction from the Embedding ---
-        # The 128-dim vector is a rich, high-dimensional representation.
-        # A simple, robust way to collapse this into a single "volatility score"
-        # is to calculate its L2 norm (magnitude).
-        # A large magnitude means the model's internal "neurons" are firing
-        # intensely, which usually corresponds to a confident or extreme prediction.
-        
         start_idx = self.idx['VOL_EMBEDDING_START']
-        end_idx = start_idx + 128 # Assuming embedding size is 128
+        # The embedding size is now a class attribute of the env
+        embedding_size = 128 # Assuming vol_embedding_size from env
+        end_idx = start_idx + embedding_size
         
         vol_embedding = self.obs[start_idx:end_idx]
         
-        # Calculate the magnitude (L2 norm) of the embedding vector.
-        # We use tanh to squash the result into a predictable [-1, 1] range.
         embedding_magnitude_score = math.tanh(np.linalg.norm(vol_embedding))
 
         # --- Secondary Signal: The Volatility Mismatch ---
-        # This tells us if the current market is behaving as expected.
-        # A large mismatch is also a sign of potential volatility.
         vol_mismatch_signal = self.obs[self.idx['VOL_MISMATCH_NORM']]
         
         # --- Final Score (Weighted Average) ---
-        # We'll weight the powerful embedding score more heavily.
         final_score = (embedding_magnitude_score * 0.7) + (vol_mismatch_signal * 0.3)
         return final_score
 
@@ -93,10 +68,10 @@ class BiasMeter:
     def directional_bias(self) -> str:
         """Returns the human-readable directional bias."""
         score = self._directional_score
-        if score > 0.6: return "Strongly Bullish"
-        if score > 0.2: return "Mildly Bullish"
-        if score < -0.6: return "Strongly Bearish"
-        if score < -0.2: return "Mildly Bearish"
+        if score > 0.4: return "Strongly Bullish"
+        if score > 0.1: return "Mildly Bullish"
+        if score < -0.4: return "Strongly Bearish"
+        if score < -0.1: return "Mildly Bearish"
         return "Neutral"
     
     @property
