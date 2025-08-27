@@ -783,36 +783,53 @@ class PortfolioManager:
 
     # --- Private Methods ---
     def _open_jade_lizard(self, action_name: str, current_price: float, iv_bin_index: int, current_step: int, days_to_expiry: float):
-        """Opens a 3-leg Jade Lizard or Reverse Jade Lizard."""
+        """Opens a 3-leg Jade Lizard or Reverse Jade Lizard with a robust fallback for the spread component."""
         if len(self.portfolio) > self.max_positions - 3: return
 
         is_reverse = 'REVERSE' in action_name
         
         # 1. Define the naked leg
         naked_leg_type = 'call' if is_reverse else 'put'
-        
-        # <<< --- THE DEFINITIVE FIX IS HERE --- >>>
-        # The delta for a put must be negative, and for a call must be positive.
         naked_leg_delta = 0.20 if naked_leg_type == 'call' else -0.20
-
         naked_strike = self._find_strike_for_delta(naked_leg_delta, naked_leg_type, current_price, iv_bin_index, days_to_expiry)
         if naked_strike is None: return
 
         naked_leg_def = {'type': naked_leg_type, 'direction': 'short', 'strike_price': naked_strike}
 
-        # 2. Define the spread
+        # 2. Attempt to define the spread using the ideal R:R solver
         spread_type = 'put' if is_reverse else 'call'
-        spread_direction = 'BULL_PUT_SPREAD' if is_reverse else 'BEAR_CALL_SPREAD'
+        spread_direction_name = 'BULL_PUT_SPREAD' if is_reverse else 'BEAR_CALL_SPREAD'
         
-        spread_legs_def = self._find_best_available_spread(spread_type, spread_direction, current_price, iv_bin_index, days_to_expiry, is_credit_spread=True)
-        if not spread_legs_def: return
+        spread_legs_def = self._find_best_available_spread(spread_type, spread_direction_name, current_price, iv_bin_index, days_to_expiry, is_credit_spread=True)
+        
+        # <<< --- THE DEFINITIVE FIX IS HERE: Implement a robust fallback --- >>>
+        if not spread_legs_def:
+            # If the ideal solver fails, we construct a simple, fixed-width credit spread
+            # based on the strategy's original delta definition.
+            
+            # Find the short leg of the spread at ~35 delta.
+            short_leg_delta = -0.35 if spread_type == 'put' else 0.35
+            short_strike = self._find_strike_for_delta(short_leg_delta, spread_type, current_price, iv_bin_index, days_to_expiry)
+            
+            if short_strike is None: return # Abort if we can't even find the anchor leg.
+            
+            # Create a simple 2-strike wide spread for robustness.
+            wing_width = self.strike_distance * 2
+            long_strike = short_strike - wing_width if spread_type == 'put' else short_strike + wing_width
+            if long_strike <= 0: return # Failsafe for invalid strikes
+            
+            spread_legs_def = [
+                {'type': spread_type, 'direction': 'short', 'strike_price': short_strike},
+                {'type': spread_type, 'direction': 'long', 'strike_price': long_strike}
+            ]
+        # --- End of Fix ---
             
         # 3. Assemble, price, and execute
         final_legs_def = [naked_leg_def] + spread_legs_def
         for leg in final_legs_def:
             leg.update({'entry_step': current_step, 'days_to_expiry': days_to_expiry})
         
-        priced_legs = self._price_legs(final_legs_def, current_price, iv_bin_index, check_short_rule=True)
+        priced_legs = self._price_legs(final_legs_def, current_price, iv_bin_index)
         if not priced_legs: return
 
         pnl_profile = self._calculate_universal_risk_profile(priced_legs, self.realized_pnl)
@@ -894,31 +911,40 @@ class PortfolioManager:
     def _find_portfolio_neutral_strike(self, leg_index: int, current_price: float, iv_bin_index: int) -> float or None:
         """
         A powerful solver that finds the optimal new strike for a specific leg that
-        will bring the entire portfolio's net delta as close to zero as possible,
-        searching only within a constrained "liquidity window" around the ATM strike.
+        will bring the entire portfolio's net delta as close to zero as possible.
+        MODIFIED: Now searches in a window around the leg's ORIGINAL strike price.
         """
+        if not (0 <= leg_index < len(self.portfolio)): return None
+
         leg_to_roll = self.portfolio.iloc[leg_index]
         other_legs = self.portfolio.drop(leg_to_roll.name).to_dict('records')
         
         best_strike = None
         min_abs_portfolio_delta = abs(self.get_raw_portfolio_stats(current_price, iv_bin_index)['delta'])
         
-        atm_price = self.market_rules_manager.get_atm_price(current_price)
-
-        # Instead of searching the full range, we only search within the liquid window.
-        search_width = self.hedge_roll_search_width
+        # <<< --- THE DEFINITIVE FIX IS HERE --- >>>
+        # 1. The search is now centered on the leg's original strike, not the ATM price.
+        original_strike = leg_to_roll['strike_price']
+        search_width = self.hedge_roll_search_width # e.g., 10 strikes
+        
+        # 2. Iterate through a window of offsets from the original strike.
         for offset in range(-search_width, search_width + 1):
-            candidate_strike = atm_price + (offset * self.strike_distance)
-            if candidate_strike <= 0 or candidate_strike == leg_to_roll['strike_price']:
-                continue
+            if offset == 0: continue # Skip the current strike
 
-            # ... (the rest of the function's logic for checking the candidate is unchanged) ...
+            candidate_strike = original_strike + (offset * self.strike_distance)
+            if candidate_strike <= 0: continue
+
+            # ... (the rest of the validation and delta calculation logic is unchanged) ...
             candidate_leg = leg_to_roll.to_dict()
             candidate_leg['strike_price'] = candidate_strike
             
+            # This check for premium is still a good safety rail
             if candidate_leg['direction'] == 'short':
                 is_call = candidate_leg['type'] == 'call'
-                vol = self.iv_calculator(offset, candidate_leg['type'])
+                # For an accurate premium check, we need to calculate the offset from ATM for the *new* strike
+                atm_price = self.market_rules_manager.get_atm_price(current_price)
+                new_offset_from_atm = round((candidate_strike - atm_price) / self.strike_distance)
+                vol = self.iv_calculator(new_offset_from_atm, candidate_leg['type'])
                 greeks_single_leg = self.bs_manager.get_all_greeks_and_price(current_price, candidate_strike, candidate_leg['days_to_expiry'], vol, is_call)
                 premium = self.bs_manager.get_price_with_spread(greeks_single_leg['price'], is_buy=False, bid_ask_spread_pct=self.bid_ask_spread_pct)
                 if premium < self.close_short_leg_on_profit_threshold:

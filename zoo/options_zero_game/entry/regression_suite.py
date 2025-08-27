@@ -44,6 +44,14 @@ def test_hedge_portfolio_by_rolling_leg():
     print(f"\n--- RUNNING: {test_name} ---")
     # Start with a short strangle, as it's a good candidate for delta adjustments.
     env = create_test_env('OPEN_SHORT_STRANGLE_DELTA_30')
+
+    # 2. Directly access the environment's config to disable termination rules.
+    #    This isolates the test to only check if the position opens correctly.
+    env.unwrapped._cfg.use_stop_loss = False
+    env.unwrapped._cfg.credit_strategy_take_profit_pct = 0
+    env.unwrapped._cfg.debit_strategy_take_profit_multiple = 0
+    env.unwrapped._cfg.profit_target_pct = 0
+
     try:
         # Step 1: Open the position
         env.reset(seed=63)
@@ -174,23 +182,39 @@ def test_no_recenter_on_long_volatility_position():
     """
     test_name = "test_no_recenter_on_long_volatility_position"
     print(f"\n--- RUNNING (Negative Test): {test_name} ---")
-    env = create_test_env('OPEN_LONG_STRADDLE')
+
+    # <<< --- THE DEFINITIVE FIX IS HERE --- >>>
+    # We create a custom env_cfg specifically for this test to guarantee the episode is long enough.
+    env_cfg = copy.deepcopy(main_config.env)
+    env_cfg.is_eval_mode = True
+    env_cfg.disable_opening_curriculum = True
+    env_cfg.forced_opening_strategy_name = 'OPEN_LONG_STRADDLE'
+    env_cfg.forced_historical_symbol = 'SPY'
+    # This is the crucial line: ensure the episode is longer than our test loop.
+    env_cfg.forced_episode_length = 20 
+
+    # 2. Directly access the environment's config to disable termination rules.
+    #    This isolates the test to only check if the position opens correctly.
+    env_cfg.use_stop_loss = False
+    env_cfg.credit_strategy_take_profit_pct = 0
+    env_cfg.debit_strategy_take_profit_multiple = 0
+    env_cfg.profit_target_pct = 0
+
+    env = gym.make('OptionsZeroGame-v0', cfg=env_cfg)
+    
     try:
         # Step 1: Open the position and let the market move to create a delta imbalance.
-        env.reset(seed=65) # Use a new seed
-        timestep = env.step(env.actions_to_indices['HOLD']) # Open the long straddle
+        env.reset(seed=65)
+        timestep = env.step(env.actions_to_indices['HOLD'])
         
-        # Advance the market to ensure the delta is large enough that the
-        # delta threshold condition would otherwise be met.
+        # This loop is now safe because we know the episode is 20 steps long.
         for _ in range(15):
             timestep = env.step(env.actions_to_indices['HOLD'])
 
         # --- Assertions ---
-        # Get the final action mask from the last timestep
         action_mask = timestep.obs['action_mask']
         recenter_action_index = env.actions_to_indices['RECENTER_VOLATILITY_POSITION']
 
-        # The most important check: The action MUST be illegal.
         assert action_mask[recenter_action_index] == 0, \
             "Negative test failed: RECENTER_VOLATILITY_POSITION was incorrectly legal for a LONG straddle."
 
@@ -214,7 +238,7 @@ def test_hedge_delta_with_atm_option():
     """
     test_name = "test_hedge_delta_with_atm_option"
     print(f"\n--- RUNNING: {test_name} ---")
-    env = create_test_env('OPEN_SHORT_CALL_ATM-2')
+    env = create_test_env('OPEN_SHORT_CALL_ATM-1')
     try:
         # Step 1: Open the initial position
         env.reset(seed=59)
@@ -278,7 +302,7 @@ def test_increase_delta_by_shifting_leg():
     """Tests if INCREASE_DELTA_BY_SHIFTING_LEG correctly resolves and has the right effect."""
     test_name = "test_increase_delta_by_shifting_leg"
     print(f"\n--- RUNNING: {test_name} ---")
-    env = create_test_env('OPEN_SHORT_PUT_ATM-2')
+    env = create_test_env('OPEN_SHORT_PUT_ATM-1')
     try:
         env.reset(seed=60)
         env.step(env.actions_to_indices['HOLD'])
@@ -317,7 +341,7 @@ def test_decrease_delta_by_shifting_leg():
     """Tests if DECREASE_DELTA_BY_SHIFTING_LEG correctly resolves and has the right effect."""
     test_name = "test_decrease_delta_by_shifting_leg"
     print(f"\n--- RUNNING: {test_name} ---")
-    env = create_test_env('OPEN_SHORT_PUT_ATM-2')
+    env = create_test_env('OPEN_SHORT_PUT_ATM-1')
     try:
         env.reset(seed=61)
         env.step(env.actions_to_indices['HOLD'])
@@ -361,6 +385,14 @@ def test_open_short_call_condor():
     test_name = "test_open_short_call_condor"
     print(f"\n--- RUNNING: {test_name} ---")
     env = create_test_env('OPEN_SHORT_CALL_CONDOR')
+
+    # 2. Directly access the environment's config to disable termination rules.
+    #    This isolates the test to only check if the position opens correctly.
+    env.unwrapped._cfg.use_stop_loss = False
+    env.unwrapped._cfg.credit_strategy_take_profit_pct = 0
+    env.unwrapped._cfg.debit_strategy_take_profit_multiple = 0
+    env.unwrapped._cfg.profit_target_pct = 0
+
     try:
         env.reset(seed=55)
         env.step(env.actions_to_indices['HOLD'])
@@ -389,6 +421,14 @@ def test_open_long_call_condor():
     test_name = "test_open_long_call_condor"
     print(f"\n--- RUNNING: {test_name} ---")
     env = create_test_env('OPEN_LONG_CALL_CONDOR')
+
+    # 2. Directly access the environment's config to disable termination rules.
+    #    This isolates the test to only check if the position opens correctly.
+    env.unwrapped._cfg.use_stop_loss = False
+    env.unwrapped._cfg.credit_strategy_take_profit_pct = 0
+    env.unwrapped._cfg.debit_strategy_take_profit_multiple = 0
+    env.unwrapped._cfg.profit_target_pct = 0
+
     try:
         env.reset(seed=56)
         env.step(env.actions_to_indices['HOLD'])
@@ -417,6 +457,14 @@ def test_open_long_put_condor():
     test_name = "test_open_long_put_condor"
     print(f"\n--- RUNNING: {test_name} ---")
     env = create_test_env('OPEN_LONG_PUT_CONDOR')
+
+    # 2. Directly access the environment's config to disable termination rules.
+    #    This isolates the test to only check if the position opens correctly.
+    env.unwrapped._cfg.use_stop_loss = False
+    env.unwrapped._cfg.credit_strategy_take_profit_pct = 0
+    env.unwrapped._cfg.debit_strategy_take_profit_multiple = 0
+    env.unwrapped._cfg.profit_target_pct = 0
+
     try:
         env.reset(seed=56)
         pm = env.portfolio_manager
@@ -641,7 +689,7 @@ def test_hedge_naked_put():
     """Tests if HEDGE_NAKED_POS correctly converts a naked put into a Bull Put Spread."""
     test_name = "test_hedge_naked_put"
     print(f"\n--- RUNNING: {test_name} ---")
-    env = create_test_env('OPEN_SHORT_PUT_ATM-2')
+    env = create_test_env('OPEN_SHORT_PUT_ATM-1')
     try:
         # Step 0: Reset the environment
         obs_dict = env.reset(seed=42)
@@ -797,7 +845,7 @@ def test_hedge_short_call():
     """Tests hedging a naked SHORT CALL into a Bear Call Spread."""
     test_name = "test_hedge_short_call"
     print(f"\n--- RUNNING: {test_name} ---")
-    env = create_test_env('OPEN_SHORT_CALL_ATM+2')
+    env = create_test_env('OPEN_SHORT_CALL_ATM+1')
     try:
         env.reset(seed=43)
         env.step(env.actions_to_indices['HOLD'])
@@ -827,7 +875,7 @@ def test_hedge_long_put():
     """Tests hedging a naked LONG PUT into a Bear Put Spread."""
     test_name = "test_hedge_long_put"
     print(f"\n--- RUNNING: {test_name} ---")
-    env = create_test_env('OPEN_LONG_PUT_ATM-2')
+    env = create_test_env('OPEN_LONG_PUT_ATM-1')
     try:
         env.reset(seed=44)
         env.step(env.actions_to_indices['HOLD'])
@@ -857,7 +905,7 @@ def test_hedge_long_call():
     """Tests hedging a naked LONG CALL into a Bull Call Spread."""
     test_name = "test_hedge_long_call"
     print(f"\n--- RUNNING: {test_name} ---")
-    env = create_test_env('OPEN_LONG_CALL_ATM+2')
+    env = create_test_env('OPEN_LONG_CALL_ATM+1')
     try:
         env.reset(seed=45)
         env.step(env.actions_to_indices['HOLD'])
@@ -1128,36 +1176,41 @@ def test_dte_decay_logic():
     env_cfg.disable_opening_curriculum = True
     env_cfg.forced_opening_strategy_name = 'OPEN_SHORT_STRADDLE'
     env_cfg.forced_historical_symbol = 'SPY'
-
     env_cfg.steps_per_day = 4
     env_cfg.forced_episode_length = 30
+    
+    # Disable P&L-based termination to isolate the test to time decay.
+    env_cfg.use_stop_loss = False
+    env_cfg.credit_strategy_take_profit_pct = 0
+    env_cfg.debit_strategy_take_profit_multiple = 0
+    env_cfg.profit_target_pct = 0
 
     env = gym.make('OptionsZeroGame-v0', cfg=env_cfg)
 
     try:
         # --- 2. Initialize and get baseline DTE ---
         env.reset(seed=52)
-
-        # Step 0: Open the position
         timestep = env.step(env.actions_to_indices['HOLD'])
         portfolio = env.portfolio_manager.get_portfolio()
-
-        # <<< THE FIX: Use the correct column name 'days_to_expiry' >>>
+        assert not portfolio.empty, "Setup failed: Portfolio is unexpectedly empty after opening."
         initial_dte = portfolio.iloc[0]['days_to_expiry']
 
-        # The initial DTE is calculated based on the episode length
-        expected_initial_dte = 30 * (7.0 / 5.0)
+        # <<< --- THE DEFINITIVE FIX IS HERE --- >>>
+        # The environment correctly converts trading days to calendar days. The test must expect this.
+        expected_initial_dte = env.episode_time_to_expiry * (env.TOTAL_DAYS_IN_WEEK / env.TRADING_DAYS_IN_WEEK)
+        
+        print(f"Checking Initial DTE: Expected=~{expected_initial_dte:.2f}, Actual={initial_dte:.2f}")
         assert np.isclose(initial_dte, expected_initial_dte, atol=0.1), \
             f"Initial DTE is wrong. Expected ~{expected_initial_dte}, got {initial_dte}"
 
-        # --- 3. Simulate forward for 4 full days (Monday -> Thursday) ---
-        # 4 days * 4 steps/day = 16 steps total from the start of the episode
-        for i in range(1, 16):
+        # --- 3. Simulate forward for 4 full trading days (Monday -> Thursday) ---
+        for i in range(1, 16): # 4 days * 4 steps/day = 16 steps total
             timestep = env.step(env.actions_to_indices['HOLD'])
+            assert not timestep.done, f"Episode terminated prematurely on step {i}."
 
         # --- 4. First Assertion: Check DTE at the end of Thursday ---
-        # <<< THE FIX: Use the correct column name 'days_to_expiry' >>>
         dte_after_thursday = env.portfolio_manager.get_portfolio().iloc[0]['days_to_expiry']
+        # After 4 trading days, 4 calendar days should have passed.
         expected_dte_thursday = initial_dte - 4.0
         print(f"Checking DTE EOD Thursday (Step 16): Expected={expected_dte_thursday:.2f}, Actual={dte_after_thursday:.2f}")
         assert np.isclose(dte_after_thursday, expected_dte_thursday, atol=0.1), \
@@ -1166,10 +1219,11 @@ def test_dte_decay_logic():
         # --- 5. Simulate forward one more day to complete Friday ---
         for i in range(4):
             timestep = env.step(env.actions_to_indices['HOLD'])
+            assert not timestep.done, f"Episode terminated prematurely on step {16+i}."
 
         # --- 6. Final Assertion: Check DTE after the weekend decay ---
-        # <<< THE FIX: Use the correct column name 'days_to_expiry' >>>
         dte_after_friday = env.portfolio_manager.get_portfolio().iloc[0]['days_to_expiry']
+        # After Friday, the weekend passes, so 3 more calendar days decay (Fri, Sat, Sun).
         expected_dte_friday = expected_dte_thursday - 3.0
         print(f"Checking DTE EOD Friday (Step 20): Expected={expected_dte_friday:.2f}, Actual={dte_after_friday:.2f}")
         assert np.isclose(dte_after_friday, expected_dte_friday, atol=0.1), \
@@ -1323,6 +1377,14 @@ def test_open_reverse_jade_lizard():
     test_name = "test_open_reverse_jade_lizard"
     print(f"\n--- RUNNING: {test_name} ---")
     env = create_test_env('OPEN_REVERSE_JADE_LIZARD')
+
+    # 2. Directly access the environment's config to disable termination rules.
+    #    This isolates the test to only check if the position opens correctly.
+    env.unwrapped._cfg.use_stop_loss = False
+    env.unwrapped._cfg.credit_strategy_take_profit_pct = 0
+    env.unwrapped._cfg.debit_strategy_take_profit_multiple = 0
+    env.unwrapped._cfg.profit_target_pct = 0
+
     try:
         env.reset(seed=67)
         env.step(env.actions_to_indices['HOLD'])

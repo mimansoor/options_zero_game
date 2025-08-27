@@ -85,7 +85,7 @@ class OptionsZeroGameEnv(gym.Env):
         # For debit strategies, target is a multiple of the initial debit paid.
         debit_strategy_take_profit_multiple=0, # Target 2x the debit paid (200% return). Set to 0 to disable.
 
-        stop_loss_multiple_of_cost=1.0, # NEW: Added stop loss multiple
+        stop_loss_multiple_of_cost=3.0, # NEW: Added stop loss multiple
         use_stop_loss=True,
         forced_opening_strategy_name=None,
         disable_opening_curriculum=True,
@@ -348,7 +348,7 @@ class OptionsZeroGameEnv(gym.Env):
         # PRIORITY 3: If not forced and not historical, it must be a GARCH run. Select randomly.
         else:
             if self.iv_stationary_dist is not None:
-                self.current_iv_regime_index = self.np.random.choice(len(self.regimes), p=self.iv_stationary_dist)
+                self.current_iv_regime_index = self.np_random.choice(len(self.regimes), p=self.iv_stationary_dist)
             else:
                 self.current_iv_regime_index = self.np_random.integers(0, len(self.regimes))
             chosen_regime_for_episode = self.regimes[self.current_iv_regime_index]
@@ -837,6 +837,12 @@ class OptionsZeroGameEnv(gym.Env):
         shaped_reward, raw_reward = self._calculate_shaped_reward(equity_before, equity_after, opportunity_cost_penalty)
         
         self.final_eval_reward += raw_reward
+
+        # Use the stored action info to determine the final reward
+        was_illegal_action = self.last_action_info['was_illegal_action']
+        if final_shaped_reward_override is not None: final_reward = final_shaped_reward_override
+        elif was_illegal_action: final_reward = self._cfg.illegal_action_penalty
+        else: final_reward = shaped_reward
 
         # --- Prepare and Return Timestep ---
         obs = self._get_observation()
