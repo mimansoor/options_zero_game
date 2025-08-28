@@ -464,6 +464,9 @@ class OptionsZeroGameEnv(gym.Env):
         # 1. Get the state before any changes.
         equity_before = self.portfolio_manager.get_current_equity(self.price_manager.current_price, self.iv_bin_index)
 
+        # Keep track of portfolio state before the action
+        portfolio_was_empty = self.portfolio_manager.portfolio.empty
+
         # --- MODIFIED (Corrected): The new 3-way augmentation logic on Step 0 ---
         action_name = self.indices_to_actions[action]
         original_action_name = action_name # Keep a copy for the log
@@ -488,11 +491,16 @@ class OptionsZeroGameEnv(gym.Env):
                     action = mirrored_action_index # Override the agent's choice
                 # If the mirror is illegal, we do nothing and proceed with the agent's original action.
 
-        # 2. Execute the agent's action on the current state.
+        # 2. Execute the agent's action (or an override) on the current state.
         self._take_action_on_state(action)
         
-        # 3. Advance the market and get the final outcome.
-        # We still log the original action name so we know what the agent intended.
+        # 3. Check if a new portfolio was just created.
+        # This is true if the portfolio WAS empty and is NOW NOT empty.
+        if portfolio_was_empty and not self.portfolio_manager.portfolio.empty:
+            # This block will now run for FORCED openings, SETUP openings, and normal agent OPEN_* actions.
+            self._update_initial_premium_and_targets()
+        
+        # 4. Advance the market and get the final outcome.
         return self._advance_market_and_get_outcome(equity_before, original_action_name)
 
     def _get_dynamic_iv(self, offset: int, option_type: str) -> float:
@@ -529,6 +537,29 @@ class OptionsZeroGameEnv(gym.Env):
         # 4. Return the greater of the dynamic base and the static floor.
         return max(base_iv, iv_from_table)
 
+    def _update_initial_premium_and_targets(self):
+        """
+        A centralized helper to be called WHENEVER a new portfolio is created.
+        It correctly sets the initial premium and calculates profit/loss targets.
+        """
+        if self.portfolio_manager.portfolio.empty:
+            self.initial_net_premium = 0.0
+            self.fixed_profit_target_pnl = 0.0
+            return
+
+        # 1. Get the authoritative initial premium from the manager.
+        self.initial_net_premium = self.portfolio_manager.initial_net_premium
+        
+        # 2. Calculate profit/loss targets based on this premium.
+        self.fixed_profit_target_pnl = 0.0
+        stats = self.portfolio_manager.get_raw_portfolio_stats(self.price_manager.current_price, self.iv_bin_index)
+        if self.initial_net_premium < 0: # Credit
+            credit_tp_pct = self._cfg.get('credit_strategy_take_profit_pct', 0)
+            if credit_tp_pct > 0: self.fixed_profit_target_pnl = stats.get('max_profit', 0.0) * (credit_tp_pct / 100)
+        elif self.initial_net_premium > 0: # Debit
+            debit_tp_mult = self._cfg.get('debit_strategy_take_profit_multiple', 0)
+            if debit_tp_mult > 0: self.fixed_profit_target_pnl = self.initial_net_premium * debit_tp_mult
+
     # <<< --- NEW: A dedicated helper method for setting up the portfolio --- >>>
     def _setup_initial_portfolio(self, portfolio_def: list):
         """
@@ -551,30 +582,8 @@ class OptionsZeroGameEnv(gym.Env):
             pnl_profile['strategy_id'] = strategy_id
             
             self.portfolio_manager._execute_trades(priced_legs, pnl_profile)
-            
-            # <<< --- THE DEFINITIVE FIX IS HERE --- >>>
-            if not self.portfolio_manager.portfolio.empty:
-                # 1. Calculate the net premium directly from the newly created portfolio.
-                new_portfolio = self.portfolio_manager.get_portfolio()
-                per_share_net_premium = sum(
-                    leg['entry_premium'] * (1 if leg['direction'] == 'long' else -1)
-                    for _, leg in new_portfolio.iterrows()
-                )
-                # 2. Store the TRUE initial net premium in the environment, including lot size.
-                self.initial_net_premium = per_share_net_premium * self.portfolio_manager.lot_size
-                
-                # 3. Correctly set the portfolio_manager's attribute for consistency.
-                self.portfolio_manager.initial_net_premium = self.initial_net_premium
-
-                # 4. Now, the profit target logic can safely use this correct value.
-                self.fixed_profit_target_pnl = 0.0
-                stats = self.portfolio_manager.get_raw_portfolio_stats(self.price_manager.start_price, self.iv_bin_index)
-                if self.initial_net_premium < 0: # Credit
-                    credit_tp_pct = self._cfg.get('credit_strategy_take_profit_pct', 0)
-                    if credit_tp_pct > 0: self.fixed_profit_target_pnl = stats.get('max_profit', 0.0) * (credit_tp_pct / 100)
-                elif self.initial_net_premium > 0: # Debit
-                    debit_tp_mult = self._cfg.get('debit_strategy_take_profit_multiple', 0)
-                    if debit_tp_mult > 0: self.fixed_profit_target_pnl = self.initial_net_premium * debit_tp_mult
+            # Call the new centralized helper.
+            self._update_initial_premium_and_targets()
 
     def _take_action_on_state(self, action: int):
         """
@@ -615,33 +624,8 @@ class OptionsZeroGameEnv(gym.Env):
             days_to_expiry_float = (self.episode_time_to_expiry - current_day) * (self.TOTAL_DAYS_IN_WEEK / self.TRADING_DAYS_IN_WEEK)
             days_to_expiry = int(round(days_to_expiry_float))
             self.portfolio_manager.open_strategy(final_action_name, self.price_manager.current_price, self.iv_bin_index, self.current_step, days_to_expiry)
-            # 2. Check if the opening was successful by seeing if the portfolio is now non-empty.
-            if not self.portfolio_manager.portfolio.empty:
-                # 1. Calculate and store the initial net premium for the environment
-                #    immediately after the position is opened.
-                new_portfolio = self.portfolio_manager.get_portfolio()
-                per_share_net_premium = sum(
-                    leg['entry_premium'] * (1 if leg['direction'] == 'long' else -1)
-                    for _, leg in new_portfolio.iterrows()
-                )
-                # 2. Store the TRUE initial net premium, including the lot size.
-                self.initial_net_premium = per_share_net_premium * self.portfolio_manager.lot_size
-
-                # 2. Now, the profit target logic can use this correct, fresh value.
-                stats = self.portfolio_manager.get_raw_portfolio_stats(self.price_manager.current_price, self.iv_bin_index)
-
-                self.fixed_profit_target_pnl = 0.0
-                
-                if self.initial_net_premium < 0: # Credit strategy
-                    credit_tp_pct = self._cfg.get('credit_strategy_take_profit_pct', 0)
-                    if credit_tp_pct > 0:
-                        # 4. Use the max_profit directly from the stats dictionary.
-                        max_profit = stats.get('max_profit', 0.0)
-                        self.fixed_profit_target_pnl = max_profit * (credit_tp_pct / 100)
-                elif self.initial_net_premium > 0: # Debit strategy
-                    debit_tp_mult = self._cfg.get('debit_strategy_take_profit_multiple', 0)
-                    if debit_tp_mult > 0:
-                        self.fixed_profit_target_pnl = self.initial_net_premium * debit_tp_mult
+            # Call the new centralized helper AFTER any opening action.
+            self._update_initial_premium_and_targets()
         elif final_action_name.startswith('CLOSE_POSITION_'):
             self.portfolio_manager.close_position(int(final_action_name.split('_')[-1]), self.price_manager.current_price, self.iv_bin_index, self.current_step)
         elif final_action_name == 'CLOSE_ALL':
@@ -776,19 +760,16 @@ class OptionsZeroGameEnv(gym.Env):
 
         current_pnl = self.portfolio_manager.get_total_pnl(self.price_manager.current_price, self.iv_bin_index)
 
-        # 1. Stop-Loss Rule (Highest Priority)
-        if self._cfg.use_stop_loss and not self.portfolio_manager.portfolio.empty:
-            # The stop loss should be based on the initial debit paid or credit received,
-            # NOT including the brokerage fees, as those are a sunk cost.
-            # We also ensure the cost is a positive number for the calculation.
+        # The stop-loss check is now DISABLED on the very first step of the episode.
+        # It's not possible to be stopped out before the market has moved.
+        if self._cfg.use_stop_loss and not self.portfolio_manager.portfolio.empty and self.current_step > 1:
+            # This logic is now guaranteed to have the correct self.initial_net_premium.
             initial_cost_or_credit = abs(self.initial_net_premium)
             
-            if initial_cost_or_credit > 1e-6: # Only apply stop-loss if there was a meaningful premium
+            if initial_cost_or_credit > 1e-6:
                 stop_loss_level = initial_cost_or_credit * self._cfg.stop_loss_multiple_of_cost
-                
-                # The PNL for the stop-loss check should be the MARK-TO-MARKET PNL of the position,
-                # ignoring realized PNL from brokerage fees.
                 unrealized_pnl = current_pnl - self.portfolio_manager.realized_pnl
+
                 if unrealized_pnl <= -stop_loss_level:
                     terminated_by_rule = True
                     final_shaped_reward_override = -1.0
@@ -889,7 +870,21 @@ class OptionsZeroGameEnv(gym.Env):
             info['directional_bias'] = "N/A (Training)"
             info['volatility_bias'] = "N/A (Training)"
 
-        if terminated: info['episode_duration'] = self.current_step
+        if terminated:
+            # `self.current_step` has already been incremented, so it reflects the total number of steps.
+            num_steps_in_episode = self.current_step
+            info['episode_duration'] = num_steps_in_episode
+            
+            if num_steps_in_episode <= 1:
+                error_message = (
+                    f"\n\n==================== CRITICAL ERROR: Invalid Episode Generated ====================\n"
+                    f"Episode finished after only {num_steps_in_episode} step(s).\n"
+                    f"This is a bug in the environment's termination logic.\n"
+                    f"\n--- FINAL STEP INFO (BLACK BOX RECORDER) ---\n"
+                    f"{info}\n" # The 'info' dict from this step contains the crucial termination_reason
+                    f"====================================================================================\n\n"
+                )
+                raise RuntimeError(error_message)
 
         # --- FINAL STATE VALIDATION (The Definitive Safety Net) ---
         
@@ -1194,10 +1189,10 @@ class OptionsZeroGameEnv(gym.Env):
             for t in ['CALL', 'PUT']:
                 actions[f'OPEN_{d}_{t}_CONDOR'] = i; i+=1
 
-        for w in [1, 2]:
-            for t in ['CALL', 'PUT']:
-                for d in ['LONG', 'SHORT']:
-                    actions[f'OPEN_{d}_{t}_FLY_{w}'] = i; i+=1
+        # The loop for 'w' (width) is removed entirely.
+        for t in ['CALL', 'PUT']:
+            for d in ['LONG', 'SHORT']:
+                actions[f'OPEN_{d}_{t}_FLY'] = i; i+=1 # <-- No more width number
 
         for j in range(self._cfg.max_positions):
             actions[f'CLOSE_POSITION_{j}'] = i; i+=1
@@ -1311,19 +1306,18 @@ class OptionsZeroGameEnv(gym.Env):
             current_strategy_id = portfolio_df.iloc[0]['strategy_id']
             option_type = portfolio_df.iloc[0]['type']
             s_map = self.strategy_name_to_id
-            
-            # Define sets of strategy IDs for easy checking
-            short_strangle_ids = {s_map.get(f'OPEN_SHORT_STRANGLE_DELTA_{delta}') for delta in [15, 20, 25, 30]}
-            short_straddle_id = s_map.get('OPEN_SHORT_STRADDLE')
-            iron_condor_ids = {s_map.get(f'OPEN_{d}_IRON_CONDOR') for d in ['LONG', 'SHORT']}
-            call_condor_ids = {s_map.get(f'OPEN_{d}_CALL_CONDOR') for d in ['LONG', 'SHORT']}
-            put_condor_ids = {s_map.get(f'OPEN_{d}_PUT_CONDOR') for d in ['LONG', 'SHORT']}
-            fly_id = s_map.get('OPEN_SHORT_IRON_FLY')
-            call_fly_ids = {s_map.get(f'OPEN_{d}_CALL_FLY_{w}') for d in ['LONG', 'SHORT'] for w in [1, 2]}
-            put_fly_ids = {s_map.get(f'OPEN_{d}_PUT_FLY_{w}') for d in ['LONG', 'SHORT'] for w in [1, 2]}
-            spread_ids = {s_map.get(f'OPEN_{d}_{t}_SPREAD') for d in ['BULL', 'BEAR'] for t in ['CALL', 'PUT']}
 
-            # <<< --- THE DEFINITIVE FIX: Independent 'if' statements for each action type --- >>>
+            # All sets are now built using the correct internal strategy names.
+            short_strangle_ids = {s_map.get(f'SHORT_STRANGLE_DELTA_{delta}') for delta in [15, 20, 25, 30]}
+            short_straddle_id = s_map.get('SHORT_STRADDLE')
+            iron_condor_ids = {s_map.get(f'{d}_IRON_CONDOR') for d in ['LONG', 'SHORT']}
+            call_condor_ids = {s_map.get(f'{d}_CALL_CONDOR') for d in ['LONG', 'SHORT']}
+            put_condor_ids = {s_map.get(f'{d}_PUT_CONDOR') for d in ['LONG', 'SHORT']}
+            fly_id = s_map.get('SHORT_IRON_FLY')
+            call_fly_ids = {s_map.get(f'{d}_CALL_FLY') for d in ['LONG', 'SHORT']}
+            put_fly_ids = {s_map.get(f'{d}_PUT_FLY') for d in ['LONG', 'SHORT']}
+            spread_ids = {s_map.get(f'{d}_{t}_SPREAD') for d in ['BULL', 'BEAR'] for t in ['CALL', 'PUT']}
+
             
             # --- Rules for 2-Leg Positions ---
             if len(portfolio_df) == 2:

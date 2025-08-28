@@ -963,7 +963,7 @@ def test_convert_call_fly_to_vertical():
     """Tests decomposing a Call Fly into a Bull Call Spread."""
     test_name = "test_convert_call_fly_to_vertical"
     print(f"\n--- RUNNING: {test_name} ---")
-    env = create_test_env('OPEN_SHORT_CALL_FLY_1')
+    env = create_test_env('OPEN_SHORT_CALL_FLY')
     try:
         env.reset(seed=47)
         env.step(env.actions_to_indices['HOLD'])
@@ -989,7 +989,7 @@ def test_convert_put_fly_to_vertical():
     """Tests decomposing a Put Fly into a Bear Put Spread."""
     test_name = "test_convert_put_fly_to_vertical"
     print(f"\n--- RUNNING: {test_name} ---")
-    env = create_test_env('OPEN_SHORT_PUT_FLY_1')
+    env = create_test_env('OPEN_SHORT_PUT_FLY')
     try:
         env.reset(seed=48)
         env.step(env.actions_to_indices['HOLD'])

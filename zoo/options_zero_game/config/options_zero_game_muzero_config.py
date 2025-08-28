@@ -142,13 +142,13 @@ TRAINING_CURRICULUM1 = {
     int(6e6): 'OPEN_SHORT_IRON_CONDOR',
     int(7e6): 'OPEN_SHORT_CALL_CONDOR',
     int(8e6): 'OPEN_SHORT_PUT_CONDOR',
-    int(9e6): 'OPEN_SHORT_CALL_FLY_2', # Butterflies are a good follow-up
+    int(9e6): 'OPEN_SHORT_CALL_FLY', # Butterflies are a good follow-up
 
     # === Phase 6: Learn Risk-Defined Volatility Buying ===
     int(10e6): 'OPEN_LONG_IRON_CONDOR',
     int(11e6): 'OPEN_LONG_CALL_CONDOR',
     int(12e6): 'OPEN_LONG_PUT_CONDOR',
-    int(13e6): 'OPEN_LONG_CALL_FLY_2',
+    int(13e6): 'OPEN_LONG_CALL_FLY',
 
     # === Phase 7: Master Debit Spreads (Directional Buying) ===
     int(14e6): 'OPEN_BULL_CALL_SPREAD',
@@ -190,7 +190,7 @@ TRAINING_CURRICULUM = {
 
     # === Phase 3: Specialize in Risk-Defined Volatility (Buying) ===
     # Duration: 1M steps (14e6 - 13e6)
-    int(5e6): 'OPEN_LONG_CALL_FLY_2',
+    int(5e6): 'OPEN_LONG_CALL_FLY',
     # Duration: 1M steps (13e6 - 12e6)
     int(6e6): 'OPEN_LONG_PUT_CONDOR',
     # Duration: 1M steps (12e6 - 11e6)
@@ -200,7 +200,7 @@ TRAINING_CURRICULUM = {
 
     # === Phase 4: Specialize in Risk-Defined Volatility (Selling) ===
     # Duration: 1M steps (10e6 - 9e6)
-    int(9e6): 'OPEN_SHORT_CALL_FLY_2',
+    int(9e6): 'OPEN_SHORT_CALL_FLY',
     # Duration: 1M steps (9e6 - 8e6)
     int(10e6): 'OPEN_SHORT_PUT_CONDOR',
     # Duration: 1M steps (8e6 - 7e6)
@@ -337,12 +337,12 @@ for direction in ['LONG', 'SHORT']:
         internal_name = f'{direction}_STRANGLE_DELTA_{delta}'
         strategy_name_to_id[internal_name] = next_id; next_id += 1
         strategy_name_to_id[f'OPEN_{internal_name}'] = strategy_name_to_id[internal_name]
-    # Fixed-Width Butterflies
-    for width in [1, 2]:
-        for opt_type in ['CALL', 'PUT']:
-            internal_name = f'{direction}_{opt_type}_FLY_{width}'
-            strategy_name_to_id[internal_name] = next_id; next_id += 1
-            strategy_name_to_id[f'OPEN_{internal_name}'] = strategy_name_to_id[internal_name]
+
+    # There is now only one action per butterfly type.
+    for opt_type in ['CALL', 'PUT']:
+        internal_name = f'{direction}_{opt_type}_FLY' # <-- No more width number
+        strategy_name_to_id[internal_name] = next_id; next_id += 1
+        strategy_name_to_id[f'OPEN_{internal_name}'] = strategy_name_to_id[internal_name]
 
 # <<< --- NEW: Section for Advanced Multi-Leg Strategies --- >>>
 strategy_name_to_id['JADE_LIZARD'] = next_id; next_id += 1
