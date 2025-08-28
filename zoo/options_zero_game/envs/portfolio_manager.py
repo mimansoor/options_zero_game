@@ -474,6 +474,7 @@ class PortfolioManager:
                 leg['entry_step'] = current_step
 
             pnl_profile = self._calculate_universal_risk_profile(found_legs, self.realized_pnl)
+            if pnl_profile['strategy_max_profit'] < 0: return
             pnl_profile['strategy_id'] = self.strategy_name_to_id.get(action_name, -1)
             self._execute_trades(found_legs, pnl_profile)
 
@@ -1744,6 +1745,10 @@ class PortfolioManager:
         
         legs = self._price_legs(legs, current_price, iv_bin_index)
         pnl  = self._calculate_universal_risk_profile(legs, self.realized_pnl)
+        # If the theoretical max profit of the strategy is negative, it's a guaranteed loser. Do not open it.
+        if pnl_profile['strategy_max_profit'] < 0:
+            print(f"DEBUG: Aborting open of {action_name} due to negative max profit.") # Optional debug print
+            return
         pnl['strategy_id'] = self.strategy_name_to_id.get(action_name, -1)
         self._execute_trades(legs, pnl)
 
@@ -1794,6 +1799,7 @@ class PortfolioManager:
             return
 
         pnl_profile = self._calculate_universal_risk_profile(priced_legs, self.realized_pnl)
+        if pnl_profile['strategy_max_profit'] < 0: return
         pnl_profile['strategy_id'] = self.strategy_name_to_id.get(action_name, -1)
         self._execute_trades(priced_legs, pnl_profile)
 
@@ -1875,6 +1881,7 @@ class PortfolioManager:
         
         legs = self._price_legs(legs, current_price, iv_bin_index)
         pnl  = self._calculate_universal_risk_profile(legs, self.realized_pnl)
+        if pnl['strategy_max_profit'] < 0: return
         pnl['strategy_id'] = self.strategy_name_to_id.get(action_name, -1)
         self._execute_trades(legs, pnl)
 
@@ -2001,6 +2008,7 @@ class PortfolioManager:
         if best_legs_found:
             for leg in best_legs_found: leg['entry_step'] = current_step
             pnl_profile = self._calculate_universal_risk_profile(best_legs_found, self.realized_pnl)
+            if pnl_profile['strategy_max_profit'] < 0: return
             pnl_profile['strategy_id'] = self.strategy_name_to_id.get(action_name, -1)
             self._execute_trades(best_legs_found, pnl_profile)
         else:
