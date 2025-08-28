@@ -826,12 +826,20 @@ class OptionsZeroGameEnv(gym.Env):
         # --- Calculate Reward ---
         equity_after = self.portfolio_manager.get_current_equity(self.price_manager.current_price, self.iv_bin_index)
         
-        # <<< --- THE DEFINITIVE FIX (Part 1): Calculate the Daily Opportunity Cost --- >>>
+        # <<< --- Calculate the Daily Opportunity Cost --- >>>
         opportunity_cost_penalty = 0.0
-        # This penalty is applied at the end of each trading day.
+        # This penalty is applied only at the end of each trading day.
         is_end_of_day = (self.current_step % self.steps_per_day) == 0
         if is_end_of_day:
-            opportunity_cost_penalty = self.daily_opportunity_cost_penalty
+            # 1. Start with a default penalty for a single calendar day.
+            penalty_multiplier = 1.0
+            
+            # 2. Check if the day that just ended was a Friday.
+            # We use (current_day_index - 1) because current_day_index has already ticked over.
+            day_of_week_that_ended = (self.current_day_index - 1) % self.TRADING_DAYS_IN_WEEK
+            if day_of_week_that_ended == 4: # 4 corresponds to Friday
+                # If it's Friday, the cost of holding is for 3 calendar days (Fri, Sat, Sun).
+                penalty_multiplier = 3.0
 
         # Pass this cost to the reward function.
         shaped_reward, raw_reward = self._calculate_shaped_reward(equity_before, equity_after, opportunity_cost_penalty)
