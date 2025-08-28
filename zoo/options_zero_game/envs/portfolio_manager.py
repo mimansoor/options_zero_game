@@ -132,6 +132,15 @@ class PortfolioManager:
         self.steps_per_day = cfg.get('steps_per_day', 1)
         self.butterfly_target_cost_pct = cfg.get('butterfly_target_cost_pct', 0.01)
         self.hedge_roll_search_width = cfg.get('hedge_roll_search_width', 10)
+
+        # 1. Pre-calculate the 30-day opportunity cost of the initial capital.
+        # This becomes our minimum profit hurdle for any new trade.
+        annual_risk_free_rate = cfg.get('risk_free_rate', 0.10)
+        thirty_day_rate = (1 + annual_risk_free_rate)**(30 / 365.25) - 1
+        self.min_profit_hurdle = cfg['initial_cash'] * thirty_day_rate
+        
+        print(f"[PortfolioManager] Initialized with a minimum profit hurdle of ${self.min_profit_hurdle:,.2f}")
+
         self.id_to_strategy_name = {v: k for k, v in self.strategy_name_to_id.items()}
         
         # Managers
@@ -560,35 +569,36 @@ class PortfolioManager:
 
     def open_strategy(self, action_name: str, current_price: float, iv_bin_index: int, current_step: int, days_to_expiry: float):
         """Routes any 'OPEN_' action to the correct specialized private method."""
-        if len(self.portfolio) >= self.max_positions: return
+        if len(self.portfolio) >= self.max_positions: return False
 
         disable_solver = self.cfg.get('disable_spread_solver', False)
 
         # Route by most complex/specific keywords first to avoid misrouting
         if 'JADE_LIZARD' in action_name:
-            self._open_jade_lizard(action_name, current_price, iv_bin_index, current_step, days_to_expiry)
+            return self._open_jade_lizard(action_name, current_price, iv_bin_index, current_step, days_to_expiry)
         elif 'BIG_LIZARD' in action_name:
-            self._open_big_lizard(action_name, current_price, iv_bin_index, current_step, days_to_expiry)
+            return self._open_big_lizard(action_name, current_price, iv_bin_index, current_step, days_to_expiry)
         elif 'RATIO_SPREAD' in action_name:
-            self._open_ratio_spread(action_name, current_price, iv_bin_index, current_step, days_to_expiry)
+            return self._open_ratio_spread(action_name, current_price, iv_bin_index, current_step, days_to_expiry)
         elif 'SPREAD' in action_name and not disable_solver:
-            self.open_best_available_vertical(action_name, current_price, iv_bin_index, current_step, days_to_expiry)
+            return self.open_best_available_vertical(action_name, current_price, iv_bin_index, current_step, days_to_expiry)
         elif 'CONDOR' in action_name and 'IRON' not in action_name:
-            self._open_condor(action_name, current_price, iv_bin_index, current_step, days_to_expiry)
+            return self._open_condor(action_name, current_price, iv_bin_index, current_step, days_to_expiry)
         elif 'FLY' in action_name and 'IRON' not in action_name:
-            self._open_butterfly(action_name, current_price, iv_bin_index, current_step, days_to_expiry)
+            return self._open_butterfly(action_name, current_price, iv_bin_index, current_step, days_to_expiry)
         elif 'IRON_CONDOR' in action_name:
-            self._open_iron_condor(action_name, current_price, iv_bin_index, current_step, days_to_expiry)
+            return self._open_iron_condor(action_name, current_price, iv_bin_index, current_step, days_to_expiry)
         elif 'IRON_FLY' in action_name:
-            self._open_iron_fly(action_name, current_price, iv_bin_index, current_step, days_to_expiry)
+            return self._open_iron_fly(action_name, current_price, iv_bin_index, current_step, days_to_expiry)
         elif 'STRANGLE' in action_name:
-            self._open_strangle(action_name, current_price, iv_bin_index, current_step, days_to_expiry)
+            return self._open_strangle(action_name, current_price, iv_bin_index, current_step, days_to_expiry)
         elif 'STRADDLE' in action_name:
-            self._open_straddle(action_name, current_price, iv_bin_index, current_step, days_to_expiry)
+            return self._open_straddle(action_name, current_price, iv_bin_index, current_step, days_to_expiry)
         elif 'ATM' in action_name:
             self._open_single_leg(action_name, current_price, iv_bin_index, current_step, days_to_expiry)
         else:
             print(f"Warning: Unrecognized action format in open_strategy: {action_name}")
+            return False
 
     def get_positions_state(self, vec: np.ndarray, start_idx: int, state_size: int, pos_idx_map: Dict, current_price: float, iv_bin_index: int, current_step: int, total_steps: int):
         """Fills the provided numpy vector `vec` with the detailed state of each open position."""
@@ -825,7 +835,7 @@ class PortfolioManager:
     # --- Private Methods ---
     def _open_jade_lizard(self, action_name: str, current_price: float, iv_bin_index: int, current_step: int, days_to_expiry: float):
         """Opens a 3-leg Jade Lizard or Reverse Jade Lizard with a robust fallback for the spread component."""
-        if len(self.portfolio) > self.max_positions - 3: return
+        if len(self.portfolio) > self.max_positions - 3: return False
 
         is_reverse = 'REVERSE' in action_name
         
@@ -833,7 +843,7 @@ class PortfolioManager:
         naked_leg_type = 'call' if is_reverse else 'put'
         naked_leg_delta = 0.20 if naked_leg_type == 'call' else -0.20
         naked_strike = self._find_strike_for_delta(naked_leg_delta, naked_leg_type, current_price, iv_bin_index, days_to_expiry)
-        if naked_strike is None: return
+        if naked_strike is None: return False
 
         naked_leg_def = {'type': naked_leg_type, 'direction': 'short', 'strike_price': naked_strike}
 
@@ -852,12 +862,12 @@ class PortfolioManager:
             short_leg_delta = -0.35 if spread_type == 'put' else 0.35
             short_strike = self._find_strike_for_delta(short_leg_delta, spread_type, current_price, iv_bin_index, days_to_expiry)
             
-            if short_strike is None: return # Abort if we can't even find the anchor leg.
+            if short_strike is None: return False # Abort if we can't even find the anchor leg.
             
             # Create a simple 2-strike wide spread for robustness.
             wing_width = self.strike_distance * 2
             long_strike = short_strike - wing_width if spread_type == 'put' else short_strike + wing_width
-            if long_strike <= 0: return # Failsafe for invalid strikes
+            if long_strike <= 0: return False # Failsafe for invalid strikes
             
             spread_legs_def = [
                 {'type': spread_type, 'direction': 'short', 'strike_price': short_strike},
@@ -871,16 +881,18 @@ class PortfolioManager:
             leg.update({'entry_step': current_step, 'days_to_expiry': days_to_expiry})
         
         priced_legs = self._price_legs(final_legs_def, current_price, iv_bin_index)
-        if not priced_legs: return
+        if not priced_legs: return False
 
         pnl_profile = self._calculate_universal_risk_profile(priced_legs, self.realized_pnl, is_new_trade=True)
-        if pnl_profile['strategy_max_profit'] < 0: return
+        # The strategy is now rejected if its max profit is not above our dynamic hurdle rate.
+        if pnl_profile['strategy_max_profit'] <= self.min_profit_hurdle: return False
         pnl_profile['strategy_id'] = self.strategy_name_to_id.get(action_name, -1)
         self._execute_trades(priced_legs, pnl_profile)
+        return True
 
     def _open_big_lizard(self, action_name: str, current_price: float, iv_bin_index: int, current_step: int, days_to_expiry: float):
         """Opens a 3-leg Big Lizard or Reverse Big Lizard."""
-        if len(self.portfolio) > self.max_positions - 3: return
+        if len(self.portfolio) > self.max_positions - 3: return False
 
         is_reverse = 'REVERSE' in action_name
 
@@ -890,7 +902,7 @@ class PortfolioManager:
 
         strike_put = self._find_strike_for_delta(strangle_put_delta, 'put', current_price, iv_bin_index, days_to_expiry)
         strike_call = self._find_strike_for_delta(strangle_call_delta, 'call', current_price, iv_bin_index, days_to_expiry)
-        if strike_put is None or strike_call is None: return
+        if strike_put is None or strike_call is None: return False
         
         strangle_legs_def = [
             {'type': 'put', 'direction': 'short', 'strike_price': strike_put},
@@ -901,7 +913,7 @@ class PortfolioManager:
         hedge_leg_type = 'put' if is_reverse else 'call'
         hedge_leg_delta = -0.45 if is_reverse else 0.45
         hedge_strike = self._find_strike_for_delta(hedge_leg_delta, hedge_leg_type, current_price, iv_bin_index, days_to_expiry)
-        if hedge_strike is None: return
+        if hedge_strike is None: return False
 
         hedge_leg_def = {'type': hedge_leg_type, 'direction': 'long', 'strike_price': hedge_strike}
 
@@ -911,28 +923,29 @@ class PortfolioManager:
             leg.update({'entry_step': current_step, 'days_to_expiry': days_to_expiry})
             
         priced_legs = self._price_legs(final_legs_def, current_price, iv_bin_index, check_short_rule=True)
-        if not priced_legs: return
+        if not priced_legs: return False
             
         pnl_profile = self._calculate_universal_risk_profile(priced_legs, self.realized_pnl, is_new_trade=True)
-        if pnl_profile['strategy_max_profit'] < 0: return
+        if pnl_profile['strategy_max_profit'] <= self.min_profit_hurdle: return False
         pnl_profile['strategy_id'] = self.strategy_name_to_id.get(action_name, -1)
         self._execute_trades(priced_legs, pnl_profile)
+        return True
 
     def _open_ratio_spread(self, action_name: str, current_price: float, iv_bin_index: int, current_step: int, days_to_expiry: float):
         """Opens a 1x2 ratio spread (1 long, 2 short)."""
-        if len(self.portfolio) > self.max_positions - 3: return
+        if len(self.portfolio) > self.max_positions - 3: return False
         
         option_type = 'put' if 'PUT' in action_name else 'call'
 
         # 1. Find the two short legs @ 20 delta
         short_delta = -0.20 if option_type == 'put' else 0.20
         short_strike = self._find_strike_for_delta(short_delta, option_type, current_price, iv_bin_index, days_to_expiry)
-        if short_strike is None: return
+        if short_strike is None: return False
         
         # 2. Find the one long leg @ 30-35 delta
         long_delta_range = [-0.30, -0.35] if option_type == 'put' else [0.30, 0.35]
         long_strike = self._find_strike_from_delta_list(long_delta_range, option_type, current_price, iv_bin_index, days_to_expiry)
-        if long_strike is None: return
+        if long_strike is None: return False
 
         # 3. Assemble the 3 legs (with two identical short legs)
         final_legs_def = [
@@ -945,12 +958,13 @@ class PortfolioManager:
             leg.update({'entry_step': current_step, 'days_to_expiry': days_to_expiry})
             
         priced_legs = self._price_legs(final_legs_def, current_price, iv_bin_index, check_short_rule=True)
-        if not priced_legs: return
+        if not priced_legs: return False
             
         pnl_profile = self._calculate_universal_risk_profile(priced_legs, self.realized_pnl, is_new_trade=True)
-        if pnl_profile['strategy_max_profit'] < 0: return
+        if pnl_profile['strategy_max_profit'] <= self.min_profit_hurdle: return False
         pnl_profile['strategy_id'] = self.strategy_name_to_id.get(action_name, -1)
         self._execute_trades(priced_legs, pnl_profile)
+        return True
 
     def _find_portfolio_neutral_strike(self, leg_index: int, current_price: float, iv_bin_index: int) -> float or None:
         """
@@ -1567,7 +1581,7 @@ class PortfolioManager:
         # --- Defensive Assertion ---
         assert len(self.portfolio) < self.max_positions, "Illegal attempt to open a leg when portfolio is full. Action mask failed."
 
-        if len(self.portfolio) >= self.max_positions: return
+        if len(self.portfolio) >= self.max_positions: return False
         parts = action_name.split('_')
         direction, option_type, offset_str = parts[1].lower(), parts[2].lower(), parts[3].replace('ATM', '')
         offset = int(offset_str)
@@ -1578,36 +1592,37 @@ class PortfolioManager:
         priced_legs = self._price_legs(legs, current_price, iv_bin_index, check_short_rule=True)
         
         # If pricing failed because of our new rule, abort the action.
-        if not priced_legs:
-            return
-        
+        if not priced_legs: return False
+
         pnl_profile = self._calculate_universal_risk_profile(priced_legs, self.realized_pnl, is_new_trade=True)
-        if pnl_profile['strategy_max_profit'] < 0: return
+        if pnl_profile['strategy_max_profit'] <= self.min_profit_hurdle: return False
         pnl_profile['strategy_id'] = self.strategy_name_to_id.get(action_name, -1)
         #print(f"DEBUG: {pnl_profile['strategy_id']} {action_name}")
         self._execute_trades(priced_legs, pnl_profile)
+        return True
 
     def _open_straddle(self, action_name: str, current_price: float, iv_bin_index: int, current_step: int, days_to_expiry: float):
         # --- Defensive Assertion ---
         assert len(self.portfolio) <= self.max_positions - 2, "Illegal attempt to open a straddle when there are less than two positions available."
-        if len(self.portfolio) > self.max_positions - 2: return
+        if len(self.portfolio) > self.max_positions - 2: return False
         direction = 'long' if 'LONG' in action_name else 'short'
         atm_price = self.market_rules_manager.get_atm_price(current_price)
         legs = [{'type': 'call', 'direction': direction, 'strike_price': atm_price, 'entry_step': current_step, 'days_to_expiry': days_to_expiry},
                 {'type': 'put', 'direction': direction, 'strike_price': atm_price, 'entry_step': current_step, 'days_to_expiry': days_to_expiry}]
         legs = self._price_legs(legs, current_price, iv_bin_index)
         pnl  = self._calculate_universal_risk_profile(legs, self.realized_pnl, is_new_trade=True)
-        if pnl['strategy_max_profit'] < 0: return
+        if pnl['strategy_max_profit'] <= self.min_profit_hurdle: return False
         # 3. Now get the strategy ID.
         pnl['strategy_id'] = self.strategy_name_to_id.get(action_name, -1)
         self._execute_trades(legs, pnl)
+        return True
 
     def _open_strangle(self, action_name: str, current_price: float, iv_bin_index: int, current_step: int, days_to_expiry: float):
         """
         Opens a two-leg strangle. This is a smart dispatcher that can handle
         both modern delta-based strangles and legacy fixed-width strangles.
         """
-        if len(self.portfolio) > self.max_positions - 2: return
+        if len(self.portfolio) > self.max_positions - 2: return False
         
         parts = action_name.split('_')
         direction = parts[1].lower()
@@ -1618,7 +1633,7 @@ class PortfolioManager:
             # --- INTELLIGENT, DELTA-BASED LOGIC ---
             try:
                 target_delta_int = int(parts[4])
-            except (ValueError, IndexError): return # Invalid format
+            except (ValueError, IndexError): return False # Invalid format
 
             all_deltas = [15, 20, 25, 30]
             start_index = all_deltas.index(target_delta_int) if target_delta_int in all_deltas else 0
@@ -1631,7 +1646,7 @@ class PortfolioManager:
                 legs = [{'type': 'call', 'direction': direction, 'strike_price': strike_call},
                         {'type': 'put', 'direction': direction, 'strike_price': strike_put}]
             else:
-                return # Fallback if no valid delta strikes are found
+                return False # Fallback if no valid delta strikes are found
        
         # --- Finalize the Trade (common to both logic paths) ---
         for leg in legs:
@@ -1640,9 +1655,10 @@ class PortfolioManager:
         
         priced_legs = self._price_legs(legs, current_price, iv_bin_index)
         pnl_profile = self._calculate_universal_risk_profile(priced_legs, self.realized_pnl, is_new_trade=True)
-        if pnl_profile['strategy_max_profit'] < 0: return
+        if pnl_profile['strategy_max_profit'] <= self.min_profit_hurdle: return False
         pnl_profile['strategy_id'] = self.strategy_name_to_id.get(action_name, -1)
         self._execute_trades(priced_legs, pnl_profile)
+        return True
 
     def _find_strike_from_delta_list(
         self, target_deltas: List[float], option_type: str,
@@ -1702,7 +1718,7 @@ class PortfolioManager:
         Opens a SHORT Iron Condor using a tiered search for delta strikes (e.g., 30/15, then 35/20).
         If no dynamic strikes are valid, it falls back to a fixed-width condor.
         """
-        if len(self.portfolio) > self.max_positions - 4: return
+        if len(self.portfolio) > self.max_positions - 4: return True
         
         direction = 'long' if 'LONG' in action_name else 'short'
         legs = []
@@ -1766,16 +1782,17 @@ class PortfolioManager:
         legs = self._price_legs(legs, current_price, iv_bin_index)
         pnl  = self._calculate_universal_risk_profile(legs, self.realized_pnl, is_new_trade=True)
         # If the theoretical max profit of the strategy is negative, it's a guaranteed loser. Do not open it.
-        if pnl['strategy_max_profit'] < 0: return
+        if pnl['strategy_max_profit'] <= self.min_profit_hurdle: return False
         pnl['strategy_id'] = self.strategy_name_to_id.get(action_name, -1)
         self._execute_trades(legs, pnl)
+        return True
 
     def _open_condor(self, action_name: str, current_price: float, iv_bin_index: int, current_step: int, days_to_expiry: float):
         """
         Opens a four-leg Call or Put Condor.
         MODIFIED: Now creates a wider, more strategically sound condor by default.
         """
-        if len(self.portfolio) > self.max_positions - 4: return
+        if len(self.portfolio) > self.max_positions - 4: return False
 
         parts = action_name.split('_')
         direction = parts[1].lower()
@@ -1783,7 +1800,6 @@ class PortfolioManager:
 
         atm_price = self.market_rules_manager.get_atm_price(current_price)
         
-        # <<< --- THE DEFINITIVE FIX IS HERE --- >>>
         # Define the strikes for a wider, more realistic condor.
         # This creates a body that is 10 strikes wide.
         body_width_multiplier = 5
@@ -1796,7 +1812,7 @@ class PortfolioManager:
 
         if s1 <= 0:
             print(f"DEBUG: Aborting condor open, calculated strike s1={s1} is invalid.")
-            return
+            return False
 
         body_direction = 'long' if direction == 'long' else 'short'
         wing_direction = 'short' if direction == 'long' else 'long'
@@ -1814,12 +1830,13 @@ class PortfolioManager:
         priced_legs = self._price_legs(legs_def, current_price, iv_bin_index)
         
         if not priced_legs:
-            return
+            return False
 
         pnl_profile = self._calculate_universal_risk_profile(priced_legs, self.realized_pnl, is_new_trade=True)
-        if pnl_profile['strategy_max_profit'] < 0: return
+        if pnl_profile['strategy_max_profit'] <= self.min_profit_hurdle: return False
         pnl_profile['strategy_id'] = self.strategy_name_to_id.get(action_name, -1)
         self._execute_trades(priced_legs, pnl_profile)
+        return True
 
     def _open_iron_fly(self, action_name: str, current_price: float, iv_bin_index: int, current_step: int, days_to_expiry: float):
         """
@@ -1827,7 +1844,7 @@ class PortfolioManager:
         - SHORT Iron Fly (credit): Tries to set wings based on premium, then walks inward to find a valid width.
         - LONG Iron Fly (debit): Uses a fixed width.
         """
-        if len(self.portfolio) > self.max_positions - 4: return
+        if len(self.portfolio) > self.max_positions - 4: return False
         
         direction = 'long' if 'LONG' in action_name else 'short'
         atm_price = self.market_rules_manager.get_atm_price(current_price)
@@ -1899,9 +1916,10 @@ class PortfolioManager:
         
         legs = self._price_legs(legs, current_price, iv_bin_index)
         pnl  = self._calculate_universal_risk_profile(legs, self.realized_pnl, is_new_trade=True)
-        if pnl['strategy_max_profit'] < 0: return
+        if pnl['strategy_max_profit'] <= self.min_profit_hurdle: return False
         pnl['strategy_id'] = self.strategy_name_to_id.get(action_name, -1)
         self._execute_trades(legs, pnl)
+        return True
 
     def _find_best_available_spread(
         self, option_type: str, direction_name: str,
@@ -1963,8 +1981,7 @@ class PortfolioManager:
         MODIFIED: Now enforces a minimum 2-strike width and finds the wings
         that result in a net cost/credit closest to a predefined target.
         """
-        if len(self.portfolio) > self.max_positions - 4:
-            return
+        if len(self.portfolio) > self.max_positions - 4: return False
 
         parts = action_name.split('_')
         direction, option_type = parts[1].lower(), parts[2].lower()
@@ -1988,7 +2005,6 @@ class PortfolioManager:
 
         # --- 2. Search Loop: Widen the wings until we find the best fit ---
         max_search_width = 20
-        # <<< --- THE DEFINITIVE FIX IS HERE: Start the search from a 2-strike width --- >>>
         min_search_width_multiplier = 2
         for i in range(min_search_width_multiplier, max_search_width + 1):
             wing_width = i * self.strike_distance
@@ -2026,11 +2042,13 @@ class PortfolioManager:
         if best_legs_found:
             for leg in best_legs_found: leg['entry_step'] = current_step
             pnl_profile = self._calculate_universal_risk_profile(best_legs_found, self.realized_pnl, is_new_trade=True)
-            if pnl_profile['strategy_max_profit'] < 0: return
+            if pnl_profile['strategy_max_profit'] <= self.min_profit_hurdle: return False
             pnl_profile['strategy_id'] = self.strategy_name_to_id.get(action_name, -1)
             self._execute_trades(best_legs_found, pnl_profile)
+            return True
         else:
             print(f"DEBUG: no suitable legs for butterfly were found for {action_name}")
+            return False
 
     def convert_to_iron_condor(self, current_price: float, iv_bin_index: int, current_step: int):
         """Adds long wings to a short strangle using the atomic transformation pattern."""

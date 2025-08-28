@@ -645,7 +645,17 @@ class OptionsZeroGameEnv(gym.Env):
             current_day = self.current_step // self._cfg.steps_per_day
             days_to_expiry_float = (self.episode_time_to_expiry - current_day) * (self.TOTAL_DAYS_IN_WEEK / self.TRADING_DAYS_IN_WEEK)
             days_to_expiry = int(round(days_to_expiry_float))
-            self.portfolio_manager.open_strategy(final_action_name, self.price_manager.current_price, self.iv_bin_index, self.current_step, days_to_expiry)
+            # 1. Call the manager's open_strategy and capture the success status.
+            was_opened_successfully = self.portfolio_manager.open_strategy(
+                final_action_name, self.price_manager.current_price, 
+                self.iv_bin_index, self.current_step, days_to_expiry
+            )
+            
+            # 2. If the open failed (e.g., due to our new safety check),
+            #    we override the log to show that a HOLD action was taken instead.
+            if not was_opened_successfully:
+                self.last_action_info['final_action_name'] = 'HOLD'
+
             # Call the new centralized helper AFTER any opening action.
             self._update_initial_premium_and_targets()
         elif final_action_name.startswith('CLOSE_POSITION_'):
