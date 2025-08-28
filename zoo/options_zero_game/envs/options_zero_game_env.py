@@ -776,7 +776,8 @@ class OptionsZeroGameEnv(gym.Env):
                     termination_reason = "STOP_LOSS"
 
         # 2. Take-Profit Rules (Only check if not already stopped out)
-        if not terminated_by_rule and not self.portfolio_manager.portfolio.empty:
+        # Add the same one-step grace period to the take-profit rules.
+        if not terminated_by_rule and not self.portfolio_manager.portfolio.empty and self.current_step > 1:
 
             # --- Rule 2a: Portfolio-Level "Home Run" Target ---
             if not terminated_by_rule:
