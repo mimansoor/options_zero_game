@@ -21,6 +21,10 @@ def get_valid_strategies() -> list:
 def calculate_statistics(results: list, strategy_name: str) -> dict:
     if not results: return {}
     pnls = [r['pnl'] for r in results]
+    # If for some reason the pnls list is empty, return early.
+    if not pnls:
+        return {"Strategy": strategy_name, "Total_Trades": 0}
+    pnl_array = np.array(pnls)
     wins = [p for p in pnls if p > 0]
     losses = [p for p in pnls if p <= 0]
     num_wins, num_losses = len(wins), len(losses)
@@ -45,7 +49,6 @@ def calculate_statistics(results: list, strategy_name: str) -> dict:
 
     cvar_95 = 0.0
     if losses:
-        pnl_array = np.array(pnls)
         var_95 = np.percentile(pnl_array, 5)
         tail_losses = pnl_array[pnl_array <= var_95]
         if len(tail_losses) > 0: cvar_95 = np.mean(tail_losses)
@@ -100,7 +103,6 @@ def calculate_statistics(results: list, strategy_name: str) -> dict:
     
     # The risk-free P&L is based on the initial capital. Using the config default.
     initial_capital = temp_env._cfg.initial_cash
-    print(f"DEBUG: Initialial_capital = {initial_capital}")
     risk_free_pnl_per_episode = initial_capital * risk_free_return_per_episode
 
     # 1. Sharpe Ratio

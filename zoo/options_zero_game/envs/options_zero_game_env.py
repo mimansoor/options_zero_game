@@ -147,6 +147,7 @@ class OptionsZeroGameEnv(gym.Env):
         self.regimes = self._cfg.get('unified_regimes', [])
         self.current_iv_regime_name = "N/A" # For logging
         self.current_iv_regime_index = 0 # Start with a default
+        self.iv_price_correlation_strength = self._cfg.get('iv_price_correlation_strength', 0.0)
 
         # 1. Define the sizes of all embedding blocks FIRST.
         self.vol_embedding_size = 128
@@ -514,7 +515,6 @@ class OptionsZeroGameEnv(gym.Env):
             offset, option_type, self.iv_bin_index
         )
         
-        # <<< --- THE DEFINITIVE FIX IS HERE --- >>>
         # 2. Get the expert's prediction from the new architecture.
         vol_embedding = self.price_manager.volatility_embedding
         
@@ -533,9 +533,31 @@ class OptionsZeroGameEnv(gym.Env):
 
         # 3. Add the market's risk premium.
         base_iv = predicted_vol + self.volatility_premium_abs
+
+        # 4. Calculate and apply the price momentum adjustment.
+        iv_adjustment_factor = 1.0 # Default to no adjustment
+
+        # We can only calculate a change if we're past the first step.
+        if self.current_step > 0:
+            current_price = self.price_manager.current_price
+            prev_price = self.price_manager.price_path[self.current_step - 1]
+            
+            if prev_price > 1e-6:
+                log_return = math.log(current_price / prev_price)
+                
+                # The core formula: factor = 1 + (log_return * strength)
+                # Since strength is negative, a positive return DECREASES the factor.
+                # A negative return INCREASES the factor.
+                iv_adjustment_factor = 1.0 + (log_return * self.iv_price_correlation_strength)
+                
+                # Add a safety clamp to prevent extreme IV swings from a single large price move.
+                iv_adjustment_factor = np.clip(iv_adjustment_factor, 0.8, 1.2) # Clamp between +/- 20% adjustment
+
+        # Apply the factor to our base IV.
+        adjusted_base_iv = base_iv * iv_adjustment_factor
         
-        # 4. Return the greater of the dynamic base and the static floor.
-        return max(base_iv, iv_from_table)
+        # 5. Return the greater of the adjusted dynamic base and the static floor.
+        return max(adjusted_base_iv, iv_from_table)
 
     def _update_initial_premium_and_targets(self):
         """
