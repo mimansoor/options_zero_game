@@ -133,10 +133,10 @@ class PortfolioManager:
         self.butterfly_target_cost_pct = cfg.get('butterfly_target_cost_pct', 0.01)
         self.hedge_roll_search_width = cfg.get('hedge_roll_search_width', 10)
 
-        # 1. Pre-calculate the 15-day opportunity cost of the initial capital.
+        # 1. Pre-calculate the 5-day opportunity cost of the initial capital.
         # This becomes our minimum profit hurdle for any new trade.
         annual_risk_free_rate = cfg.get('risk_free_rate', 0.10)
-        thirty_day_rate = (1 + annual_risk_free_rate)**(15 / 365.25) - 1
+        thirty_day_rate = (1 + annual_risk_free_rate)**(5 / 365.25) - 1
         self.min_profit_hurdle = cfg['initial_cash'] * thirty_day_rate
         
         print(f"[PortfolioManager] Initialized with a minimum profit hurdle of ${self.min_profit_hurdle:,.2f}")
