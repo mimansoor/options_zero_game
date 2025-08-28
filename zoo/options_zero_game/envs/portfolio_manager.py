@@ -424,7 +424,7 @@ class PortfolioManager:
         except (ValueError, IndexError, KeyError) as e:
             print(f"Warning: Could not execute add_hedge action. Error: {e}")
 
-    def open_best_available_vertical(self, action_name: str, current_price: float, iv_bin_index: int, current_step: int, days_to_expiry: float):
+    def _open_best_available_vertical(self, action_name: str, current_price: float, iv_bin_index: int, current_step: int, days_to_expiry: float):
         """
         Public method to execute the opening of a vertical spread.
         It first tries to find an ideal spread using the tiered R:R solver.
@@ -441,7 +441,6 @@ class PortfolioManager:
             option_type, direction_name, current_price, iv_bin_index, days_to_expiry, is_credit_spread
         )
 
-        # <<< --- THE DEFINITIVE, CORRECTED FALLBACK LOGIC --- >>>
         if not found_legs:
             # print(f"DEBUG: Tiered R:R solver failed for {action_name}. Using fixed-width fallback.")
             
@@ -467,7 +466,7 @@ class PortfolioManager:
                 anchor_strike, wing_strike = atm_strike, atm_strike - wing_offset
                 anchor_dir, wing_dir = 'short', 'long'
 
-            if wing_strike <= 0: return # Failsafe
+            if wing_strike <= 0: return False # Failsafe
 
             fallback_legs_def = [
                 {'type': option_type, 'direction': anchor_dir, 'strike_price': anchor_strike},
@@ -483,9 +482,12 @@ class PortfolioManager:
                 leg['entry_step'] = current_step
 
             pnl_profile = self._calculate_universal_risk_profile(found_legs, self.realized_pnl)
-            if pnl_profile['strategy_max_profit'] < 0: return
+            if pnl_profile['strategy_max_profit'] <= self.min_profit_hurdle: return False
             pnl_profile['strategy_id'] = self.strategy_name_to_id.get(action_name, -1)
             self._execute_trades(found_legs, pnl_profile)
+            return True
+        else:
+            return False
 
     def update_mtm_water_marks(self, current_total_pnl: float):
         """
@@ -581,7 +583,7 @@ class PortfolioManager:
         elif 'RATIO_SPREAD' in action_name:
             return self._open_ratio_spread(action_name, current_price, iv_bin_index, current_step, days_to_expiry)
         elif 'SPREAD' in action_name and not disable_solver:
-            return self.open_best_available_vertical(action_name, current_price, iv_bin_index, current_step, days_to_expiry)
+            return self._open_best_available_vertical(action_name, current_price, iv_bin_index, current_step, days_to_expiry)
         elif 'CONDOR' in action_name and 'IRON' not in action_name:
             return self._open_condor(action_name, current_price, iv_bin_index, current_step, days_to_expiry)
         elif 'FLY' in action_name and 'IRON' not in action_name:
@@ -595,7 +597,7 @@ class PortfolioManager:
         elif 'STRADDLE' in action_name:
             return self._open_straddle(action_name, current_price, iv_bin_index, current_step, days_to_expiry)
         elif 'ATM' in action_name:
-            self._open_single_leg(action_name, current_price, iv_bin_index, current_step, days_to_expiry)
+            return self._open_single_leg(action_name, current_price, iv_bin_index, current_step, days_to_expiry)
         else:
             print(f"Warning: Unrecognized action format in open_strategy: {action_name}")
             return False
