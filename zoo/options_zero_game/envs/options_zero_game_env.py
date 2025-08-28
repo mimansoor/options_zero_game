@@ -628,28 +628,31 @@ class OptionsZeroGameEnv(gym.Env):
             self._update_initial_premium_and_targets()
         elif final_action_name.startswith('CLOSE_POSITION_'):
             self.portfolio_manager.close_position(int(final_action_name.split('_')[-1]), self.price_manager.current_price, self.iv_bin_index, self.current_step)
+            # A partial close changes the structure, so we must update.
+            self._update_initial_premium_and_targets()
         elif final_action_name == 'CLOSE_ALL':
             self.portfolio_manager.close_all_positions(self.price_manager.current_price, self.iv_bin_index, self.current_step)
-            # After closing all, we must reset the profit target so a new one can be set.
-            self.fixed_profit_target_pnl = 0.0
-            self.initial_net_premium = 0.0
+            self._update_initial_premium_and_targets() # Resets premium to 0
         elif final_action_name.startswith('SHIFT_'):
             if 'ATM' in final_action_name: self.portfolio_manager.shift_to_atm(final_action_name, self.price_manager.current_price, self.iv_bin_index, self.current_step)
             else: self.portfolio_manager.shift_position(final_action_name, self.price_manager.current_price, self.iv_bin_index, self.current_step)
+            self._update_initial_premium_and_targets()
         elif final_action_name.startswith('HEDGE_NAKED_POS_'):
             self.portfolio_manager.add_hedge(int(final_action_name.split('_')[-1]),
                 self.price_manager.current_price, self.iv_bin_index, self.current_step
             )
+            self._update_initial_premium_and_targets()
         elif final_action_name.startswith('CONVERT_TO_'):
             self._route_convert_action(final_action_name)
+            self._update_initial_premium_and_targets()
         elif final_action_name == 'RECENTER_VOLATILITY_POSITION':
             self.portfolio_manager.recenter_volatility_position(self.price_manager.current_price, self.iv_bin_index, self.current_step)
-        # <<< --- NEW: Routing for Advanced Delta Management --- >>>
+            self._update_initial_premium_and_targets()
         elif final_action_name == 'HEDGE_DELTA_WITH_ATM_OPTION':
             current_day = self.current_step // self._cfg.steps_per_day
             days_to_expiry_float = (self.episode_time_to_expiry - current_day) * (self.TOTAL_DAYS_IN_WEEK / self.TRADING_DAYS_IN_WEEK)
             self.portfolio_manager.hedge_delta_with_atm_option(self.price_manager.current_price, self.iv_bin_index, self.current_step, days_to_expiry_float)
-        
+            self._update_initial_premium_and_targets()
         elif 'DELTA_BY_SHIFTING_LEG' in final_action_name:
             parts = final_action_name.split('_')
             change_direction = 'increase' if parts[0] == 'INCREASE' else 'decrease'
@@ -684,8 +687,7 @@ class OptionsZeroGameEnv(gym.Env):
                 if resolved_action_index is not None and true_action_mask[resolved_action_index] == 1:
                     # c) Only execute if the resolved action is valid AND legal.
                     self.portfolio_manager.shift_position(resolved_action_name, self.price_manager.current_price, self.iv_bin_index, self.current_step)
-                # d) If the resolved action is illegal (due to a conflict), do nothing.
-                #    This effectively turns the agent's choice into a HOLD.
+                    self._update_initial_premium_and_targets()
 
         elif final_action_name.startswith('HEDGE_PORTFOLIO_BY_ROLLING_LEG_'):
             leg_index = int(final_action_name.split('_')[-1])
@@ -710,6 +712,7 @@ class OptionsZeroGameEnv(gym.Env):
                 if resolved_action_index is not None and true_action_mask[resolved_action_index] == 1:
                     # d) Only execute the roll if the equivalent shift is legal.
                     self.portfolio_manager.hedge_portfolio_by_rolling_leg(leg_index, self.price_manager.current_price, self.iv_bin_index, self.current_step)
+                    self._update_initial_premium_and_targets()
                 # e) If the roll would cause a conflict, do nothing (effectively a HOLD).
 
         # 4. Sort the portfolio and take the crucial snapshot.
