@@ -395,45 +395,50 @@ class PortfolioManager:
         """
         # --- 1. Parse Action Intent ---
         parts = action_name.replace('OPEN_', '').split('_')
-        direction_name = '_'.join(parts[0:2])
+        direction_name = '_'.join(parts[0:3]) # e.g., BULL_CALL_SPREAD
         option_type = parts[1].lower()
         is_credit_spread = 'BULL_PUT' in direction_name or 'BEAR_CALL' in direction_name
 
-        # <<< --- THE DEFINITIVE FIX: The solver logic is now at the top level --- >>>
         # --- 2. Attempt to Find the Ideal Spread ---
         found_legs = self._find_best_available_spread(
             option_type, direction_name, current_price, iv_bin_index, days_to_expiry, is_credit_spread
         )
 
-        # --- 3. Robust Fallback (only runs if the solver fails) ---
+        # <<< --- THE DEFINITIVE, CORRECTED FALLBACK LOGIC --- >>>
         if not found_legs:
             # print(f"DEBUG: Tiered R:R solver failed for {action_name}. Using fixed-width fallback.")
             
             atm_strike = self.market_rules_manager.get_atm_price(current_price)
-            wing_offset = self.strike_distance * 2
-            anchor_direction = 'short' if is_credit_spread else 'long'
-            wing_direction = 'long' if is_credit_spread else 'short'
+            wing_offset = self.strike_distance * 10 # Use a wider, more robust default width
             
-            if direction_name == 'BULL_CALL_SPREAD':
-                anchor_strike = atm_strike
-                wing_strike = atm_strike + wing_offset
-            elif direction_name == 'BEAR_CALL_SPREAD':
-                anchor_strike = atm_strike
-                wing_strike = atm_strike + wing_offset
-            elif direction_name == 'BULL_PUT_SPREAD':
-                anchor_strike = atm_strike
-                wing_strike = atm_strike - wing_offset
-            else: # BEAR_PUT_SPREAD
-                anchor_strike = atm_strike
-                wing_strike = atm_strike - wing_offset # A Bear Put is SHORT the higher strike, so this is correct.
+            anchor_strike = 0
+            wing_strike = 0
+            anchor_dir = ''
+            wing_dir = ''
+
+            # This logic now explicitly handles all four cases correctly.
+            if direction_name == 'BULL_CALL_SPREAD': # Debit, Bullish
+                anchor_strike, wing_strike = atm_strike, atm_strike + wing_offset
+                anchor_dir, wing_dir = 'long', 'short'
+            elif direction_name == 'BEAR_PUT_SPREAD': # Debit, Bearish
+                anchor_strike, wing_strike = atm_strike, atm_strike - wing_offset
+                anchor_dir, wing_dir = 'long', 'short'
+            elif direction_name == 'BEAR_CALL_SPREAD': # Credit, Bearish
+                anchor_strike, wing_strike = atm_strike, atm_strike + wing_offset
+                anchor_dir, wing_dir = 'short', 'long'
+            elif direction_name == 'BULL_PUT_SPREAD': # Credit, Bullish
+                anchor_strike, wing_strike = atm_strike, atm_strike - wing_offset
+                anchor_dir, wing_dir = 'short', 'long'
+
+            if wing_strike <= 0: return # Failsafe
 
             fallback_legs_def = [
-                {'type': option_type, 'direction': anchor_direction, 'strike_price': anchor_strike},
-                {'type': option_type, 'direction': wing_direction, 'strike_price': wing_strike}
+                {'type': option_type, 'direction': anchor_dir, 'strike_price': anchor_strike},
+                {'type': option_type, 'direction': wing_dir, 'strike_price': wing_strike}
             ]
             for leg in fallback_legs_def: leg['days_to_expiry'] = days_to_expiry
 
-            found_legs = self._price_legs(fallback_legs_def, current_price, iv_bin_index, check_short_rule=is_credit_spread)
+            found_legs = self._price_legs(fallback_legs_def, current_price, iv_bin_index)
 
         # --- 4. Finalize and Execute the Trade ---
         if found_legs:
