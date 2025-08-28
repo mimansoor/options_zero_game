@@ -778,12 +778,21 @@ class OptionsZeroGameEnv(gym.Env):
 
         # 1. Stop-Loss Rule (Highest Priority)
         if self._cfg.use_stop_loss and not self.portfolio_manager.portfolio.empty:
-            initial_cost = abs(self.initial_net_premium)
-            stop_loss_level = initial_cost * self._cfg.stop_loss_multiple_of_cost
-            if current_pnl <= -stop_loss_level:
-                terminated_by_rule = True
-                final_shaped_reward_override = -1.0
-                termination_reason = "STOP_LOSS"
+            # The stop loss should be based on the initial debit paid or credit received,
+            # NOT including the brokerage fees, as those are a sunk cost.
+            # We also ensure the cost is a positive number for the calculation.
+            initial_cost_or_credit = abs(self.initial_net_premium)
+            
+            if initial_cost_or_credit > 1e-6: # Only apply stop-loss if there was a meaningful premium
+                stop_loss_level = initial_cost_or_credit * self._cfg.stop_loss_multiple_of_cost
+                
+                # The PNL for the stop-loss check should be the MARK-TO-MARKET PNL of the position,
+                # ignoring realized PNL from brokerage fees.
+                unrealized_pnl = current_pnl - self.portfolio_manager.realized_pnl
+                if unrealized_pnl <= -stop_loss_level:
+                    terminated_by_rule = True
+                    final_shaped_reward_override = -1.0
+                    termination_reason = "STOP_LOSS"
 
         # 2. Take-Profit Rules (Only check if not already stopped out)
         if not terminated_by_rule and not self.portfolio_manager.portfolio.empty:
