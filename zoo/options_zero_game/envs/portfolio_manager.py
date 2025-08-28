@@ -873,7 +873,8 @@ class PortfolioManager:
         priced_legs = self._price_legs(final_legs_def, current_price, iv_bin_index)
         if not priced_legs: return
 
-        pnl_profile = self._calculate_universal_risk_profile(priced_legs, self.realized_pnl)
+        pnl_profile = self._calculate_universal_risk_profile(priced_legs, self.realized_pnl, is_new_trade=True)
+        if pnl_profile['strategy_max_profit'] < 0: return
         pnl_profile['strategy_id'] = self.strategy_name_to_id.get(action_name, -1)
         self._execute_trades(priced_legs, pnl_profile)
 
@@ -912,7 +913,8 @@ class PortfolioManager:
         priced_legs = self._price_legs(final_legs_def, current_price, iv_bin_index, check_short_rule=True)
         if not priced_legs: return
             
-        pnl_profile = self._calculate_universal_risk_profile(priced_legs, self.realized_pnl)
+        pnl_profile = self._calculate_universal_risk_profile(priced_legs, self.realized_pnl, is_new_trade=True)
+        if pnl_profile['strategy_max_profit'] < 0: return
         pnl_profile['strategy_id'] = self.strategy_name_to_id.get(action_name, -1)
         self._execute_trades(priced_legs, pnl_profile)
 
@@ -945,7 +947,8 @@ class PortfolioManager:
         priced_legs = self._price_legs(final_legs_def, current_price, iv_bin_index, check_short_rule=True)
         if not priced_legs: return
             
-        pnl_profile = self._calculate_universal_risk_profile(priced_legs, self.realized_pnl)
+        pnl_profile = self._calculate_universal_risk_profile(priced_legs, self.realized_pnl, is_new_trade=True)
+        if pnl_profile['strategy_max_profit'] < 0: return
         pnl_profile['strategy_id'] = self.strategy_name_to_id.get(action_name, -1)
         self._execute_trades(priced_legs, pnl_profile)
 
@@ -1518,24 +1521,38 @@ class PortfolioManager:
             legs_array[i, 5] = leg['days_to_expiry']
         return legs_array
 
-    def _calculate_universal_risk_profile(self, legs: List[Dict], realized_pnl: float) -> Dict:
+    def _calculate_universal_risk_profile(self, legs: List[Dict], realized_pnl: float, is_new_trade: bool = False) -> Dict:
         """
-        Calculates the risk profile and ensures it is sanitized before returning.
+        Calculates the risk profile.
+        MODIFIED: Now accepts an 'is_new_trade' flag to factor in brokerage
+        costs for the viability check of a new position.
         """
+        # <<< --- THE DEFINITIVE, FINAL FIX IS HERE --- >>>
+        # If this is a new trade being considered, we must include the cost to open it.
+        brokerage_cost = 0.0
+        if is_new_trade:
+            brokerage_cost = len(legs) * self.brokerage_per_leg
+
+        # We subtract the brokerage cost from the realized P&L for the simulation.
+        # This effectively "pre-charges" the trade for its own commission.
+        simulated_realized_pnl = realized_pnl - brokerage_cost
+
         if not legs:
-            raw_profile = {'strategy_max_profit': 0.0, 'total_max_profit': realized_pnl, 'max_loss': realized_pnl, 'profit_factor': 0.0, 'breakevens': []}
+            raw_profile = {'strategy_max_profit': -brokerage_cost, 'total_max_profit': simulated_realized_pnl, 'max_loss': simulated_realized_pnl, 'profit_factor': 0.0, 'breakevens': []}
             return self._sanitize_dict(raw_profile)
 
+        # --- Call the Numba simulation with the adjusted P&L ---
         strategy_max_profit, strategy_max_loss, _, _ = _numba_run_pnl_simulation(
-            self._prepare_legs_for_numba(legs), 0.0, self.start_price, self.lot_size,
-            self.bs_manager.risk_free_rate, self.bid_ask_spread_pct
+            self._prepare_legs_for_numba(legs),
+            -brokerage_cost, # Isolate the strategy's P&L including its own commission
+            self.start_price, self.lot_size, self.bs_manager.risk_free_rate, self.bid_ask_spread_pct
         )
         total_max_profit, total_max_loss, profit_factor, breakevens = _numba_run_pnl_simulation(
-            self._prepare_legs_for_numba(legs), realized_pnl, self.start_price, self.lot_size,
-            self.bs_manager.risk_free_rate, self.bid_ask_spread_pct
+            self._prepare_legs_for_numba(legs),
+            simulated_realized_pnl, # Use the full P&L for the total calculation
+            self.start_price, self.lot_size, self.bs_manager.risk_free_rate, self.bid_ask_spread_pct
         )
 
-        # Create the raw profile dictionary
         raw_profile = {
             'strategy_max_profit': min(self.undefined_risk_cap, strategy_max_profit),
             'total_max_profit': min(self.undefined_risk_cap, total_max_profit),
@@ -1544,7 +1561,7 @@ class PortfolioManager:
             'breakevens': breakevens
         }
         
-        return raw_profile
+        return self._sanitize_dict(raw_profile)
 
     def _open_single_leg(self, action_name: str, current_price: float, iv_bin_index: int, current_step: int, days_to_expiry: float):
         # --- Defensive Assertion ---
@@ -1564,7 +1581,8 @@ class PortfolioManager:
         if not priced_legs:
             return
         
-        pnl_profile = self._calculate_universal_risk_profile(priced_legs, self.realized_pnl)
+        pnl_profile = self._calculate_universal_risk_profile(priced_legs, self.realized_pnl, is_new_trade=True)
+        if pnl_profile['strategy_max_profit'] < 0: return
         pnl_profile['strategy_id'] = self.strategy_name_to_id.get(action_name, -1)
         #print(f"DEBUG: {pnl_profile['strategy_id']} {action_name}")
         self._execute_trades(priced_legs, pnl_profile)
@@ -1578,7 +1596,8 @@ class PortfolioManager:
         legs = [{'type': 'call', 'direction': direction, 'strike_price': atm_price, 'entry_step': current_step, 'days_to_expiry': days_to_expiry},
                 {'type': 'put', 'direction': direction, 'strike_price': atm_price, 'entry_step': current_step, 'days_to_expiry': days_to_expiry}]
         legs = self._price_legs(legs, current_price, iv_bin_index)
-        pnl  = self._calculate_universal_risk_profile(legs, self.realized_pnl)
+        pnl  = self._calculate_universal_risk_profile(legs, self.realized_pnl, is_new_trade=True)
+        if pnl['strategy_max_profit'] < 0: return
         # 3. Now get the strategy ID.
         pnl['strategy_id'] = self.strategy_name_to_id.get(action_name, -1)
         self._execute_trades(legs, pnl)
@@ -1620,7 +1639,8 @@ class PortfolioManager:
             leg['days_to_expiry'] = days_to_expiry
         
         priced_legs = self._price_legs(legs, current_price, iv_bin_index)
-        pnl_profile = self._calculate_universal_risk_profile(priced_legs, self.realized_pnl)
+        pnl_profile = self._calculate_universal_risk_profile(priced_legs, self.realized_pnl, is_new_trade=True)
+        if pnl_profile['strategy_max_profit'] < 0: return
         pnl_profile['strategy_id'] = self.strategy_name_to_id.get(action_name, -1)
         self._execute_trades(priced_legs, pnl_profile)
 
@@ -1744,11 +1764,9 @@ class PortfolioManager:
             leg['entry_step'] = current_step
         
         legs = self._price_legs(legs, current_price, iv_bin_index)
-        pnl  = self._calculate_universal_risk_profile(legs, self.realized_pnl)
+        pnl  = self._calculate_universal_risk_profile(legs, self.realized_pnl, is_new_trade=True)
         # If the theoretical max profit of the strategy is negative, it's a guaranteed loser. Do not open it.
-        if pnl_profile['strategy_max_profit'] < 0:
-            print(f"DEBUG: Aborting open of {action_name} due to negative max profit.") # Optional debug print
-            return
+        if pnl['strategy_max_profit'] < 0: return
         pnl['strategy_id'] = self.strategy_name_to_id.get(action_name, -1)
         self._execute_trades(legs, pnl)
 
@@ -1798,7 +1816,7 @@ class PortfolioManager:
         if not priced_legs:
             return
 
-        pnl_profile = self._calculate_universal_risk_profile(priced_legs, self.realized_pnl)
+        pnl_profile = self._calculate_universal_risk_profile(priced_legs, self.realized_pnl, is_new_trade=True)
         if pnl_profile['strategy_max_profit'] < 0: return
         pnl_profile['strategy_id'] = self.strategy_name_to_id.get(action_name, -1)
         self._execute_trades(priced_legs, pnl_profile)
@@ -1880,7 +1898,7 @@ class PortfolioManager:
             leg['entry_step'] = current_step
         
         legs = self._price_legs(legs, current_price, iv_bin_index)
-        pnl  = self._calculate_universal_risk_profile(legs, self.realized_pnl)
+        pnl  = self._calculate_universal_risk_profile(legs, self.realized_pnl, is_new_trade=True)
         if pnl['strategy_max_profit'] < 0: return
         pnl['strategy_id'] = self.strategy_name_to_id.get(action_name, -1)
         self._execute_trades(legs, pnl)
@@ -2007,7 +2025,7 @@ class PortfolioManager:
         # --- 3. Finalize the Trade ---
         if best_legs_found:
             for leg in best_legs_found: leg['entry_step'] = current_step
-            pnl_profile = self._calculate_universal_risk_profile(best_legs_found, self.realized_pnl)
+            pnl_profile = self._calculate_universal_risk_profile(best_legs_found, self.realized_pnl, is_new_trade=True)
             if pnl_profile['strategy_max_profit'] < 0: return
             pnl_profile['strategy_id'] = self.strategy_name_to_id.get(action_name, -1)
             self._execute_trades(best_legs_found, pnl_profile)
