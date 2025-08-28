@@ -4,6 +4,7 @@ from tqdm import tqdm
 import json
 import numpy as np
 import torch
+import math
 
 from lzero.entry import eval_muzero
 from zoo.options_zero_game.config.options_zero_game_muzero_config import main_config, create_config
