@@ -119,6 +119,7 @@ class OptionsZeroGameEnv(gym.Env):
         if cfg is not None: self._cfg.update(cfg)
 
         self.is_custom_iv_episode = False
+        self.use_expert_iv = self._cfg.get('use_expert_iv', True)
 
         # Add a flag to track if this specific instance has been reset yet.
         self._has_printed_setup_info = False
@@ -417,6 +418,12 @@ class OptionsZeroGameEnv(gym.Env):
 
     def _handle_day_change(self):
         """Called when a day passes. Evolves the IV regime using the Markov chain."""
+        # <<< --- THE DEFINITIVE FIX IS HERE --- >>>
+        # If there is only one (or zero) regimes defined, it's impossible to transition.
+        # This guard clause makes the function robust to test-specific overrides.
+        if len(self.regimes) <= 1:
+            return
+
         # If this is a custom run, do NOT change the regime.
         if self.is_custom_iv_episode:
             return
@@ -511,6 +518,10 @@ class OptionsZeroGameEnv(gym.Env):
         iv_from_table = self.market_rules_manager.get_implied_volatility(
             offset, option_type, self.iv_bin_index
         )
+
+        # If the expert IV system is disabled, we return the static table value immediately.
+        if not self.use_expert_iv:
+            return iv_from_table
         
         # 2. Get the expert's prediction from the new architecture.
         vol_embedding = self.price_manager.volatility_embedding
