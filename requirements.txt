@@ -10,3 +10,4 @@ xxhash
 einops
 openai
 nltk
+py_vollib_vectorized
