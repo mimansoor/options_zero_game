@@ -1,0 +1,14 @@
+# .pre-commit-config.yaml
+
+repos:
+-   repo: local
+    hooks:
+    -   id: regression-tests
+        name: Run Options-Zero-Game Regression Suite
+        entry: python3 zoo/options_zero_game/entry/regression_suite.py
+        language: system  # Use the system's python, assumes your venv is active
+        pass_filenames: false # We want to run the whole suite, not just on changed files
+        stages: [commit]    # Run this hook only when you `git commit`
+        # Set PYTHONPATH so the script can find the 'zoo' module
+        env:
+          PYTHONPATH: .
