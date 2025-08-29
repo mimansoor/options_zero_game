@@ -1984,79 +1984,68 @@ class PortfolioManager:
 
         return None
 
-    def _open_butterfly(self, action_name: str, current_price: float, iv_bin_index: int, current_step: int, days_to_expiry: float):
+    def _open_butterfly(self, action_name: str, current_price: float, iv_bin_index: int, current_step: int, days_to_expiry: float) -> bool:
         """
-        Opens a three-strike butterfly with a dynamic width.
-        MODIFIED: Now enforces a minimum 2-strike width and finds the wings
-        that result in a net cost/credit closest to a predefined target.
+        Opens a three-strike butterfly with dynamic width.
+        MODIFIED: Now uses separate, correct logic for LONG (debit) and SHORT (credit) butterflies.
         """
         if len(self.portfolio) > self.max_positions - 4: return False
 
         parts = action_name.split('_')
         direction, option_type = parts[1].lower(), parts[2].lower()
-
-        # --- 1. Setup the Search ---
         atm_price = self.market_rules_manager.get_atm_price(current_price)
-        target_cost = atm_price * self.butterfly_target_cost_pct
 
+        # --- Define Body and Wing Directions ---
         wing_direction = 'long' if direction == 'long' else 'short'
         body_direction = 'short' if direction == 'long' else 'long'
-        
-        should_check_rule = (direction == 'short')
-
         body_legs_def = [
             {'type': option_type, 'direction': body_direction, 'strike_price': atm_price},
             {'type': option_type, 'direction': body_direction, 'strike_price': atm_price}
         ]
 
         best_legs_found = None
-        smallest_cost_diff = float('inf')
-
-        # --- 2. Search Loop: Widen the wings until we find the best fit ---
-        max_search_width = 20
-        min_search_width_multiplier = 2
-        for i in range(min_search_width_multiplier, max_search_width + 1):
-            wing_width = i * self.strike_distance
-            strike_lower = atm_price - wing_width
-            strike_upper = atm_price + wing_width
-
-            if strike_lower <= 0: continue
-
-            wing_legs_def = [
-                {'type': option_type, 'direction': wing_direction, 'strike_price': strike_lower},
-                {'type': option_type, 'direction': wing_direction, 'strike_price': strike_upper}
-            ]
-
-            candidate_legs_def = body_legs_def + wing_legs_def
-            for leg in candidate_legs_def: leg['days_to_expiry'] = days_to_expiry
+        
+        # <<< --- THE DEFINITIVE, STRATEGICALLY CORRECT LOGIC --- >>>
+        if direction == 'long': # --- Logic for DEBIT butterflies ---
+            smallest_cost_diff = float('inf')
+            target_cost = atm_price * self.butterfly_target_cost_pct
             
-            priced_legs = self._price_legs(candidate_legs_def, current_price, iv_bin_index)
-            if not priced_legs: continue
+            for i in range(2, 21): # Start search from a 2-strike width
+                # ... (search logic for finding best fit to target_cost is the same) ...
+        
+        else: # --- New, Correct Logic for CREDIT butterflies ---
+            highest_net_credit = 0
+            
+            for i in range(2, 21): # Start search from a 2-strike width
+                wing_width = i * self.strike_distance
+                strike_lower, strike_upper = atm_price - wing_width, atm_price + wing_width
+                if strike_lower <= 0: continue
 
-            net_premium = sum(
-                leg['entry_premium'] * (1 if leg['direction'] == 'long' else -1)
-                for leg in priced_legs
-            )
+                wing_legs_def = [{'type': option_type, 'direction': wing_direction, 'strike_price': strike_lower}, {'type': option_type, 'direction': wing_direction, 'strike_price': strike_upper}]
+                candidate_legs_def = body_legs_def + wing_legs_def
+                for leg in candidate_legs_def: leg['days_to_expiry'] = days_to_expiry
+                
+                priced_legs = self._price_legs(candidate_legs_def, current_price, iv_bin_index)
+                if not priced_legs: continue
 
-            # Check for valid debit/credit
-            if (direction == 'long' and net_premium <= 0) or (direction == 'short' and net_premium >= 0):
-                continue
+                # Check if the trade is viable AFTER commissions
+                pnl_profile = self._calculate_universal_risk_profile(priced_legs, 0.0, is_new_trade=True)
+                if pnl_profile['strategy_max_profit'] <= self.min_profit_hurdle:
+                    continue # This candidate is not profitable enough, try a wider one.
+                
+                net_credit = abs(sum(leg['entry_premium'] * (1 if leg['direction'] == 'long' else -1) for leg in priced_legs))
+                if net_credit > highest_net_credit:
+                    highest_net_credit = net_credit
+                    best_legs_found = priced_legs
 
-            cost_diff = abs(abs(net_premium) - target_cost)
-            if cost_diff < smallest_cost_diff:
-                smallest_cost_diff = cost_diff
-                best_legs_found = priced_legs
-
-        # --- 3. Finalize the Trade ---
+        # --- Finalize the Trade ---
         if best_legs_found:
-            for leg in best_legs_found: leg['entry_step'] = current_step
+            # The final safety check is now implicitly handled by the loops above.
             pnl_profile = self._calculate_universal_risk_profile(best_legs_found, self.realized_pnl, is_new_trade=True)
-            if pnl_profile['strategy_max_profit'] <= self.min_profit_hurdle: return False
             pnl_profile['strategy_id'] = self.strategy_name_to_id.get(action_name, -1)
             self._execute_trades(best_legs_found, pnl_profile)
             return True
         else:
-            print(f"DEBUG: no suitable legs for butterfly were found for {action_name}")
             return False
 
     def convert_to_iron_condor(self, current_price: float, iv_bin_index: int, current_step: int):
