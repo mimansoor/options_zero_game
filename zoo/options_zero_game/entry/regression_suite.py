@@ -32,6 +32,22 @@ def create_test_env(forced_opening_strategy: str):
     return gym.make('OptionsZeroGame-v0', cfg=env_cfg)
 
 # ==============================================================================
+#                 HELPER TO ISOLATE TESTS FROM P&L TERMINATION
+# ==============================================================================
+def create_isolated_test_env(forced_opening_strategy: str):
+    """
+    Creates a test environment where P&L-based termination rules (stop-loss,
+    take-profit) are disabled. This is essential for tests that only need to
+    validate the structural change of a portfolio modification.
+    """
+    env = create_test_env(forced_opening_strategy)
+    env.unwrapped._cfg.use_stop_loss = False
+    env.unwrapped._cfg.credit_strategy_take_profit_pct = 0
+    env.unwrapped._cfg.debit_strategy_take_profit_multiple = 0
+    env.unwrapped._cfg.profit_target_pct = 0
+    return env
+
+# ==============================================================================
 #                            INDIVIDUAL TEST CASES
 # ==============================================================================
 def test_hedge_portfolio_by_rolling_leg():
@@ -44,13 +60,6 @@ def test_hedge_portfolio_by_rolling_leg():
     print(f"\n--- RUNNING: {test_name} ---")
     # Start with a short strangle, as it's a good candidate for delta adjustments.
     env = create_test_env('OPEN_SHORT_STRANGLE_DELTA_30')
-
-    # 2. Directly access the environment's config to disable termination rules.
-    #    This isolates the test to only check if the position opens correctly.
-    env.unwrapped._cfg.use_stop_loss = False
-    env.unwrapped._cfg.credit_strategy_take_profit_pct = 0
-    env.unwrapped._cfg.debit_strategy_take_profit_multiple = 0
-    env.unwrapped._cfg.profit_target_pct = 0
 
     try:
         # Step 1: Open the position
@@ -384,14 +393,7 @@ def test_open_short_call_condor():
     """Tests if OPEN_SHORT_CALL_CONDOR correctly opens a 4-leg position."""
     test_name = "test_open_short_call_condor"
     print(f"\n--- RUNNING: {test_name} ---")
-    env = create_test_env('OPEN_SHORT_CALL_CONDOR')
-
-    # 2. Directly access the environment's config to disable termination rules.
-    #    This isolates the test to only check if the position opens correctly.
-    env.unwrapped._cfg.use_stop_loss = False
-    env.unwrapped._cfg.credit_strategy_take_profit_pct = 0
-    env.unwrapped._cfg.debit_strategy_take_profit_multiple = 0
-    env.unwrapped._cfg.profit_target_pct = 0
+    env = create_isolated_test_env('OPEN_SHORT_CALL_CONDOR')
 
     try:
         env.reset(seed=55)
@@ -420,14 +422,7 @@ def test_open_long_call_condor():
     """Tests if OPEN_LONG_CALL_CONDOR correctly opens a 4-leg position."""
     test_name = "test_open_long_call_condor"
     print(f"\n--- RUNNING: {test_name} ---")
-    env = create_test_env('OPEN_LONG_CALL_CONDOR')
-
-    # 2. Directly access the environment's config to disable termination rules.
-    #    This isolates the test to only check if the position opens correctly.
-    env.unwrapped._cfg.use_stop_loss = False
-    env.unwrapped._cfg.credit_strategy_take_profit_pct = 0
-    env.unwrapped._cfg.debit_strategy_take_profit_multiple = 0
-    env.unwrapped._cfg.profit_target_pct = 0
+    env = create_isolated_test_env('OPEN_LONG_CALL_CONDOR')
 
     try:
         env.reset(seed=56)
@@ -456,14 +451,7 @@ def test_open_long_put_condor():
     """Tests if OPEN_LONG_PUT_CONDOR correctly opens a 4-leg position."""
     test_name = "test_open_long_put_condor"
     print(f"\n--- RUNNING: {test_name} ---")
-    env = create_test_env('OPEN_LONG_PUT_CONDOR')
-
-    # 2. Directly access the environment's config to disable termination rules.
-    #    This isolates the test to only check if the position opens correctly.
-    env.unwrapped._cfg.use_stop_loss = False
-    env.unwrapped._cfg.credit_strategy_take_profit_pct = 0
-    env.unwrapped._cfg.debit_strategy_take_profit_multiple = 0
-    env.unwrapped._cfg.profit_target_pct = 0
+    env = create_isolated_test_env('OPEN_LONG_PUT_CONDOR')
 
     try:
         env.reset(seed=56)
@@ -689,7 +677,7 @@ def test_hedge_naked_put():
     """Tests if HEDGE_NAKED_POS correctly converts a naked put into a Bull Put Spread."""
     test_name = "test_hedge_naked_put"
     print(f"\n--- RUNNING: {test_name} ---")
-    env = create_test_env('OPEN_SHORT_PUT_ATM-1')
+    env = create_isolated_test_env('OPEN_SHORT_PUT_ATM-1')
     try:
         # Step 0: Reset the environment
         obs_dict = env.reset(seed=42)
@@ -727,7 +715,7 @@ def test_convert_strangle_to_condor():
     """Tests if CONVERT_TO_IRON_CONDOR correctly adds wings to a strangle."""
     test_name = "test_convert_strangle_to_condor"
     print(f"\n--- RUNNING: {test_name} ---")
-    env = create_test_env('OPEN_SHORT_STRANGLE_DELTA_20')
+    env = create_isolated_test_env('OPEN_SHORT_STRANGLE_DELTA_20')
     try:
         # <<< THE FIX: Execute the forced opening action on Step 0 >>>
         env.reset(seed=42)
@@ -758,7 +746,7 @@ def test_convert_condor_to_vertical():
     """Tests if CONVERT_TO_BULL_PUT_SPREAD correctly removes the call side of a condor."""
     test_name = "test_convert_condor_to_vertical"
     print(f"\n--- RUNNING: {test_name} ---")
-    env = create_test_env('OPEN_SHORT_IRON_CONDOR')
+    env = create_isolated_test_env('OPEN_SHORT_IRON_CONDOR')
     try:
         # <<< THE FIX: Execute the forced opening action on Step 0 >>>
         env.reset(seed=42)
@@ -794,7 +782,7 @@ def test_shift_preserves_strategy():
     """
     test_name = "test_shift_preserves_strategy"
     print(f"\n--- RUNNING: {test_name} ---")
-    env = create_test_env('OPEN_SHORT_STRANGLE_DELTA_20')
+    env = create_isolated_test_env('OPEN_SHORT_STRANGLE_DELTA_20')
     try:
         # Step 0: Open the position and get its initial state
         env.reset(seed=42)
@@ -845,7 +833,7 @@ def test_hedge_short_call():
     """Tests hedging a naked SHORT CALL into a Bear Call Spread."""
     test_name = "test_hedge_short_call"
     print(f"\n--- RUNNING: {test_name} ---")
-    env = create_test_env('OPEN_SHORT_CALL_ATM+1')
+    env = create_isolated_test_env('OPEN_SHORT_CALL_ATM+1')
     try:
         env.reset(seed=43)
         env.step(env.actions_to_indices['HOLD'])
@@ -875,7 +863,7 @@ def test_hedge_long_put():
     """Tests hedging a naked LONG PUT into a Bear Put Spread."""
     test_name = "test_hedge_long_put"
     print(f"\n--- RUNNING: {test_name} ---")
-    env = create_test_env('OPEN_LONG_PUT_ATM-1')
+    env = create_isolated_test_env('OPEN_LONG_PUT_ATM-1')
     try:
         env.reset(seed=44)
         env.step(env.actions_to_indices['HOLD'])
@@ -905,7 +893,7 @@ def test_hedge_long_call():
     """Tests hedging a naked LONG CALL into a Bull Call Spread."""
     test_name = "test_hedge_long_call"
     print(f"\n--- RUNNING: {test_name} ---")
-    env = create_test_env('OPEN_LONG_CALL_ATM+1')
+    env = create_isolated_test_env('OPEN_LONG_CALL_ATM+1')
     try:
         env.reset(seed=45)
         env.step(env.actions_to_indices['HOLD'])
@@ -935,7 +923,7 @@ def test_convert_straddle_to_fly():
     """Tests if CONVERT_TO_IRON_FLY correctly adds wings to a straddle."""
     test_name = "test_convert_straddle_to_fly"
     print(f"\n--- RUNNING: {test_name} ---")
-    env = create_test_env('OPEN_SHORT_STRADDLE')
+    env = create_isolated_test_env('OPEN_SHORT_STRADDLE')
     try:
         env.reset(seed=46)
         env.step(env.actions_to_indices['HOLD'])
@@ -948,7 +936,7 @@ def test_convert_straddle_to_fly():
         legs = len(portfolio_after)
         assert legs == 4, f"Conversion failed: Expected 4 legs. Got {legs}"
         assert portfolio_after.iloc[0]['strategy_id'] == env.strategy_name_to_id['SHORT_IRON_FLY'], "Incorrect strategy ID."
-        assert stats['max_loss'] > -500000, "Conversion failed: Risk is still undefined."
+        assert stats['max_loss'] > -500000, f"Conversion failed: Risk is still undefined. {stats['max_loss']}"
         
         print(f"--- PASSED: {test_name} ---")
         return True
@@ -963,7 +951,7 @@ def test_convert_call_fly_to_vertical():
     """Tests decomposing a Call Fly into a Bull Call Spread."""
     test_name = "test_convert_call_fly_to_vertical"
     print(f"\n--- RUNNING: {test_name} ---")
-    env = create_test_env('OPEN_SHORT_CALL_FLY')
+    env = create_isolated_test_env('OPEN_SHORT_CALL_FLY')
     try:
         env.reset(seed=47)
         env.step(env.actions_to_indices['HOLD'])
@@ -989,7 +977,7 @@ def test_convert_put_fly_to_vertical():
     """Tests decomposing a Put Fly into a Bear Put Spread."""
     test_name = "test_convert_put_fly_to_vertical"
     print(f"\n--- RUNNING: {test_name} ---")
-    env = create_test_env('OPEN_SHORT_PUT_FLY')
+    env = create_isolated_test_env('OPEN_SHORT_PUT_FLY')
     try:
         env.reset(seed=48)
         env.step(env.actions_to_indices['HOLD'])
@@ -1015,7 +1003,7 @@ def test_hedge_strangle_leg():
     """Tests hedging one leg of a two-leg strangle."""
     test_name = "test_hedge_strangle_leg"
     print(f"\n--- RUNNING: {test_name} ---")
-    env = create_test_env('OPEN_SHORT_STRANGLE_DELTA_20')
+    env = create_isolated_test_env('OPEN_SHORT_STRANGLE_DELTA_20')
     try:
         env.reset(seed=49)
         env.step(env.actions_to_indices['HOLD'])
@@ -1049,7 +1037,7 @@ def test_hedge_straddle_leg():
     """Tests hedging one leg of a two-leg straddle."""
     test_name = "test_hedge_straddle_leg"
     print(f"\n--- RUNNING: {test_name} ---")
-    env = create_test_env('OPEN_SHORT_STRADDLE')
+    env = create_isolated_test_env('OPEN_SHORT_STRADDLE')
     try:
         env.reset(seed=50)
         env.step(env.actions_to_indices['HOLD'])
@@ -1086,7 +1074,7 @@ def test_no_new_trades_when_active():
     test_name = "test_no_new_trades_when_active"
     print(f"\n--- RUNNING: {test_name} ---")
     # We can start with any simple strategy to make the portfolio active.
-    env = create_test_env('OPEN_BULL_PUT_SPREAD')
+    env = create_isolated_test_env('OPEN_BULL_PUT_SPREAD')
     try:
         # Step 0: Open the initial position to make the portfolio non-empty.
         env.reset(seed=51)
@@ -1248,7 +1236,7 @@ def test_no_runaway_duplication_on_transform():
     print(f"\n--- RUNNING: {test_name} ---")
 
     # Start with a 2-leg strangle
-    env = create_test_env('OPEN_SHORT_STRANGLE_DELTA_20')
+    env = create_isolated_test_env('OPEN_SHORT_STRANGLE_DELTA_20')
     try:
         # Step 0: Open the initial position
         env.reset(seed=53)
@@ -1298,7 +1286,7 @@ def test_close_all_action():
     print(f"\n--- RUNNING: {test_name} ---")
     
     # Start with a complex 4-leg position to rigorously test the closing loop.
-    env = create_test_env('OPEN_SHORT_IRON_CONDOR')
+    env = create_isolated_test_env('OPEN_SHORT_IRON_CONDOR')
     try:
         # Step 0: Open the initial position.
         env.reset(seed=54)
@@ -1345,7 +1333,7 @@ def test_open_jade_lizard():
     """Tests if OPEN_JADE_LIZARD opens the correct 3-leg structure."""
     test_name = "test_open_jade_lizard"
     print(f"\n--- RUNNING: {test_name} ---")
-    env = create_test_env('OPEN_JADE_LIZARD')
+    env = create_isolated_test_env('OPEN_JADE_LIZARD')
     try:
         env.reset(seed=66)
         env.step(env.actions_to_indices['HOLD'])
@@ -1376,14 +1364,7 @@ def test_open_reverse_jade_lizard():
     """Tests if OPEN_REVERSE_JADE_LIZARD opens the correct 3-leg structure."""
     test_name = "test_open_reverse_jade_lizard"
     print(f"\n--- RUNNING: {test_name} ---")
-    env = create_test_env('OPEN_REVERSE_JADE_LIZARD')
-
-    # 2. Directly access the environment's config to disable termination rules.
-    #    This isolates the test to only check if the position opens correctly.
-    env.unwrapped._cfg.use_stop_loss = False
-    env.unwrapped._cfg.credit_strategy_take_profit_pct = 0
-    env.unwrapped._cfg.debit_strategy_take_profit_multiple = 0
-    env.unwrapped._cfg.profit_target_pct = 0
+    env = create_isolated_test_env('OPEN_REVERSE_JADE_LIZARD')
 
     try:
         env.reset(seed=67)
@@ -1415,7 +1396,7 @@ def test_open_big_lizard():
     """Tests if OPEN_BIG_LIZARD opens the correct 3-leg straddle + long call."""
     test_name = "test_open_big_lizard"
     print(f"\n--- RUNNING: {test_name} ---")
-    env = create_test_env('OPEN_BIG_LIZARD')
+    env = create_isolated_test_env('OPEN_BIG_LIZARD')
     try:
         env.reset(seed=68)
         env.step(env.actions_to_indices['HOLD'])
@@ -1446,7 +1427,7 @@ def test_open_reverse_big_lizard():
     """Tests if OPEN_REVERSE_BIG_LIZARD opens the correct 3-leg straddle + long put."""
     test_name = "test_open_reverse_big_lizard"
     print(f"\n--- RUNNING: {test_name} ---")
-    env = create_test_env('OPEN_REVERSE_BIG_LIZARD')
+    env = create_isolated_test_env('OPEN_REVERSE_BIG_LIZARD')
     try:
         env.reset(seed=69)
         env.step(env.actions_to_indices['HOLD'])
@@ -1477,7 +1458,7 @@ def test_open_put_ratio_spread():
     """Tests if OPEN_PUT_RATIO_SPREAD opens the correct 1x2 put ratio spread."""
     test_name = "test_open_put_ratio_spread"
     print(f"\n--- RUNNING: {test_name} ---")
-    env = create_test_env('OPEN_PUT_RATIO_SPREAD')
+    env = create_isolated_test_env('OPEN_PUT_RATIO_SPREAD')
     try:
         env.reset(seed=70)
         env.step(env.actions_to_indices['HOLD'])
@@ -1506,7 +1487,7 @@ def test_open_call_ratio_spread():
     """Tests if OPEN_CALL_RATIO_SPREAD opens the correct 1x2 call ratio spread."""
     test_name = "test_open_call_ratio_spread"
     print(f"\n--- RUNNING: {test_name} ---")
-    env = create_test_env('OPEN_CALL_RATIO_SPREAD')
+    env = create_isolated_test_env('OPEN_CALL_RATIO_SPREAD')
     try:
         env.reset(seed=71)
         env.step(env.actions_to_indices['HOLD'])

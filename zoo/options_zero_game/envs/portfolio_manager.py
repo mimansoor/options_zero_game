@@ -1986,10 +1986,12 @@ class PortfolioManager:
 
     def _open_butterfly(self, action_name: str, current_price: float, iv_bin_index: int, current_step: int, days_to_expiry: float) -> bool:
         """
-        Opens a three-strike butterfly with dynamic width.
-        MODIFIED: Now uses separate, correct logic for LONG (debit) and SHORT (credit) butterflies.
+        Opens a three-strike butterfly with a dynamic width.
+        This version uses separate, correct logic for LONG (debit, seeks target cost)
+        and SHORT (credit, seeks max profitable credit) butterflies.
         """
-        if len(self.portfolio) > self.max_positions - 4: return False
+        if len(self.portfolio) > self.max_positions - 4:
+            return False
 
         parts = action_name.split('_')
         direction, option_type = parts[1].lower(), parts[2].lower()
@@ -2004,19 +2006,14 @@ class PortfolioManager:
         ]
 
         best_legs_found = None
+        max_search_width = 20
+        min_search_width_multiplier = 2
         
-        # <<< --- THE DEFINITIVE, STRATEGICALLY CORRECT LOGIC --- >>>
-        if direction == 'long': # --- Logic for DEBIT butterflies ---
+        if direction == 'long': # --- Logic for LONG (DEBIT) butterflies ---
             smallest_cost_diff = float('inf')
             target_cost = atm_price * self.butterfly_target_cost_pct
             
-            for i in range(2, 21): # Start search from a 2-strike width
-                # ... (search logic for finding best fit to target_cost is the same) ...
-        
-        else: # --- New, Correct Logic for CREDIT butterflies ---
-            highest_net_credit = 0
-            
-            for i in range(2, 21): # Start search from a 2-strike width
+            for i in range(min_search_width_multiplier, max_search_width + 1):
                 wing_width = i * self.strike_distance
                 strike_lower, strike_upper = atm_price - wing_width, atm_price + wing_width
                 if strike_lower <= 0: continue
@@ -2028,22 +2025,58 @@ class PortfolioManager:
                 priced_legs = self._price_legs(candidate_legs_def, current_price, iv_bin_index)
                 if not priced_legs: continue
 
-                # Check if the trade is viable AFTER commissions
+                # For a debit trade, check that it's actually a debit.
+                net_premium = sum(leg['entry_premium'] * (1 if leg['direction'] == 'long' else -1) for leg in priced_legs)
+                if net_premium <= 0: continue
+                
+                # Check if this trade is viable after commissions.
                 pnl_profile = self._calculate_universal_risk_profile(priced_legs, 0.0, is_new_trade=True)
                 if pnl_profile['strategy_max_profit'] <= self.min_profit_hurdle:
-                    continue # This candidate is not profitable enough, try a wider one.
+                    continue
+
+                # If viable, check if it's the best fit for our target cost.
+                cost_diff = abs(net_premium - target_cost)
+                if cost_diff < smallest_cost_diff:
+                    smallest_cost_diff = cost_diff
+                    best_legs_found = priced_legs
+        
+        else: # --- New, Correct Logic for SHORT (CREDIT) butterflies ---
+            highest_net_credit = 0
+            
+            for i in range(min_search_width_multiplier, max_search_width + 1):
+                wing_width = i * self.strike_distance
+                strike_lower, strike_upper = atm_price - wing_width, atm_price + wing_width
+                if strike_lower <= 0: continue
+
+                wing_legs_def = [{'type': option_type, 'direction': wing_direction, 'strike_price': strike_lower}, {'type': option_type, 'direction': wing_direction, 'strike_price': strike_upper}]
+                candidate_legs_def = body_legs_def + wing_legs_def
+                for leg in candidate_legs_def: leg['days_to_expiry'] = days_to_expiry
                 
-                net_credit = abs(sum(leg['entry_premium'] * (1 if leg['direction'] == 'long' else -1) for leg in priced_legs))
+                priced_legs = self._price_legs(candidate_legs_def, current_price, iv_bin_index)
+                if not priced_legs: continue
+
+                # For a credit trade, check that it's actually a credit.
+                net_premium = sum(leg['entry_premium'] * (1 if leg['direction'] == 'long' else -1) for leg in priced_legs)
+                if net_premium >= 0: continue
+
+                # Check if the trade is viable after commissions.
+                pnl_profile = self._calculate_universal_risk_profile(priced_legs, 0.0, is_new_trade=True)
+                if pnl_profile['strategy_max_profit'] <= self.min_profit_hurdle:
+                    continue 
+
+                # If viable, check if it's the most credit we can receive.
+                net_credit = abs(net_premium)
                 if net_credit > highest_net_credit:
                     highest_net_credit = net_credit
                     best_legs_found = priced_legs
 
         # --- Finalize the Trade ---
         if best_legs_found:
-            # The final safety check is now implicitly handled by the loops above.
-            pnl_profile = self._calculate_universal_risk_profile(best_legs_found, self.realized_pnl, is_new_trade=True)
-            pnl_profile['strategy_id'] = self.strategy_name_to_id.get(action_name, -1)
-            self._execute_trades(best_legs_found, pnl_profile)
+            for leg in best_legs_found: leg['entry_step'] = current_step
+            # We must recalculate the final PnL profile with the true realized PnL
+            final_pnl_profile = self._calculate_universal_risk_profile(best_legs_found, self.realized_pnl, is_new_trade=True)
+            final_pnl_profile['strategy_id'] = self.strategy_name_to_id.get(action_name, -1)
+            self._execute_trades(best_legs_found, final_pnl_profile)
             return True
         else:
             return False
