@@ -139,7 +139,7 @@ class PortfolioManager:
         thirty_day_rate = (1 + annual_risk_free_rate)**(5 / 365.25) - 1
         self.min_profit_hurdle = cfg['initial_cash'] * thirty_day_rate
         
-        print(f"[PortfolioManager] Initialized with a minimum profit hurdle of ${self.min_profit_hurdle:,.2f}")
+        #print(f"[PortfolioManager] Initialized with a minimum profit hurdle of ${self.min_profit_hurdle:,.2f}")
 
         self.id_to_strategy_name = {v: k for k, v in self.strategy_name_to_id.items()}
         
