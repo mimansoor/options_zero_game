@@ -260,59 +260,49 @@ def test_no_recenter_on_long_volatility_position():
 def test_hedge_delta_with_atm_option():
     """
     Tests if HEDGE_DELTA adds a new leg that correctly reduces net delta.
-    This version dynamically waits for the action to become legal.
     """
     test_name = "test_hedge_delta_with_atm_option"
     print(f"\n--- RUNNING: {test_name} ---")
-    env = create_test_env('OPEN_SHORT_CALL_ATM-1')
+
+    # <<< --- THE DEFINITIVE FIX: Isolate the test from all dynamic IV and P&L logic --- >>>
+    flat_vol_regime = {'name': 'Flat_Test_Regime', 'mu': 0, 'omega': 0, 'alpha': 0, 'beta': 1, 'atm_iv': 25.0, 'far_otm_put_iv': 25.0, 'far_otm_call_iv': 25.0}
+    env = create_isolated_test_env(
+        'OPEN_SHORT_CALL_ATM-1',
+        overrides={'use_expert_iv': False, 'iv_price_correlation_strength': 0.0, 'unified_regimes': [flat_vol_regime]}
+    )
+
     try:
-        # Step 1: Open the initial position
         env.reset(seed=59)
         timestep = env.step(env.actions_to_indices['HOLD'])
-        assert len(env.portfolio_manager.get_portfolio()) == 1, "Setup failed: Did not open initial leg."
+        assert len(env.portfolio_manager.get_portfolio()) == 1, "Setup failed"
 
-        # <<< --- THE NEW DYNAMIC WAITING LOOP --- >>>
-        max_wait_steps = 50  # Safety break to prevent infinite loops
+        max_wait_steps = 50
         hedge_action_index = env.actions_to_indices['HEDGE_DELTA_WITH_ATM_OPTION']
-        
         print("[TEST_DEBUG] Waiting for HEDGE_DELTA action to become legal...")
         for i in range(max_wait_steps):
             action_mask = timestep.obs['action_mask']
-            
-            # Check if the hedge action is now legal
             if action_mask[hedge_action_index] == 1:
                 print(f"[TEST_DEBUG] Hedge action became legal after {i+1} market steps.")
-                break  # Exit the loop, we are ready to test
-            
-            # If not legal, advance the market one more step and get the new state
+                break
             timestep = env.step(env.actions_to_indices['HOLD'])
         else:
-            # This 'else' block runs only if the 'for' loop completes without a 'break'.
-            # This means the action never became legal.
             stats = env.portfolio_manager.get_raw_portfolio_stats(env.price_manager.current_price, env.iv_bin_index)
-            assert False, f"Hedge action did not become legal within {max_wait_steps} steps. Final delta_norm: {stats['delta'] / (4*75):.4f}"
+            max_delta_exposure = env.unwrapped.portfolio_manager.max_positions * env.unwrapped.portfolio_manager.lot_size
+            delta_norm_final = stats['delta'] / max_delta_exposure if max_delta_exposure > 0 else 0.0
+            assert False, f"Hedge action did not become legal within {max_wait_steps} steps. Final delta_norm: {delta_norm_final:.4f}"
 
-        # Step 2: Now that the action is legal, record the "before" state
         portfolio_before = env.portfolio_manager.get_portfolio().to_dict('records')
-        
-        # Step 3: Execute the hedge action
         env.step(hedge_action_index)
-        
-        # --- Assertions ---
         portfolio_after = env.portfolio_manager.get_portfolio()
         assert len(portfolio_after) == 2, f"Hedge failed: Expected 2 total legs, but found {len(portfolio_after)}."
-        
         assert portfolio_after['direction'].value_counts()['long'] == 1, "Hedge failed: Did not add a long leg."
-        
-        # Apples-to-apples delta comparison
+
         current_price = env.price_manager.current_price
         iv_bin_index = env.iv_bin_index
         stats_after = env.portfolio_manager.get_raw_portfolio_stats(current_price, iv_bin_index)
         delta_after = stats_after['delta']
-        
         hypothetical_stats_before = env.portfolio_manager.get_raw_greeks_for_legs(portfolio_before, current_price, iv_bin_index)
         hypothetical_delta_before = hypothetical_stats_before['delta']
-        
         assert abs(delta_after) < abs(hypothetical_delta_before), f"Hedge failed: Delta did not move towards zero. Before: {hypothetical_delta_before:.2f}, After: {delta_after:.2f}"
 
         print(f"--- PASSED: {test_name} ---")
@@ -732,18 +722,21 @@ def test_convert_strangle_to_condor():
     """Tests if CONVERT_TO_IRON_CONDOR correctly adds wings to a strangle."""
     test_name = "test_convert_strangle_to_condor"
     print(f"\n--- RUNNING: {test_name} ---")
-    env = create_isolated_test_env('OPEN_SHORT_STRANGLE_DELTA_20')
+
+    flat_vol_regime = {'name': 'Flat_Test_Regime', 'mu': 0, 'omega': 0, 'alpha': 0, 'beta': 1, 'atm_iv': 25.0, 'far_otm_put_iv': 25.0, 'far_otm_call_iv': 25.0}
+    env = create_isolated_test_env(
+        'OPEN_SHORT_STRANGLE_DELTA_20',
+        overrides={'use_expert_iv': False, 'iv_price_correlation_strength': 0.0, 'unified_regimes': [flat_vol_regime]}
+    )
+
     try:
-        # <<< THE FIX: Execute the forced opening action on Step 0 >>>
         env.reset(seed=42)
         env.step(env.actions_to_indices['HOLD'])
         assert len(env.portfolio_manager.get_portfolio()) == 2, "Setup failed: Did not open a 2-leg strangle."
-        
-        # Step 1: Execute the convert action
+
         action_to_take = env.actions_to_indices['CONVERT_TO_IRON_CONDOR']
         env.step(action_to_take)
-        
-        # --- Assertions ---
+
         portfolio_after = env.portfolio_manager.get_portfolio()
         assert len(portfolio_after) == 4, "Conversion failed: Expected 4 legs."
         assert portfolio_after['direction'].value_counts()['long'] == 2, "Conversion failed: Did not add 2 long wings."
@@ -763,22 +756,26 @@ def test_convert_condor_to_vertical():
     """Tests if CONVERT_TO_BULL_PUT_SPREAD correctly removes the call side of a condor."""
     test_name = "test_convert_condor_to_vertical"
     print(f"\n--- RUNNING: {test_name} ---")
-    env = create_isolated_test_env('OPEN_SHORT_IRON_CONDOR')
+
+    # <<< --- THE DEFINITIVE FIX: Isolate the test in a sterile, flat-volatility environment --- >>>
+    flat_vol_regime = {'name': 'Flat_Test_Regime', 'mu': 0, 'omega': 0, 'alpha': 0, 'beta': 1, 'atm_iv': 25.0, 'far_otm_put_iv': 25.0, 'far_otm_call_iv': 25.0}
+    env = create_isolated_test_env(
+        'OPEN_SHORT_IRON_CONDOR',
+        overrides={'use_expert_iv': False, 'iv_price_correlation_strength': 0.0, 'unified_regimes': [flat_vol_regime]}
+    )
+
     try:
-        # <<< THE FIX: Execute the forced opening action on Step 0 >>>
         env.reset(seed=42)
         env.step(env.actions_to_indices['HOLD'])
         assert len(env.portfolio_manager.get_portfolio()) == 4, "Setup failed: Did not open a 4-leg condor."
-        
-        # Step 1: Execute the convert action
+
         action_to_take = env.actions_to_indices['CONVERT_TO_BULL_PUT_SPREAD']
         env.step(action_to_take)
-        
-        # --- Assertions ---
+
         portfolio_after = env.portfolio_manager.get_portfolio()
         assert len(portfolio_after) == 2, "Conversion failed: Expected 2 legs."
         assert all(portfolio_after['type'] == 'put'), "Conversion failed: Remaining legs are not all puts."
-        
+
         final_strat_id = portfolio_after.iloc[0]['strategy_id']
         expected_strat_id = env.strategy_name_to_id['BULL_PUT_SPREAD']
         assert final_strat_id == expected_strat_id, f"Incorrect strategy ID. Expected {expected_strat_id}, got {final_strat_id}."
@@ -940,21 +937,28 @@ def test_convert_straddle_to_fly():
     """Tests if CONVERT_TO_IRON_FLY correctly adds wings to a straddle."""
     test_name = "test_convert_straddle_to_fly"
     print(f"\n--- RUNNING: {test_name} ---")
-    env = create_isolated_test_env('OPEN_SHORT_STRADDLE')
+
+    # <<< --- THE DEFINITIVE FIX: Isolate the test in a sterile, flat-volatility environment --- >>>
+    flat_vol_regime = {'name': 'Flat_Test_Regime', 'mu': 0, 'omega': 0, 'alpha': 0, 'beta': 1, 'atm_iv': 25.0, 'far_otm_put_iv': 25.0, 'far_otm_call_iv': 25.0}
+    env = create_isolated_test_env(
+        'OPEN_SHORT_STRADDLE',
+        overrides={'use_expert_iv': False, 'iv_price_correlation_strength': 0.0, 'unified_regimes': [flat_vol_regime]}
+    )
+
     try:
         env.reset(seed=46)
         env.step(env.actions_to_indices['HOLD'])
         assert len(env.portfolio_manager.get_portfolio()) == 2, "Setup failed"
-        
+
         env.step(env.actions_to_indices['CONVERT_TO_IRON_FLY'])
-        
+
         portfolio_after = env.portfolio_manager.get_portfolio()
         stats = env.portfolio_manager.get_raw_portfolio_stats(env.price_manager.current_price, env.iv_bin_index)
         legs = len(portfolio_after)
         assert legs == 4, f"Conversion failed: Expected 4 legs. Got {legs}"
         assert portfolio_after.iloc[0]['strategy_id'] == env.strategy_name_to_id['SHORT_IRON_FLY'], "Incorrect strategy ID."
         assert stats['max_loss'] > -500000, f"Conversion failed: Risk is still undefined. {stats['max_loss']}"
-        
+
         print(f"--- PASSED: {test_name} ---")
         return True
     except Exception:
@@ -1301,33 +1305,28 @@ def test_close_all_action():
     """
     test_name = "test_close_all_action"
     print(f"\n--- RUNNING: {test_name} ---")
-    
-    # Start with a complex 4-leg position to rigorously test the closing loop.
-    env = create_isolated_test_env('OPEN_SHORT_IRON_CONDOR')
+
+    # <<< --- THE DEFINITIVE FIX: Isolate the test in a sterile, flat-volatility environment --- >>>
+    flat_vol_regime = {'name': 'Flat_Test_Regime', 'mu': 0, 'omega': 0, 'alpha': 0, 'beta': 1, 'atm_iv': 25.0, 'far_otm_put_iv': 25.0, 'far_otm_call_iv': 25.0}
+    env = create_isolated_test_env(
+        'OPEN_SHORT_IRON_CONDOR',
+        overrides={'use_expert_iv': False, 'iv_price_correlation_strength': 0.0, 'unified_regimes': [flat_vol_regime]}
+    )
+
     try:
-        # Step 0: Open the initial position.
         env.reset(seed=54)
         env.step(env.actions_to_indices['HOLD'])
-        portfolio_before = env.portfolio_manager.get_portfolio()
-        assert len(portfolio_before) == 4, "Setup failed: Did not open a 4-leg condor."
+        assert len(env.portfolio_manager.get_portfolio()) == 4, "Setup failed"
 
-        # Step 1: Let the market move for one step.
-        timestep_before_close = env.step(env.actions_to_indices['HOLD'])
-        
-        # Capture the total P&L right before closing. This is our ground truth.
-        pnl_before_close = timestep_before_close.info['eval_episode_return']
-        
-        # --- The Real Test: Execute the CLOSE_ALL action ---
+        env.step(env.actions_to_indices['HOLD'])
+
         action_to_take = env.actions_to_indices['CLOSE_ALL']
-        timestep_after_close = env.step(action_to_take)
+        env.step(action_to_take)
 
-        # --- Assertions ---
-        # 1. The portfolio must now be empty.
         portfolio_after = env.portfolio_manager.get_portfolio()
         assert portfolio_after.empty, \
             f"CLOSE_ALL failed: Portfolio is not empty. Contains {len(portfolio_after)} legs."
 
-        # 3. The "Sum of Unrealized P&L" must now be zero.
         pnl_verification = env.portfolio_manager.get_pnl_verification(env.price_manager.current_price, env.iv_bin_index)
         unrealized_pnl = pnl_verification['unrealized_pnl']
         assert np.isclose(unrealized_pnl, 0.0, atol=0.01), \
@@ -1539,42 +1538,42 @@ if __name__ == "__main__":
 
     # A list of all test functions to be executed
     tests_to_run = [
-#        test_hedge_naked_put,
+        test_hedge_naked_put,
         test_convert_strangle_to_condor,
-#        test_convert_condor_to_vertical,
-#        test_shift_preserves_strategy,
-#        test_hedge_short_call,
-#        test_hedge_long_put,
-#        test_hedge_long_call,
-#        test_convert_straddle_to_fly,
-#        test_convert_call_fly_to_vertical,
-#        test_convert_put_fly_to_vertical,
-#        test_hedge_strangle_leg,
-#        test_hedge_straddle_leg,
-#        test_no_new_trades_when_active,
-#        test_all_open_actions_are_legal,
-#        test_dte_decay_logic,
-#        test_no_runaway_duplication_on_transform,
-#        test_close_all_action,
-#        test_greeks_and_risk_validation,
-#        test_open_short_call_condor,
-#        test_open_long_call_condor,
-#        test_convert_bull_call_spread_to_condor,
-#        test_convert_bear_put_spread_to_condor,
-#        test_hedge_delta_with_atm_option,
-#        test_increase_delta_by_shifting_leg,
-#        test_decrease_delta_by_shifting_leg,
-#        test_hedge_portfolio_by_rolling_leg,
-#        test_recenter_volatility_position,
-#        test_no_recenter_on_long_volatility_position,
-#
-#        # <<< --- NEW: Add the 6 new tests to the runner --- >>>
-#        test_open_jade_lizard,
-#        test_open_reverse_jade_lizard,
-#        test_open_big_lizard,
-#        test_open_reverse_big_lizard,
-#        test_open_put_ratio_spread,
-#        test_open_call_ratio_spread,
+        test_convert_condor_to_vertical,
+        test_shift_preserves_strategy,
+        test_hedge_short_call,
+        test_hedge_long_put,
+        test_hedge_long_call,
+        test_convert_straddle_to_fly,
+        test_convert_call_fly_to_vertical,
+        test_convert_put_fly_to_vertical,
+        test_hedge_strangle_leg,
+        test_hedge_straddle_leg,
+        test_no_new_trades_when_active,
+        test_all_open_actions_are_legal,
+        test_dte_decay_logic,
+        test_no_runaway_duplication_on_transform,
+        test_close_all_action,
+        test_greeks_and_risk_validation,
+        test_open_short_call_condor,
+        test_open_long_call_condor,
+        test_convert_bull_call_spread_to_condor,
+        test_convert_bear_put_spread_to_condor,
+        test_hedge_delta_with_atm_option,
+        test_increase_delta_by_shifting_leg,
+        test_decrease_delta_by_shifting_leg,
+        test_hedge_portfolio_by_rolling_leg,
+        test_recenter_volatility_position,
+        test_no_recenter_on_long_volatility_position,
+
+        # <<< --- NEW: Add the 6 new tests to the runner --- >>>
+        test_open_jade_lizard,
+        test_open_reverse_jade_lizard,
+        test_open_big_lizard,
+        test_open_reverse_big_lizard,
+        test_open_put_ratio_spread,
+        test_open_call_ratio_spread,
     ]
 
     failures = []
