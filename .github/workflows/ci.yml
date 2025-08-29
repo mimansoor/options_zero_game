@@ -38,6 +38,7 @@ jobs:
           # Assuming requirements.txt is at the root of your repo
           pip install -r requirements.txt
 
-      # The path to your script is correct based on the context provided.
+      # Step 5: Run the regression test suite with the correct Python path.
       - name: Run regression test suite
-        run: python3 zoo/options_zero_game/entry/regression_suite.py
+        run: |
+          PYTHONPATH=. python3 zoo/options_zero_game/entry/regression_suite.py
