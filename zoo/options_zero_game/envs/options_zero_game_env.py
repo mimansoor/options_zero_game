@@ -465,7 +465,6 @@ class OptionsZeroGameEnv(gym.Env):
         # 1. Get the state before any changes.
         equity_before = self.portfolio_manager.get_current_equity(self.price_manager.current_price, self.iv_bin_index)
 
-        # Keep track of portfolio state before the action
         portfolio_was_empty = self.portfolio_manager.portfolio.empty
 
         # --- MODIFIED (Corrected): The new 3-way augmentation logic on Step 0 ---
@@ -494,13 +493,11 @@ class OptionsZeroGameEnv(gym.Env):
 
         # 2. Execute the agent's action (or an override) on the current state.
         self._take_action_on_state(action)
-        
-        # 3. Check if a new portfolio was just created.
-        # This is true if the portfolio WAS empty and is NOW NOT empty.
+
+        # 3. ONLY if a new portfolio was created from scratch, update the cost basis.
         if portfolio_was_empty and not self.portfolio_manager.portfolio.empty:
-            # This block will now run for FORCED openings, SETUP openings, and normal agent OPEN_* actions.
             self._update_initial_premium_and_targets()
-        
+       
         # 4. Advance the market and get the final outcome.
         return self._advance_market_and_get_outcome(equity_before, original_action_name)
 
@@ -593,7 +590,7 @@ class OptionsZeroGameEnv(gym.Env):
             leg_def['days_to_expiry'] = days_to_expiry_float
             leg_def['entry_step'] = 0
 
-        priced_legs = self.portfolio_manager._price_legs(portfolio_def, self.price_manager.start_price, self.iv_bin_index)
+        priced_legs = self.portfolio_manager._price_legs(portfolio_def, self.price_manager.current_price, self.iv_bin_index)
         
         if priced_legs:
             num_legs = len(priced_legs)
@@ -656,35 +653,25 @@ class OptionsZeroGameEnv(gym.Env):
             if not was_opened_successfully:
                 self.last_action_info['final_action_name'] = 'HOLD'
 
-            # Call the new centralized helper AFTER any opening action.
-            self._update_initial_premium_and_targets()
         elif final_action_name.startswith('CLOSE_POSITION_'):
             self.portfolio_manager.close_position(int(final_action_name.split('_')[-1]), self.price_manager.current_price, self.iv_bin_index, self.current_step)
-            # A partial close changes the structure, so we must update.
-            self._update_initial_premium_and_targets()
         elif final_action_name == 'CLOSE_ALL':
             self.portfolio_manager.close_all_positions(self.price_manager.current_price, self.iv_bin_index, self.current_step)
-            self._update_initial_premium_and_targets() # Resets premium to 0
         elif final_action_name.startswith('SHIFT_'):
             if 'ATM' in final_action_name: self.portfolio_manager.shift_to_atm(final_action_name, self.price_manager.current_price, self.iv_bin_index, self.current_step)
             else: self.portfolio_manager.shift_position(final_action_name, self.price_manager.current_price, self.iv_bin_index, self.current_step)
-            self._update_initial_premium_and_targets()
         elif final_action_name.startswith('HEDGE_NAKED_POS_'):
             self.portfolio_manager.add_hedge(int(final_action_name.split('_')[-1]),
                 self.price_manager.current_price, self.iv_bin_index, self.current_step
             )
-            self._update_initial_premium_and_targets()
         elif final_action_name.startswith('CONVERT_TO_'):
             self._route_convert_action(final_action_name)
-            self._update_initial_premium_and_targets()
         elif final_action_name == 'RECENTER_VOLATILITY_POSITION':
             self.portfolio_manager.recenter_volatility_position(self.price_manager.current_price, self.iv_bin_index, self.current_step)
-            self._update_initial_premium_and_targets()
         elif final_action_name == 'HEDGE_DELTA_WITH_ATM_OPTION':
             current_day = self.current_step // self._cfg.steps_per_day
             days_to_expiry_float = (self.episode_time_to_expiry - current_day) * (self.TOTAL_DAYS_IN_WEEK / self.TRADING_DAYS_IN_WEEK)
             self.portfolio_manager.hedge_delta_with_atm_option(self.price_manager.current_price, self.iv_bin_index, self.current_step, days_to_expiry_float)
-            self._update_initial_premium_and_targets()
         elif 'DELTA_BY_SHIFTING_LEG' in final_action_name:
             parts = final_action_name.split('_')
             change_direction = 'increase' if parts[0] == 'INCREASE' else 'decrease'
@@ -719,7 +706,6 @@ class OptionsZeroGameEnv(gym.Env):
                 if resolved_action_index is not None and true_action_mask[resolved_action_index] == 1:
                     # c) Only execute if the resolved action is valid AND legal.
                     self.portfolio_manager.shift_position(resolved_action_name, self.price_manager.current_price, self.iv_bin_index, self.current_step)
-                    self._update_initial_premium_and_targets()
 
         elif final_action_name.startswith('HEDGE_PORTFOLIO_BY_ROLLING_LEG_'):
             leg_index = int(final_action_name.split('_')[-1])
@@ -744,7 +730,6 @@ class OptionsZeroGameEnv(gym.Env):
                 if resolved_action_index is not None and true_action_mask[resolved_action_index] == 1:
                     # d) Only execute the roll if the equivalent shift is legal.
                     self.portfolio_manager.hedge_portfolio_by_rolling_leg(leg_index, self.price_manager.current_price, self.iv_bin_index, self.current_step)
-                    self._update_initial_premium_and_targets()
                 # e) If the roll would cause a conflict, do nothing (effectively a HOLD).
 
         # 4. Sort the portfolio and take the crucial snapshot.
@@ -809,6 +794,7 @@ class OptionsZeroGameEnv(gym.Env):
                     terminated_by_rule = True
                     final_shaped_reward_override = -1.0
                     termination_reason = "STOP_LOSS"
+                    print(f"STOP_LOSS triggered: unr_pnl: {unrealized_pnl} stop_loss: {-stop_loss_level}")
 
         # 2. Take-Profit Rules (Only check if not already stopped out)
         # Add the same one-step grace period to the take-profit rules.
@@ -895,7 +881,6 @@ class OptionsZeroGameEnv(gym.Env):
             'termination_reason': termination_reason
         }
 
-        # <<< --- THE DEFINITIVE FIX IS HERE --- >>>
         # Only calculate and add the BiasMeter diagnostics if we are in evaluation mode.
         if self.is_eval_mode:
             meter = BiasMeter(obs[:self.model_observation_size], self.OBS_IDX)
@@ -938,6 +923,7 @@ class OptionsZeroGameEnv(gym.Env):
                 f"FATAL: Portfolio contains legs with invalid Strategy IDs (< 0) after action: '{action_taken}'.\n{self.portfolio_manager.portfolio.to_string()}"
 
         if terminated: info['episode_duration'] = self.current_step
+
         return BaseEnvTimestep({'observation': obs, 'action_mask': action_mask, 'to_play': -1}, final_reward, terminated, info)
 
     def _handle_action(self, action: int) -> Tuple[int, bool]:

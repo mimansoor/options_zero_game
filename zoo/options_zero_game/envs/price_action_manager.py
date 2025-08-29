@@ -96,28 +96,36 @@ class PriceActionManager:
         self.start_price = self.start_price_config
         source_to_use = self._cfg.price_source
 
+        # <<< --- THE DEFINITIVE, ARCHITECTURAL FIX (Part 1) --- >>>
+        # We now require extra historical data to "warm up" the experts.
+        self.pre_roll_steps = self._cfg.get('expert_sequence_length', 60)
+        
         try:
             if source_to_use == 'garch':
-                self._generate_garch_price_path(chosen_regime)
+                # The GARCH generator must also create the pre-roll data.
+                self._generate_garch_price_path(chosen_regime, self.total_steps + self.pre_roll_steps)
             elif source_to_use == 'historical':
-                self._generate_historical_price_path() # This call was failing
+                self._generate_historical_price_path(self.total_steps + self.pre_roll_steps)
             else: # Mixed mode
                 if self.np_random.choice([True, False]):
-                    self._generate_historical_price_path()
+                    self._generate_historical_price_path(self.total_steps + self.pre_roll_steps)
                 else:
-                    self._generate_garch_price_path(chosen_regime)
+                    self._generate_garch_price_path(chosen_regime, self.total_steps + self.pre_roll_steps)
 
             if not np.all(np.isfinite(self.price_path)) or np.any(self.price_path <= 0):
                 raise ValueError("Generated path contains invalid values.")
 
         except Exception as e:
-            print(f"--- PRICE GENERATION FAILED: {type(e).__name__}: {e}. USING FAILSAFE (FLAT) PATH. ---")
-            self.price_path = np.full(self.total_steps + 1, self.start_price, dtype=np.float32)
+            # Failsafe path generation
+            self.price_path = np.full(self.total_steps + self.pre_roll_steps + 1, self.start_price, dtype=np.float32)
 
-        self.features_df = calculate_advanced_features(pd.DataFrame({'Close': self.price_path}, index=pd.to_datetime(pd.RangeIndex(start=0, stop=len(self.price_path), step=1), unit='D')))
-        self.current_price = self.price_path[0]
+        # Create features on the ENTIRE path (pre-roll + episode)
+        self.features_df = calculate_advanced_features(pd.DataFrame({'Close': self.price_path}, index=pd.to_datetime(pd.RangeIndex(start=-self.pre_roll_steps, stop=len(self.price_path) - self.pre_roll_steps), unit='D')))
+        
+        # The episode's "current_price" is the first price AFTER the pre-roll period.
+        self.current_price = self.price_path[self.pre_roll_steps]
 
-    def _generate_historical_price_path(self):
+    def _generate_historical_price_path(self, required_length: int):
         """Generates a price path from a random slice of historical data."""
         forced_symbol = self._cfg.get('forced_historical_symbol')
         forced_days_back = self._cfg.get('forced_days_back')
@@ -129,7 +137,6 @@ class PriceActionManager:
                 data = pd.read_csv(file_path, index_col='Date', parse_dates=True)
                 data.rename(columns={data.columns[0]: 'Close'}, inplace=True)
 
-                required_length = self.total_steps + 1
                 if len(data) < required_length: continue
 
                 max_start_index = len(data) - required_length
@@ -161,10 +168,10 @@ class PriceActionManager:
                 continue
         raise ValueError("Failed to generate a valid historical price path after 5 attempts.")
 
-    def _generate_garch_price_path(self, chosen_regime: dict):
+    def _generate_garch_price_path(self, chosen_regime: dict, required_length: int):
         """Generates a price path using an expert-driven GARCH model."""
         self.current_regime_name = f"GARCH: {chosen_regime['name']}"
-        prices = np.zeros(self.total_steps + 1, dtype=np.float32)
+        prices = np.zeros(required_length + 1, dtype=np.float32)
         prices[0] = self.start_price_config
 
         bootstrap_end_step = min(self.expert_sequence_length + 1, self.total_steps + 1)
@@ -175,7 +182,7 @@ class PriceActionManager:
 
         # This part is simplified as the full expert-driven simulation is very complex
         # for a standard GARCH path. We use the regime's base vol.
-        for t in range(bootstrap_end_step, self.total_steps + 1):
+        for t in range(bootstrap_end_step, required_length + 1):
             step_vol = chosen_regime['atm_iv'] / 100.0 / np.sqrt(252)
             step_return = self.np_random.normal(0, step_vol)
             prices[t] = prices[t-1] * np.exp(np.clip(step_return, -0.5, 0.5))
@@ -187,7 +194,9 @@ class PriceActionManager:
 
     def step(self, current_step: int):
         """Updates the manager's state and runs the full inference pipeline."""
-        self.current_price = self.price_path[current_step]
+        # The current_step is for the episode, but we need to index into the full price_path.
+        path_index = current_step + self.pre_roll_steps
+        self.current_price = self.price_path[path_index]
         
         if not self.experts or current_step < self.expert_sequence_length:
             return

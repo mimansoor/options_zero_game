@@ -306,7 +306,7 @@ class PortfolioManager:
         
         other_legs_df = self.portfolio.drop(self.portfolio.index[leg_index])
         
-        self._process_leg_closures(leg_to_roll_df, current_price, current_step)
+        self._process_leg_closures(leg_to_roll_df, current_price, iv_bin_index, current_step)
         
         # <<< --- THE DEFINITIVE FIX IS HERE --- >>>
         # a) Create the new leg by copying the old one to preserve all essential keys.
@@ -405,7 +405,6 @@ class PortfolioManager:
             # --- 3. Re-assemble and Intelligently Identify the New Strategy ---
             modified_strategy_legs_list = sibling_legs.to_dict('records') + leg_to_hedge_df.to_dict('records') + priced_hedge_leg
             
-            # <<< --- THE DEFINITIVE LOGIC FIX --- >>>
             if len(modified_strategy_legs_list) == 2:
                 # If the result is a 2-leg position, it's a standard vertical spread.
                 temp_df = pd.DataFrame(modified_strategy_legs_list)
@@ -414,7 +413,7 @@ class PortfolioManager:
                 # If the result is a 3+ leg position, it's a custom hedged structure.
                 new_strategy_name = f"CUSTOM_{len(modified_strategy_legs_list)}_LEGS"
             
-            pnl_profile = self._calculate_universal_risk_profile(modified_strategy_legs_list, self.realized_pnl)
+            pnl_profile = self._calculate_universal_risk_profile(modified_strategy_legs_list, self.realized_pnl, is_new_trade=False)
             pnl_profile['strategy_id'] = self.strategy_name_to_id.get(new_strategy_name, -1)
             
             # --- 4. Atomically rebuild the portfolio ---
@@ -708,7 +707,7 @@ class PortfolioManager:
         strategy_to_modify_df = self.portfolio[self.portfolio['creation_id'] == target_creation_id]
 
         # --- 3. Process the Closing Leg ---
-        self._process_leg_closures(pd.DataFrame([leg_to_close.to_dict()]), current_price, current_step)
+        self._process_leg_closures(pd.DataFrame([leg_to_close.to_dict()]), current_price, iv_bin_index, current_step)
 
         # --- 4. Intelligently Re-Profile the REMAINDER of the TARGET STRATEGY ---
         remaining_legs_df = strategy_to_modify_df.drop(absolute_index_to_close)
@@ -1069,17 +1068,25 @@ class PortfolioManager:
         return pnl_per_share * pnl_multiplier * self.lot_size
 
     # --- HELPER METHOD FOR "DE-MORPHING" ACTIONS ---
-    def _process_leg_closures(self, legs_to_close: pd.DataFrame, current_price: float, current_step: int):
+    def _process_leg_closures(self, legs_to_close: pd.DataFrame, current_price: float, iv_bin_index: int, current_step: int):
         """A helper to correctly process P&L and receipts for a set of closing legs."""
         if legs_to_close.empty:
             return
 
+        atm_price = self.market_rules_manager.get_atm_price(current_price)
         for _, leg in legs_to_close.iterrows():
-            vol = self.iv_calculator(0, leg['type'])
+            # Calculate the offset from ATM to get the correct IV from the skew
+            offset = round((leg['strike_price'] - atm_price) / self.strike_distance)
+            
+            # The iv_calculator now receives the correct, live iv_bin_index
+            vol = self.iv_calculator(offset, leg['type'])
+            
             greeks = self.bs_manager.get_all_greeks_and_price(current_price, leg['strike_price'], leg['days_to_expiry'], vol, leg['type'] == 'call')
             exit_premium = self.bs_manager.get_price_with_spread(greeks['price'], is_buy=(leg['direction'] == 'short'), bid_ask_spread_pct=self.bid_ask_spread_pct)
+            
             pnl = (exit_premium - leg['entry_premium']) * (1 if leg['direction'] == 'long' else -1) * self.lot_size
             self.realized_pnl += pnl - self.brokerage_per_leg
+            
             if self.is_eval_mode:
                 receipt = {
                     'position': f"{leg['direction'].upper()} {leg['type'].upper()}", 'strike': leg['strike_price'],
@@ -1187,7 +1194,7 @@ class PortfolioManager:
             sibling_legs = self.portfolio[(self.portfolio['creation_id'] == original_creation_id) & (self.portfolio.index != position_index)]
 
             # --- 2. Process the "close" part of the shift for the target leg ---
-            self._process_leg_closures(leg_to_shift_df, current_price, current_step)
+            self._process_leg_closures(leg_to_shift_df, current_price, iv_bin_index, current_step)
             
             # --- 3. Define and price the new, shifted leg ---
             strike_modifier = self.strike_distance if direction == 'UP' else -self.strike_distance
@@ -1228,7 +1235,7 @@ class PortfolioManager:
             untouched_legs = self.portfolio[self.portfolio['creation_id'] != original_creation_id]
             sibling_legs = self.portfolio[(self.portfolio['creation_id'] == original_creation_id) & (self.portfolio.index != position_index)]
 
-            self._process_leg_closures(leg_to_shift_df, current_price, current_step)
+            self._process_leg_closures(leg_to_shift_df, current_price, iv_bin_index, current_step)
             
             new_leg_def = [{'type': leg_to_shift['type'], 'direction': leg_to_shift['direction'],
                             'strike_price': new_atm_strike, 'days_to_expiry': leg_to_shift['days_to_expiry'],
@@ -2215,7 +2222,7 @@ class PortfolioManager:
         original_creation_id = self.portfolio.iloc[0]['creation_id']
         legs_to_keep = self.portfolio[self.portfolio['direction'] == 'short'].to_dict(orient='records')
         legs_to_close = self.portfolio[self.portfolio['direction'] == 'long']
-        self._process_leg_closures(legs_to_close, current_price, current_step)
+        self._process_leg_closures(legs_to_close, current_price, iv_bin_index, current_step)
         pnl_profile = self._calculate_universal_risk_profile(legs_to_keep, self.realized_pnl)
         pnl_profile['strategy_id'] = self.strategy_name_to_id.get('OPEN_SHORT_STRANGLE_DELTA_20')
         self.portfolio = self.portfolio[self.portfolio['creation_id'] != original_creation_id].reset_index(drop=True)
@@ -2227,7 +2234,7 @@ class PortfolioManager:
         original_creation_id = self.portfolio.iloc[0]['creation_id']
         legs_to_keep = self.portfolio[self.portfolio['direction'] == 'short'].to_dict(orient='records')
         legs_to_close = self.portfolio[self.portfolio['direction'] == 'long']
-        self._process_leg_closures(legs_to_close, current_price, current_step)
+        self._process_leg_closures(legs_to_close, current_price, iv_bin_index, current_step)
         pnl_profile = self._calculate_universal_risk_profile(legs_to_keep, self.realized_pnl)
         pnl_profile['strategy_id'] = self.strategy_name_to_id.get('OPEN_SHORT_STRADDLE')
         self.portfolio = self.portfolio[self.portfolio['creation_id'] != original_creation_id].reset_index(drop=True)
@@ -2247,7 +2254,7 @@ class PortfolioManager:
         legs_to_keep_df = call_legs.sort_values(by='strike_price').head(2)
         legs_to_close_df = self.portfolio.drop(legs_to_keep_df.index)
         
-        self._process_leg_closures(legs_to_close_df, current_price, current_step)
+        self._process_leg_closures(legs_to_close_df, current_price, iv_bin_index, current_step)
         
         legs_to_keep_list = legs_to_keep_df.to_dict(orient='records')
         pnl_profile = self._calculate_universal_risk_profile(legs_to_keep_list, self.realized_pnl)
@@ -2270,7 +2277,7 @@ class PortfolioManager:
         legs_to_keep_df = call_legs.sort_values(by='strike_price').tail(2)
         legs_to_close_df = self.portfolio.drop(legs_to_keep_df.index)
         
-        self._process_leg_closures(legs_to_close_df, current_price, current_step)
+        self._process_leg_closures(legs_to_close_df, current_price, iv_bin_index, current_step)
         
         legs_to_keep_list = legs_to_keep_df.to_dict(orient='records')
         pnl_profile = self._calculate_universal_risk_profile(legs_to_keep_list, self.realized_pnl)
@@ -2293,7 +2300,7 @@ class PortfolioManager:
         legs_to_keep_df = put_legs.sort_values(by='strike_price').tail(2)
         legs_to_close_df = self.portfolio.drop(legs_to_keep_df.index)
         
-        self._process_leg_closures(legs_to_close_df, current_price, current_step)
+        self._process_leg_closures(legs_to_close_df, current_price, iv_bin_index, current_step)
         
         legs_to_keep_list = legs_to_keep_df.to_dict(orient='records')
         pnl_profile = self._calculate_universal_risk_profile(legs_to_keep_list, self.realized_pnl)
@@ -2316,7 +2323,7 @@ class PortfolioManager:
         legs_to_keep_df = put_legs.sort_values(by='strike_price').head(2)
         legs_to_close_df = self.portfolio.drop(legs_to_keep_df.index)
         
-        self._process_leg_closures(legs_to_close_df, current_price, current_step)
+        self._process_leg_closures(legs_to_close_df, current_price, iv_bin_index, current_step)
         
         legs_to_keep_list = legs_to_keep_df.to_dict(orient='records')
         pnl_profile = self._calculate_universal_risk_profile(legs_to_keep_list, self.realized_pnl)
