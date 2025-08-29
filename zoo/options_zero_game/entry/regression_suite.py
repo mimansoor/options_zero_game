@@ -6,6 +6,7 @@ import numpy as np
 import copy
 import traceback
 import pandas as pd
+import sys
 
 # --- The Independent, Ground-Truth Validation Library ---
 from py_vollib_vectorized import price_dataframe
@@ -1520,7 +1521,7 @@ def test_open_call_ratio_spread():
         assert portfolio.iloc[0]['strategy_id'] == env.strategy_name_to_id['OPEN_CALL_RATIO_SPREAD'], "Incorrect strategy ID."
 
         print(f"--- PASSED: {test_name} ---")
-        return False
+        return True
     except Exception:
         traceback.print_exc()
         print(f"--- FAILED: {test_name} ---")
@@ -1593,3 +1594,5 @@ if __name__ == "__main__":
         for f in failures:
             print(f"    - {f}")
         print("\n")
+        # CRITICAL: Exit the script with a non-zero code to signal failure.
+        sys.exit(1)
