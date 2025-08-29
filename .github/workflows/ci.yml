@@ -1,0 +1,54 @@
+# .github/workflows/ci.yml
+
+name: Regression Test Suite
+
+# This section defines when the workflow will run.
+on:
+  # Run on every push to the main branch
+  push:
+    branches: [ "main" ]
+  # Run on every pull request that targets the main branch
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  # A single job in this workflow, you can name it anything.
+  run-regression-tests:
+    # Use the latest version of Ubuntu for the virtual machine.
+    runs-on: ubuntu-latest
+
+    steps:
+      # Step 1: Check out the repository code so the workflow can access it.
+      - name: Check out repository code
+        uses: actions/checkout@v4
+
+      # Step 2: Set up a specific version of Python.
+      - name: Set up Python 3.9
+        uses: actions/setup-python@v5
+        with:
+          python-version: 3.9
+
+      # Step 3: Cache dependencies to speed up future runs.
+      # This step is optional but highly recommended. It saves the downloaded
+      # packages so they don't need to be re-downloaded every single time.
+      - name: Cache pip dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          # Create a unique key for the cache based on the OS, Python version, and a hash of the requirements file.
+          # If requirements.txt changes, the cache will be invalidated and rebuilt.
+          key: ${{ runner.os }}-python-${{ matrix.python-version }}-${{ hashFiles('**/requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-python-${{ matrix.python-version }}-
+
+      # Step 4: Install the project's dependencies.
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      # Step 5: Run the regression test suite.
+      # If this script exits with a non-zero exit code (i.e., an assertion fails),
+      # the entire job will fail.
+      - name: Run regression test suite
+        run: python3 zoo/options_zero_game/entry/regression_suite.py
