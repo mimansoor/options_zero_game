@@ -48,7 +48,7 @@ class BiasMeter:
         This logic remains robust and does not need to change.
         """
         # --- Feature Extraction from the Embedding ---
-        start_idx = self.idx['VOL_EMBEDDING_START']
+        start_idx = self.idx['VOLATILITY_EMBEDDING_START']
         # The embedding size is now a class attribute of the env
         embedding_size = 128 # Assuming vol_embedding_size from env
         end_idx = start_idx + embedding_size

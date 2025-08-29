@@ -177,8 +177,8 @@ class OptionsZeroGameEnv(gym.Env):
         # 3. NOW, we can safely calculate all start indices and total size.
         base_summary_size = len(self.OBS_IDX)
         
-        self.OBS_IDX['VOL_EMBEDDING_START'] = base_summary_size
-        self.OBS_IDX['TREND_EMBEDDING_START'] = self.OBS_IDX['VOL_EMBEDDING_START'] + self.vol_embedding_size
+        self.OBS_IDX['VOLATILITY_EMBEDDING_START'] = base_summary_size
+        self.OBS_IDX['TREND_EMBEDDING_START'] = self.OBS_IDX['VOLATILITY_EMBEDDING_START'] + self.vol_embedding_size
         self.OBS_IDX['OSCILLATOR_EMBEDDING_START'] = self.OBS_IDX['TREND_EMBEDDING_START'] + self.mlp_embedding_size
         self.OBS_IDX['DEVIATION_EMBEDDING_START'] = self.OBS_IDX['OSCILLATOR_EMBEDDING_START'] + self.mlp_embedding_size
         self.OBS_IDX['CYCLE_EMBEDDING_START'] = self.OBS_IDX['DEVIATION_EMBEDDING_START'] + self.mlp_embedding_size
@@ -979,7 +979,8 @@ class OptionsZeroGameEnv(gym.Env):
         vec[self.OBS_IDX['PRICE_NORM']] = (self.price_manager.current_price / self.price_manager.start_price) - 1.0
         vec[self.OBS_IDX['TIME_NORM']] = (self.total_steps - self.current_step) / self.total_steps
         vec[self.OBS_IDX['PNL_NORM']] = math.tanh(self.portfolio_manager.get_total_pnl(self.price_manager.current_price, self.iv_bin_index) / self._cfg.initial_cash)
-        log_return = math.log(self.price_manager.current_price / (self.price_manager.price_path[self.current_step - 1] + 1e-8)) if self.current_step > 0 else 0.0
+        # The environment now asks the manager for the log return, respecting encapsulation.
+        log_return = self.price_manager.get_latest_log_return(self.current_step)
         vec[self.OBS_IDX['LOG_RETURN']] = np.clip(log_return, -0.1, 0.1) * 10
 
         # --- NEW: Calculate the Market's Expected Move ---

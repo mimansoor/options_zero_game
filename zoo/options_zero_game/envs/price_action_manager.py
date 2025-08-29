@@ -33,7 +33,6 @@ class PriceActionManager:
         # --- State Variables ---
         self.price_path: np.ndarray = np.array([])
         self.historical_context_path: np.ndarray = np.array([])
-        self.features_df: pd.DataFrame = pd.DataFrame()
         self.current_price: float = 0.0
         self.start_price: float = 0.0
         self.episode_iv_anchor: float = 0.2 # Initialize with a safe default
@@ -47,6 +46,7 @@ class PriceActionManager:
         self.deviation_embedding = None
         self.cycle_embedding = None
         self.pattern_embedding = None
+        self.expert_sequence_length = cfg.get('expert_sequence_length', 60)
 
     def _load_tickers(self) -> list:
         if self.price_source in ['historical', 'mixed']:
@@ -68,6 +68,7 @@ class PriceActionManager:
             vol_params = TransformerConfig['volatility_expert_params']
             vol_expert = TransformerExpert(input_dim=vol_params['input_dim'], model_dim=TransformerConfig['embedding_dim'], num_heads=TransformerConfig['num_heads'], num_layers=vol_params['num_layers'], output_dim=1).to(device)
             vol_expert.load_state_dict(torch.load(os.path.join(model_path, 'volatility_expert.pth'), map_location=device, weights_only=True))
+            vol_expert.eval()
             experts['volatility'] = vol_expert
 
             # 2. Load the 5 MLP Experts and their scalers
@@ -75,6 +76,7 @@ class PriceActionManager:
                 mlp_params = MLP_FEATURE_SETS[name]
                 model = MLPExpert(input_dim=len(mlp_params), output_dim=3).to(device)
                 model.load_state_dict(torch.load(os.path.join(model_path, f'{name}_mlp_expert.pth'), map_location=device, weights_only=True))
+                model.eval()
                 scaler = joblib.load(os.path.join(model_path, f'{name}_mlp_scaler.joblib'))
                 experts[name] = model
                 experts[f'{name}_scaler'] = scaler
@@ -83,6 +85,7 @@ class PriceActionManager:
             dir_params = TransformerConfig['directional_expert_params']
             dir_expert = TransformerExpert(input_dim=dir_params['input_dim'], model_dim=TransformerConfig['embedding_dim'], num_heads=CONFIG['num_heads'], num_layers=dir_params['num_layers'], output_dim=dir_params['output_dim']).to(device)
             dir_expert.load_state_dict(torch.load(os.path.join(model_path, 'directional_expert.pth'), map_location=device, weights_only=True))
+            dir_expert.eval()
             experts['master_directional'] = dir_expert
             
             print("Successfully loaded all 7 neural networks and 5 scalers.")
@@ -98,10 +101,9 @@ class PriceActionManager:
 
         # <<< --- THE DEFINITIVE, ARCHITECTURAL FIX (Part 1) --- >>>
         # We now require extra historical data to "warm up" the experts.
-        self.pre_roll_steps = self._cfg.get('expert_sequence_length', 60)
         # The total length required is the number of episode steps + the pre_roll steps.
         # The price_path itself needs to be one element longer for indexing.
-        required_data_length = self.total_steps + self.pre_roll_steps
+        required_data_length = self.total_steps + self.expert_sequence_length
         
         try:
             if source_to_use == 'garch':
@@ -122,11 +124,8 @@ class PriceActionManager:
             # Failsafe path generation
             self.price_path = np.full(required_data_length + 1, self.start_price, dtype=np.float32)
 
-        # Create features on the ENTIRE path (pre-roll + episode)
-        self.features_df = calculate_advanced_features(pd.DataFrame({'Close': self.price_path}, index=pd.to_datetime(pd.RangeIndex(start=-self.pre_roll_steps, stop=len(self.price_path) - self.pre_roll_steps), unit='D')))
-        
-        # The episode's "current_price" is the first price AFTER the pre-roll period.
-        self.current_price = self.price_path[self.pre_roll_steps]
+        # The episode's starting price is at the end of the pre-roll period.
+        self.current_price = self.price_path[self.expert_sequence_length]
 
     def _generate_historical_price_path(self, required_length: int):
         """Generates a price path from a random slice of historical data."""
@@ -198,36 +197,48 @@ class PriceActionManager:
     def step(self, current_step: int):
         """Updates the manager's state and runs the full inference pipeline."""
         # The current_step is for the episode, but we need to index into the full price_path.
-        path_index = current_step + self.pre_roll_steps
+        path_index = current_step + self.expert_sequence_length
         if path_index >= len(self.price_path):
             # This can happen on the final step. We should just use the last available price.
             path_index = len(self.price_path) - 1
         self.current_price = self.price_path[path_index]
         
-        if not self.experts or current_step < self.expert_sequence_length:
-            return
+        if not self.experts: return
 
         with torch.no_grad():
-            history_df = self.features_df.iloc[max(0, current_step + 1 - self.expert_sequence_length) : current_step + 1].copy()
-            if len(history_df) < self.expert_sequence_length: return
+            # 1. Slice the raw price path for the exact 60-day window we need.
+            start_slice = path_index + 1 - self.expert_sequence_length
+            end_slice = path_index + 1
+            price_window = self.price_path[start_slice:end_slice]
 
+            # 2. Create a temporary DataFrame from this window.
+            history_df = pd.DataFrame({'Close': price_window})
+
+            # 3. Calculate all features for this specific 60-day window.
+            # This is less efficient but guarantees correctness and removes all indexing bugs.
+            features_for_step = calculate_advanced_features(history_df)
+
+            # 4. The rest of the inference pipeline now uses this clean, correct DataFrame.
+            
+            # --- Generate Embeddings from the council of experts ---
             embeddings_for_master = []
             
-            # 1. Volatility Transformer
-            vol_cols = ['log_return', 'volatility', 'vol_of_vol', 'vol_autocorr']
-            vol_data = history_df[vol_cols].fillna(0).values
+            # Volatility Transformer
+            vol_cols = ['log_return', 'vol_realized_14', 'vol_of_vol_14', 'vol_autocorr_14']
+            vol_data = features_for_step[vol_cols].values
+            
             vol_sequence = torch.FloatTensor(vol_data).unsqueeze(0).to(next(self.experts['volatility'].parameters()).device)
             vol_embedding = self.experts['volatility'].encode(vol_sequence).cpu().numpy().mean(axis=1)
             embeddings_for_master.append(vol_embedding)
             self.volatility_embedding = vol_embedding.flatten()
 
-            # 2. MLP Experts (using only the most recent data point)
-            latest_features = history_df.iloc[-1]
+            # MLP Experts (use only the most recent feature row, index -1)
+            latest_features = features_for_step.iloc[-1]
             for name in ['trend', 'oscillator', 'deviation', 'cycle', 'pattern']:
                 feature_cols = MLP_FEATURE_SETS[name]
                 expert_data = latest_features[feature_cols].values.reshape(1, -1)
                 
-                embedding = np.zeros((1, 64)) # Default to zeros if data is invalid
+                embedding = np.zeros((1, 64))
                 if not np.isnan(expert_data).any():
                     scaled_data = self.experts[f'{name}_scaler'].transform(expert_data)
                     embedding = self.experts[name].encode(torch.FloatTensor(scaled_data).to(next(self.experts[name].parameters()).device)).cpu().numpy()
@@ -235,11 +246,35 @@ class PriceActionManager:
                 embeddings_for_master.append(embedding)
                 setattr(self, f"{name}_embedding", embedding.flatten())
 
-            # 3. Create the "super-vector" for the Master Directional Expert
+            # --- Get the final prediction from the Master Directional Expert ---
             final_feature_vector = np.concatenate(embeddings_for_master, axis=1)
             final_sequence = np.tile(final_feature_vector, (self.expert_sequence_length, 1))
             final_sequence_tensor = torch.FloatTensor(final_sequence).unsqueeze(0).to(next(self.experts['master_directional'].parameters()).device)
 
-            # 4. Get the final prediction
             dir_prediction_logits = self.experts['master_directional'](final_sequence_tensor)
             self.directional_prediction_probs = torch.nn.functional.softmax(dir_prediction_logits, dim=-1).cpu().numpy().flatten()
+
+    def get_latest_log_return(self, current_step: int) -> float:
+        """
+        Calculates the log return for the most recent step of the EPISODE.
+        This method correctly handles the pre-roll offset.
+        """
+        if current_step <= 0:
+            return 0.0
+
+        # The current price is already updated in the step() method.
+        # The previous price is at the previous step's index + the pre-roll offset.
+        prev_price_index = current_step - 1 + self.expert_sequence_length
+
+        # Add a safety check for the index
+        if prev_price_index < 0 or prev_price_index >= len(self.price_path):
+            # This can happen if the price_path is unexpectedly short.
+            print(f"WARNING: prev_price_index out of bounds in get_latest_log_return. Index: {prev_price_index}, Path Length: {len(self.price_path)}")
+            return 0.0
+            
+        prev_price = self.price_path[prev_price_index]
+        
+        if prev_price > 1e-6:
+            return math.log(self.current_price / prev_price)
+        else:
+            return 0.0
