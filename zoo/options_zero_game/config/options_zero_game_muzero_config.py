@@ -431,7 +431,7 @@ options_zero_game_muzero_config = dict(
         # <<< --- NEW: Parameter to control the inverse price/IV correlation --- >>>
         # A negative value means IV goes up when price goes down.
         # This value controls the strength of the effect.
-        iv_price_correlation_strength=-0.5,
+        iv_price_correlation_strength=-0.10,
 
         # <<< NEW: Parameter for the Capital Preservation Bonus >>>
         # A small percentage of the current P&L to add to the reward each step.

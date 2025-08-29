@@ -147,8 +147,12 @@ class LogReplayEnv(gym.Wrapper):
         payoff_data = self.env.portfolio_manager.get_payoff_data(price_for_log, self.env.iv_bin_index)
         
         meter = BiasMeter(obs_for_bias[:self.env.model_observation_size], self.env.OBS_IDX)
+
+        # If the history is empty (i.e., this is the very first log entry),
+        # the "last price" is the same as the current price, resulting in a 0% change.
+        # For all subsequent entries, it correctly uses the price from the previous sub-step.
+        last_price = self._episode_history[-1]['info']['price'] if self._episode_history else price_for_log
         
-        last_price = self._episode_history[-1]['info']['price'] if self._episode_history else self.env.price_manager.start_price
         last_price_change_pct = ((price_for_log / last_price) - 1) * 100 if last_price > 0 else 0.0
         
         info.update({

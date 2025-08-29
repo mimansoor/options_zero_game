@@ -64,10 +64,10 @@ if __name__ == "__main__":
     # Force the evaluator to use the pure Python MCTS implementation, which
     # respects the Python-level seeds, rather than the non-deterministic C++ version.
     # We must check if the policy key exists before trying to modify it.
-    if 'policy' not in eval_main_config:
-        eval_main_config.policy = {}
-    eval_main_config.policy.mcts_ctree = False
-    print("--- MCTS OVERRIDE: Forcing Python MCTS for deterministic evaluation. ---")
+    #if 'policy' not in eval_main_config:
+    #    eval_main_config.policy = {}
+    #eval_main_config.policy.mcts_ctree = False
+    #print("--- MCTS OVERRIDE: Forcing Python MCTS for deterministic evaluation. ---")
 
     # --- Standard Evaluation Setup ---
     eval_create_config.env.type = 'log_replay'

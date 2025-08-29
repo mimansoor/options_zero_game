@@ -132,7 +132,7 @@ class PriceActionManager:
         forced_symbol = self._cfg.get('forced_historical_symbol')
         forced_days_back = self._cfg.get('forced_days_back')
 
-        for _ in range(5): # Failsafe loop
+        for _ in range(5):
             try:
                 selected_ticker = forced_symbol or self.np_random.choice(self._available_tickers)
                 file_path = os.path.join(self.historical_data_path, f"{selected_ticker}.csv")
@@ -142,27 +142,28 @@ class PriceActionManager:
                 if len(data) < required_length: continue
 
                 max_start_index = len(data) - required_length
-                if forced_days_back is not None:
-                    start_index = max(0, max_start_index - (forced_days_back - 1))
-                else:
-                    start_index = self.np_random.integers(0, max_start_index + 1)
+                start_index = max(0, max_start_index - (forced_days_back - 1)) if forced_days_back is not None else self.np_random.integers(0, max_start_index + 1)
                 
-                context_start_index = max(0, start_index - 30)
-                context_segment = data['Close'].iloc[context_start_index:start_index]
-                price_segment = data['Close'].iloc[start_index : start_index + required_length]
+                # 1. Slice the entire required segment (pre-roll + episode) from the raw data.
+                full_price_segment = data['Close'].iloc[start_index : start_index + required_length]
+
+                # 2. Identify the raw price at the actual start of the episode (after the pre-roll).
+                raw_start_price_of_episode = full_price_segment.iloc[self.expert_sequence_length]
                 
-                raw_start_price = price_segment.iloc[0]
-                if raw_start_price > 1e-4:
-                    normalization_factor = self.start_price_config / raw_start_price
-                    self.price_path = (price_segment * normalization_factor).to_numpy(dtype=np.float32)
-                    self.historical_context_path = (context_segment * normalization_factor).to_numpy(dtype=np.float32)
-                    self.start_price = self.price_path[0]
-                    # Calculate the historical volatility of the generated price path
-                    # to set a realistic baseline IV for the episode.
-                    log_returns = np.log(self.price_path[1:] / self.price_path[:-1])
-                    annualized_vol = np.std(log_returns) * np.sqrt(252) # Assuming daily steps
+                if raw_start_price_of_episode > 1e-4:
+                    # 3. Calculate a single normalization factor.
+                    normalization_factor = self.start_price_config / raw_start_price_of_episode
                     
-                    # Set the attribute, with a failsafe for the case of zero volatility
+                    # 4. Normalize the ENTIRE path at once. This is the main simulation path.
+                    self.price_path = (full_price_segment * normalization_factor).to_numpy(dtype=np.float32)
+                    
+                    # 5. The historical context for the logger is now just a slice of this
+                    #    perfectly contiguous, normalized path.
+                    self.historical_context_path = self.price_path[:self.expert_sequence_length]
+
+                    self.start_price = self.price_path[0]
+                    log_returns = np.log(self.price_path[1:] / self.price_path[:-1])
+                    annualized_vol = np.std(log_returns) * np.sqrt(252)
                     self.episode_iv_anchor = annualized_vol if np.isfinite(annualized_vol) and annualized_vol > 0 else 0.2
                     return # Success
             except Exception as e:

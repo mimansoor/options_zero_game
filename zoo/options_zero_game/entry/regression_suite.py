@@ -58,25 +58,21 @@ def create_isolated_test_env(forced_opening_strategy: str, overrides: dict = Non
 def test_hedge_portfolio_by_rolling_leg():
     """
     Tests if HEDGE_PORTFOLIO_BY_ROLLING_LEG correctly finds and executes a
-    roll that brings the overall portfolio delta closer to zero. This test is
-    resilient to stochastic market movements.
+    roll that brings the overall portfolio delta closer to zero.
     """
     test_name = "test_hedge_portfolio_by_rolling_leg"
     print(f"\n--- RUNNING: {test_name} ---")
 
-    # <<< --- THE DEFINITIVE FIX IS HERE --- >>>
-    # Create a sterile test environment with a completely flat and constant
-    # volatility surface. This ensures that price movement will create the
-    # necessary delta imbalance to make the hedge action legal.
+    # <<< --- THE DEFINITIVE, FINAL FIX --- >>>
+    # We open a single SHORT CALL. This is the most delta-sensitive position,
+    # guaranteeing that a price move will create the delta imbalance needed for the test.
+    # We still use the sterile environment to ensure the test is predictable.
     flat_vol_regime = {
-        'name': 'Flat_Test_Regime',
-        'mu': 0, 'omega': 0, 'alpha': 0, 'beta': 1,
+        'name': 'Flat_Test_Regime', 'mu': 0, 'omega': 0, 'alpha': 0, 'beta': 1,
         'atm_iv': 25.0, 'far_otm_put_iv': 25.0, 'far_otm_call_iv': 25.0,
     }
-
-    # We use the isolated env to also disable P&L termination rules
     env = create_isolated_test_env(
-        'OPEN_SHORT_STRANGLE_DELTA_30',
+        'OPEN_SHORT_CALL_ATM-1', # A single naked leg
         overrides={
             'use_expert_iv': False,
             'iv_price_correlation_strength': 0.0,
@@ -85,14 +81,11 @@ def test_hedge_portfolio_by_rolling_leg():
     )
 
     try:
-        # Step 1: Open the position
         env.reset(seed=63)
         timestep = env.step(env.actions_to_indices['HOLD'])
-        assert len(env.portfolio_manager.get_portfolio()) == 2, "Setup failed: Did not open initial 2-leg position."
+        assert len(env.portfolio_manager.get_portfolio()) == 1, "Setup failed: Did not open initial 1-leg position."
 
-        # Step 2: Dynamically wait for a significant delta imbalance to occur
         max_wait_steps = 50
-        # The action we want to test is on the call leg (index 0)
         hedge_action_index = env.actions_to_indices['HEDGE_PORTFOLIO_BY_ROLLING_LEG_0']
 
         print("[TEST_DEBUG] Waiting for a delta imbalance to make the hedge action legal...")
@@ -108,13 +101,12 @@ def test_hedge_portfolio_by_rolling_leg():
             delta_norm_final = stats['delta'] / max_delta_exposure if max_delta_exposure > 0 else 0.0
             assert False, f"Hedge action did not become legal within {max_wait_steps} steps. Final delta_norm: {delta_norm_final:.4f}"
 
-        # Step 3: Now that the action is legal, record the "before" state and execute
         portfolio_before = env.portfolio_manager.get_portfolio().to_dict('records')
         env.step(hedge_action_index)
 
-        # --- Assertions ---
+        # In this case, the number of legs should remain 1, as it's a roll.
         portfolio_after = env.portfolio_manager.get_portfolio()
-        assert len(portfolio_after) == 2, f"Hedge failed: Number of legs changed. {len(portfolio_after)}"
+        assert len(portfolio_after) == 1, f"Hedge failed: Number of legs changed. {len(portfolio_after)}"
 
         current_price = env.price_manager.current_price
         iv_bin_index = env.iv_bin_index

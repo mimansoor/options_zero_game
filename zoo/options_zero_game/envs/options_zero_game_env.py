@@ -142,6 +142,10 @@ class OptionsZeroGameEnv(gym.Env):
         # environment (for the action mask) and the portfolio manager.
         self.strategy_name_to_id = cfg.get('strategy_name_to_id', {})
 
+        # We must initialize this attribute on the environment itself so that
+        # methods like _get_dynamic_iv can access it directly.
+        self.expert_sequence_length = self._cfg.get('expert_sequence_length', 60)
+
         # <<< NEW: Load the parameter from the config >>>
         self.capital_preservation_bonus_pct = cfg.get('capital_preservation_bonus_pct', 0.0)
 
@@ -510,61 +514,38 @@ class OptionsZeroGameEnv(gym.Env):
 
     def _get_dynamic_iv(self, offset: int, option_type: str) -> float:
         """
-        Calculates the dynamic IV.
-        MODIFIED: This version now uses the embedding from the new, full
-        Council of Experts pipeline for a more robust prediction.
+        Calculates the dynamic IV based on the episode's realized volatility,
+        the static skew table, and the price/IV correlation. It no longer
+        directly uses the expert's prediction to prevent feedback loops.
         """
-        # 1. Get the floor IV from the static skew table. This remains the same.
+        # 1. Get the floor IV from the static skew table. This is unchanged.
         iv_from_table = self.market_rules_manager.get_implied_volatility(
             offset, option_type, self.iv_bin_index
         )
-
-        # If the expert IV system is disabled, we return the static table value immediately.
-        if not self.use_expert_iv:
-            return iv_from_table
         
-        # 2. Get the expert's prediction from the new architecture.
-        vol_embedding = self.price_manager.volatility_embedding
-        
-        predicted_vol = 0.20 # A safe, neutral default
+        # <<< --- THE DEFINITIVE FIX IS HERE --- >>>
+        # 2. The base IV is now anchored to the episode's actual historical volatility,
+        #    not the expert's prediction. This breaks the feedback loop.
+        #    We still add the market's inherent risk premium.
+        base_iv = self.price_manager.episode_iv_anchor + self.volatility_premium_abs
 
-        # If the embedding has been calculated, derive a prediction from it.
-        if vol_embedding is not None:
-            # The magnitude (L2 norm) of the embedding is a good proxy for volatility intensity.
-            magnitude = np.linalg.norm(vol_embedding)
-            
-            # Scale the magnitude to a realistic IV range (e.g., 5% to 150%).
-            # We use tanh to squash the magnitude into a predictable (0, 1) range first.
-            # Then we scale it to our desired IV range.
-            scaled_magnitude = math.tanh(magnitude)
-            predicted_vol = 0.05 + scaled_magnitude * 1.45 # Maps [0, 1] -> [0.05, 1.50]
-
-        # 3. Add the market's risk premium.
-        base_iv = predicted_vol + self.volatility_premium_abs
-
-        # 4. Calculate and apply the price momentum adjustment.
-        iv_adjustment_factor = 1.0 # Default to no adjustment
-
-        # We can only calculate a change if we're past the first step.
+        # 3. Calculate and apply the price momentum adjustment (this logic is still correct).
+        iv_adjustment_factor = 1.0
         if self.current_step > 0:
             current_price = self.price_manager.current_price
-            prev_price = self.price_manager.price_path[self.current_step - 1]
+            # Correctly index into the full price path including the pre-roll
+            prev_price_index = self.current_step - 1 + self.expert_sequence_length
+            prev_price = self.price_manager.price_path[prev_price_index]
             
             if prev_price > 1e-6:
                 log_return = math.log(current_price / prev_price)
-                
-                # The core formula: factor = 1 + (log_return * strength)
-                # Since strength is negative, a positive return DECREASES the factor.
-                # A negative return INCREASES the factor.
                 iv_adjustment_factor = 1.0 + (log_return * self.iv_price_correlation_strength)
-                
-                # Add a safety clamp to prevent extreme IV swings from a single large price move.
-                iv_adjustment_factor = np.clip(iv_adjustment_factor, 0.8, 1.2) # Clamp between +/- 20% adjustment
+                iv_adjustment_factor = np.clip(iv_adjustment_factor, 0.8, 1.2)
 
-        # Apply the factor to our base IV.
         adjusted_base_iv = base_iv * iv_adjustment_factor
         
-        # 5. Return the greater of the adjusted dynamic base and the static floor.
+        # 4. Return the greater of the adjusted dynamic base and the static floor.
+        #    This correctly models that the skew table acts as a "minimum" IV level.
         return max(adjusted_base_iv, iv_from_table)
 
     def _update_initial_premium_and_targets(self):
