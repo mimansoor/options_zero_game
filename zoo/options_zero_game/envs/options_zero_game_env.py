@@ -777,12 +777,12 @@ class OptionsZeroGameEnv(gym.Env):
         self._update_realized_vol()
         self.portfolio_manager.update_positions_after_time_step(time_decay_days, self.price_manager.current_price, self.iv_bin_index, self.current_step)
 
-        #self.portfolio_manager.debug_print_portfolio(
-            #current_price=self.price_manager.current_price,
-            #step=self.current_step,
-            #day=self.current_day_index,
-            #action_taken=action_taken
-        #)
+        self.portfolio_manager.debug_print_portfolio(
+            current_price=self.price_manager.current_price,
+            step=self.current_step,
+            day=self.current_day_index,
+            action_taken=action_taken
+        )
 
         # --- FINAL, THREE-TIERED TERMINATION LOGIC ---
         terminated_by_rule = False
