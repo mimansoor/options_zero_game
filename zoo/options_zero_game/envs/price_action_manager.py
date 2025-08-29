@@ -99,25 +99,28 @@ class PriceActionManager:
         # <<< --- THE DEFINITIVE, ARCHITECTURAL FIX (Part 1) --- >>>
         # We now require extra historical data to "warm up" the experts.
         self.pre_roll_steps = self._cfg.get('expert_sequence_length', 60)
+        # The total length required is the number of episode steps + the pre_roll steps.
+        # The price_path itself needs to be one element longer for indexing.
+        required_data_length = self.total_steps + self.pre_roll_steps
         
         try:
             if source_to_use == 'garch':
                 # The GARCH generator must also create the pre-roll data.
-                self._generate_garch_price_path(chosen_regime, self.total_steps + self.pre_roll_steps)
+                self._generate_garch_price_path(chosen_regime, required_data_length)
             elif source_to_use == 'historical':
-                self._generate_historical_price_path(self.total_steps + self.pre_roll_steps)
+                self._generate_historical_price_path(required_data_length)
             else: # Mixed mode
                 if self.np_random.choice([True, False]):
-                    self._generate_historical_price_path(self.total_steps + self.pre_roll_steps)
+                    self._generate_historical_price_path(required_data_length)
                 else:
-                    self._generate_garch_price_path(chosen_regime, self.total_steps + self.pre_roll_steps)
+                    self._generate_garch_price_path(chosen_regime, required_data_length)
 
             if not np.all(np.isfinite(self.price_path)) or np.any(self.price_path <= 0):
                 raise ValueError("Generated path contains invalid values.")
 
         except Exception as e:
             # Failsafe path generation
-            self.price_path = np.full(self.total_steps + self.pre_roll_steps + 1, self.start_price, dtype=np.float32)
+            self.price_path = np.full(required_data_length + 1, self.start_price, dtype=np.float32)
 
         # Create features on the ENTIRE path (pre-roll + episode)
         self.features_df = calculate_advanced_features(pd.DataFrame({'Close': self.price_path}, index=pd.to_datetime(pd.RangeIndex(start=-self.pre_roll_steps, stop=len(self.price_path) - self.pre_roll_steps), unit='D')))
@@ -196,6 +199,9 @@ class PriceActionManager:
         """Updates the manager's state and runs the full inference pipeline."""
         # The current_step is for the episode, but we need to index into the full price_path.
         path_index = current_step + self.pre_roll_steps
+        if path_index >= len(self.price_path):
+            # This can happen on the final step. We should just use the last available price.
+            path_index = len(self.price_path) - 1
         self.current_price = self.price_path[path_index]
         
         if not self.experts or current_step < self.expert_sequence_length:

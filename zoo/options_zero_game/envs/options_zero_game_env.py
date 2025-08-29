@@ -794,7 +794,6 @@ class OptionsZeroGameEnv(gym.Env):
                     terminated_by_rule = True
                     final_shaped_reward_override = -1.0
                     termination_reason = "STOP_LOSS"
-                    print(f"STOP_LOSS triggered: unr_pnl: {unrealized_pnl} stop_loss: {-stop_loss_level}")
 
         # 2. Take-Profit Rules (Only check if not already stopped out)
         # Add the same one-step grace period to the take-profit rules.
