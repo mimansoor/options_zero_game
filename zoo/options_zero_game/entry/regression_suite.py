@@ -1520,7 +1520,7 @@ def test_open_call_ratio_spread():
         assert portfolio.iloc[0]['strategy_id'] == env.strategy_name_to_id['OPEN_CALL_RATIO_SPREAD'], "Incorrect strategy ID."
 
         print(f"--- PASSED: {test_name} ---")
-        return True
+        return False
     except Exception:
         traceback.print_exc()
         print(f"--- FAILED: {test_name} ---")
