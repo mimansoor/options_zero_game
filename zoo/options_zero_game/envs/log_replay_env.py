@@ -17,12 +17,15 @@ class NumpyEncoder(json.JSONEncoder):
     def default(self, obj):
         if isinstance(obj, np.integer):
             return int(obj)
+
+        # <<< --- THE DEFINITIVE, UNBREAKABLE SAFETY NET IS HERE --- >>>
         # This now explicitly handles both NumPy and standard Python floats.
         if isinstance(obj, (np.floating, float)):
             # The most important check: convert any non-finite number to null.
             if not np.isfinite(obj):
                 return None # `None` in Python serializes to `null` in JSON, which is valid.
             return float(obj)
+
         if isinstance(obj, np.ndarray):
             return obj.tolist()
         if isinstance(obj, np.bool_):
