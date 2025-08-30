@@ -131,44 +131,55 @@ class PriceActionManager:
         """Generates a price path from a random slice of historical data."""
         forced_symbol = self._cfg.get('forced_historical_symbol')
         forced_days_back = self._cfg.get('forced_days_back')
+        
+        selected_ticker = None
+        # 1. First, check if a forced symbol was provided.
+        if forced_symbol:
+            forced_file_path = os.path.join(self.historical_data_path, f"{forced_symbol}.csv")
+            # 2. Then, validate that the file for it actually exists.
+            if os.path.exists(forced_file_path):
+                selected_ticker = forced_symbol
+                print(f"(INFO) Using forced historical symbol: {selected_ticker}")
+            else:
+                # 3. If it doesn't exist, print a warning and prepare to fall back.
+                print(f"(WARNING) Forced symbol '{forced_symbol}' not found in cache. Falling back to a random ticker.")
+        
+        # 4. If no ticker has been selected yet (either because none was forced, or the forced one was invalid), pick a random one.
+        if not selected_ticker:
+            selected_ticker = self.np_random.choice(self._available_tickers)
 
-        for _ in range(5):
+        # The rest of the function now operates with a guaranteed-to-exist ticker for its first attempt.
+        for _ in range(5): # Failsafe loop for processing errors (e.g., file too short)
             try:
-                selected_ticker = forced_symbol or self.np_random.choice(self._available_tickers)
                 file_path = os.path.join(self.historical_data_path, f"{selected_ticker}.csv")
                 data = pd.read_csv(file_path, index_col='Date', parse_dates=True)
                 data.rename(columns={data.columns[0]: 'Close'}, inplace=True)
 
-                if len(data) < required_length: continue
+                if len(data) < required_length:
+                    # This file is too short, try a different random one on the next loop iteration.
+                    raise ValueError(f"File for {selected_ticker} is too short.")
 
+                # ... (rest of the successful processing logic is unchanged) ...
                 max_start_index = len(data) - required_length
                 start_index = max(0, max_start_index - (forced_days_back - 1)) if forced_days_back is not None else self.np_random.integers(0, max_start_index + 1)
-                
-                # 1. Slice the entire required segment (pre-roll + episode) from the raw data.
                 full_price_segment = data['Close'].iloc[start_index : start_index + required_length]
-
-                # 2. Identify the raw price at the actual start of the episode (after the pre-roll).
                 raw_start_price_of_episode = full_price_segment.iloc[self.expert_sequence_length]
-                
                 if raw_start_price_of_episode > 1e-4:
-                    # 3. Calculate a single normalization factor.
                     normalization_factor = self.start_price_config / raw_start_price_of_episode
-                    
-                    # 4. Normalize the ENTIRE path at once. This is the main simulation path.
                     self.price_path = (full_price_segment * normalization_factor).to_numpy(dtype=np.float32)
-                    
-                    # 5. The historical context for the logger is now just a slice of this
-                    #    perfectly contiguous, normalized path.
                     self.historical_context_path = self.price_path[:self.expert_sequence_length]
-
                     self.start_price = self.price_path[0]
                     log_returns = np.log(self.price_path[1:] / self.price_path[:-1])
                     annualized_vol = np.std(log_returns) * np.sqrt(252)
                     self.episode_iv_anchor = annualized_vol if np.isfinite(annualized_vol) and annualized_vol > 0 else 0.2
                     return # Success
+
             except Exception as e:
-                print(f"(WARNING) Historical path generation failed for {selected_ticker}: {e}. Retrying.")
+                # This block now only catches processing errors, not FileNotFoundErrors.
+                print(f"(WARNING) Failed to process {selected_ticker}: {e}. Retrying with a new random ticker.")
+                selected_ticker = self.np_random.choice(self._available_tickers)
                 continue
+                
         raise ValueError("Failed to generate a valid historical price path after 5 attempts.")
 
     def _generate_garch_price_path(self, chosen_regime: dict, required_length: int):
