@@ -88,7 +88,7 @@ class OptionsZeroGameEnv(gym.Env):
         stop_loss_multiple_of_cost=3.0, # NEW: Added stop loss multiple
         use_stop_loss=True,
         forced_opening_strategy_name=None,
-        disable_opening_curriculum=True,
+        disable_opening_curriculum=False,
 
         disable_spread_solver=False,
         
@@ -1457,7 +1457,7 @@ class OptionsZeroGameEnv(gym.Env):
         final_opening_mask = self._apply_slot_constraints(base_opening_mask)
 
         # Apply opening curriculum at Step 0 (training only)
-        if self.current_step == 0 and not self._cfg.disable_opening_curriculum:
+        if self.is_training_mode and self.current_step == 0 and not self._cfg.disable_opening_curriculum:
             return self._apply_opening_curriculum(final_opening_mask)
 
         if self.current_step > 0:
