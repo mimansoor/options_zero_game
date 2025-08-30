@@ -413,7 +413,7 @@ class PortfolioManager:
                 # If the result is a 3+ leg position, it's a custom hedged structure.
                 new_strategy_name = f"CUSTOM_{len(modified_strategy_legs_list)}_LEGS"
             
-            pnl_profile = self._calculate_universal_risk_profile(modified_strategy_legs_list, self.realized_pnl, is_new_trade=False)
+            pnl_profile = self._calculate_universal_risk_profile(modified_strategy_legs_list, self.realized_pnl)
             pnl_profile['strategy_id'] = self.strategy_name_to_id.get(new_strategy_name, -1)
             
             # --- 4. Atomically rebuild the portfolio ---
@@ -480,7 +480,7 @@ class PortfolioManager:
             for leg in found_legs:
                 leg['entry_step'] = current_step
 
-            pnl_profile = self._calculate_universal_risk_profile(found_legs, self.realized_pnl)
+            pnl_profile = self._calculate_universal_risk_profile(found_legs, self.realized_pnl, is_new_trade=True)
             if pnl_profile['strategy_max_profit'] <= self.min_profit_hurdle: return False
             pnl_profile['strategy_id'] = self.strategy_name_to_id.get(action_name, -1)
             self._execute_trades(found_legs, pnl_profile)
