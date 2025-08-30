@@ -151,7 +151,7 @@ class OptionsZeroGameEnv(gym.Env):
 
         self.regimes = self._cfg.get('unified_regimes', [])
         self.current_iv_regime_name = "N/A" # For logging
-        self.current_iv_regime_index = 0 # Start with a default
+        self.current_iv_regime_index = 2 # Start with a default
         self.iv_price_correlation_strength = self._cfg.get('iv_price_correlation_strength', 0.0)
 
         # 1. Define the sizes of all embedding blocks FIRST.
@@ -358,7 +358,7 @@ class OptionsZeroGameEnv(gym.Env):
         elif self._cfg.price_source == 'historical':
             # Use the 'Normal' regime as a consistent, sensible baseline for all historical runs.
             # This prevents random, high-volatility IVs from polluting historical tests.
-            chosen_regime_for_episode = next((reg for reg in self.regimes if reg['name'] == 'Normal (Medium Vol, Bullish)'), self.regimes[0])
+            chosen_regime_for_episode = next((reg for reg in self.regimes if reg['name'] == 'Complacent (Low Vol, Neutral)'), self.regimes[0])
 
         # PRIORITY 3: If not forced and not historical, it must be a GARCH run. Select randomly.
         else:
