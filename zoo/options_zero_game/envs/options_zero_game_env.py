@@ -304,6 +304,15 @@ class OptionsZeroGameEnv(gym.Env):
         self.final_eval_reward = 0.0
         self.illegal_action_count = 0
 
+        # Randomly select the data augmentation mode for this episode.
+        # This creates an equal (33.3%) chance for each mode.
+        # 0 = Normal (No augmentation)
+        # 1 = Symmetric Mirror (e.g., Bull Call -> Bear Call)
+        # 2 = Strategy-Type Mirror (e.g., Bull Call -> Bull Put)
+        self.mirror_mode = 0
+        if self.is_training_mode:
+            self.mirror_mode = self.np_random.choice([0, 1, 2])
+
         # The scaling factor is now proportional to a "standard" unit of P&L:
         # the max profit from a 1-strike-wide vertical spread.
         self.pnl_scaling_factor = self._cfg.strike_distance * self._cfg.lot_size
