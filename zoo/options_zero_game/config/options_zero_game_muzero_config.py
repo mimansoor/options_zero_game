@@ -71,38 +71,35 @@ def generate_dynamic_iv_skew_table(max_offset: int, atm_iv: float, far_otm_put_i
     return skew_table
 
 # ==============================================================
-#           UNIFIED REGIME DEFINITIONS (The Single Source of Truth)
+#           UNIFIED REGIME DEFINITIONS (More Realistic Version)
 # ==============================================================
-# Each dictionary now contains BOTH GARCH parameters for price movement
-# AND IV parameters for option pricing.
+# This revised set of regimes is tuned to more common VIX levels for
+# a standard equity index, providing a more realistic training ground.
 UNIFIED_REGIMES = [
     {
         'name': 'Crisis (High Vol, Bearish)',
-        # GARCH Params
+        # Represents a VIX in the 40-50 range. A significant market downturn.
         'mu': -0.0005, 'omega': 0.0001, 'alpha': 0.15, 'beta': 0.82, 'overnight_vol_multiplier': 2.2,
-        # IV Params
-        'atm_iv': 50.0, 'far_otm_put_iv': 90.0, 'far_otm_call_iv': 40.0,
+        'atm_iv': 45.0, 'far_otm_put_iv': 75.0, 'far_otm_call_iv': 38.0,
     },
     {
-        'name': 'Normal (Medium Vol, Bullish)',
-        # GARCH Params (Using SPY_Real as a baseline)
+        'name': 'Elevated Vol (Bullish)',
+        # Represents a VIX in the 20-30 range. The market is trending up but with some uncertainty.
         'mu': 0.000905, 'omega': 0.00000397, 'alpha': 0.1280, 'beta': 0.8404, 'overnight_vol_multiplier': 5.99,
-        # IV Params
-        'atm_iv': 25.0, 'far_otm_put_iv': 50.0, 'far_otm_call_iv': 20.0,
+        'atm_iv': 22.0, 'far_otm_put_iv': 40.0, 'far_otm_call_iv': 18.0,
     },
     {
         'name': 'Complacent (Low Vol, Neutral)',
-        # GARCH Params (Using Bond_Markets as a baseline)
+        # Represents a VIX in the low teens. A quiet, range-bound market.
         'mu': 0.00001, 'omega': 0.000002, 'alpha': 0.05, 'beta': 0.92, 'overnight_vol_multiplier': 1.1,
-        # IV Params
-        'atm_iv': 12.0, 'far_otm_put_iv': 20.0, 'far_otm_call_iv': 10.0,
+        'atm_iv': 14.0, 'far_otm_put_iv': 22.0, 'far_otm_call_iv': 12.0,
     },
     {
-        'name': 'Crypto (High Vol, High Growth)',
-        # GARCH Params
-        'mu': 0.0015, 'omega': 0.0001, 'alpha': 0.10, 'beta': 0.88, 'overnight_vol_multiplier': 1.85,
-        # IV Params
-        'atm_iv': 75.0, 'far_otm_put_iv': 110.0, 'far_otm_call_iv': 70.0,
+        'name': 'Volatile (Choppy, Neutral)',
+        # Represents a VIX in the 30s. High uncertainty, but no clear market direction (choppy).
+        # This replaces the extreme "Crypto" regime with a more common scenario.
+        'mu': 0.0001, 'omega': 0.00005, 'alpha': 0.13, 'beta': 0.85, 'overnight_vol_multiplier': 1.85,
+        'atm_iv': 30.0, 'far_otm_put_iv': 55.0, 'far_otm_call_iv': 25.0,
     },
 ]
 
