@@ -102,16 +102,45 @@ function MetricsDashboard({ stepData, lots, envDefaults }) { // <-- NEW: Added l
 }
 
 function ActivePositions({ portfolio }) {
-    if (!portfolio || portfolio.length === 0) return <p className="empty-message">Portfolio is empty.</p>;
-    return (<table className="info-table"><thead><tr><th>Type</th><th>Direction</th><th>Strike</th><th>Entry Prem.</th><th>Current Prem.</th><th>Live PnL</th><th>DTE</th></tr></thead><tbody>
-        {portfolio.map((pos, index) => {
-            const pnlColor = pos.live_pnl > 0 ? '#4CAF50' : pos.live_pnl < 0 ? '#F44336' : 'white';
-            return (<tr key={index} className={pos.direction.toLowerCase()}>
-                <td>{pos.type.toUpperCase()}</td><td>{pos.direction.toUpperCase()}</td><td>${(pos.strike_price || 0).toFixed(2)}</td><td>${(pos.entry_premium || 0).toFixed(2)}</td>
-                <td>${(pos.current_premium || 0).toFixed(2)}</td><td style={{ color: pnlColor }}>${(pos.live_pnl || 0).toFixed(2)}</td><td>{(pos.days_to_expiry || 0).toFixed(2)}</td>
-            </tr>);
-        })}
-    </tbody></table>);
+    if (!portfolio || portfolio.length === 0) {
+        return <p className="empty-message">Portfolio is empty.</p>;
+    }
+    return (
+        <table className="info-table">
+            <thead>
+                <tr>
+                    <th>Type</th>
+                    <th>Direction</th>
+                    <th>Strike</th>
+                    <th>Entry Prem.</th>
+                    <th>Current Prem.</th>
+                    <th>Live PnL</th>
+                    {/* <<< --- THE DEFINITIVE FIX (Part 1): Add the new table header --- >>> */}
+                    <th>Live IV (%)</th>
+                    <th>DTE</th>
+                </tr>
+            </thead>
+            <tbody>
+                {portfolio.map((pos, index) => {
+                    const pnlColor = pos.live_pnl > 0 ? '#4CAF50' : pos.live_pnl < 0 ? '#F44336' : 'white';
+                    return (
+                        <tr key={index} className={pos.direction.toLowerCase()}>
+                            <td>{pos.type.toUpperCase()}</td>
+                            <td>{pos.direction.toUpperCase()}</td>
+                            <td>${(pos.strike_price || 0).toFixed(2)}</td>
+                            <td>${(pos.entry_premium || 0).toFixed(2)}</td>
+                            <td>${(pos.current_premium || 0).toFixed(2)}</td>
+                            <td style={{ color: pnlColor }}>${(pos.live_pnl || 0).toFixed(2)}</td>
+                            {/* <<< --- THE DEFINITIVE FIX (Part 2): Add the new cell to display IV --- >>> */}
+                            {/* We multiply by 100 and add a '%' sign for correct display. */}
+                            <td>{((pos.live_iv || 0) * 100).toFixed(2)}%</td>
+                            <td>{(pos.days_to_expiry || 0).toFixed(2)}</td>
+                        </tr>
+                    );
+                })}
+            </tbody>
+        </table>
+    );
 }
 
 function ClosedTradesLog({ closedTrades }) {
