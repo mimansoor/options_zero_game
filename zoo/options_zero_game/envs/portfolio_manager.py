@@ -1603,26 +1603,35 @@ class PortfolioManager:
         return self._sanitize_dict(raw_profile)
 
     def _open_single_leg(self, action_name: str, current_price: float, iv_bin_index: int, current_step: int, days_to_expiry: float):
-        # --- Defensive Assertion ---
-        assert len(self.portfolio) < self.max_positions, "Illegal attempt to open a leg when portfolio is full. Action mask failed."
-
         if len(self.portfolio) >= self.max_positions: return False
-        parts = action_name.split('_')
-        direction, option_type, offset_str = parts[1].lower(), parts[2].lower(), parts[3].replace('ATM', '')
-        offset = int(offset_str)
+        
+        # We replace the old, faulty parser with the new, simplified version
+        # that correctly handles the "..._ATM" action format.
+        try:
+            parts = action_name.split('_')
+            direction, option_type = parts[1].lower(), parts[2].lower()
+            # Since the action name is now just "_ATM", the offset is always 0.
+            offset = 0
+        except (ValueError, IndexError):
+            print(f"Warning: Could not parse single leg action name: {action_name}")
+            return False
+
         strike_price = self.market_rules_manager.get_atm_price(current_price) + (offset * self.strike_distance)
         
         legs = [{'type': option_type, 'direction': direction, 'strike_price': strike_price, 'entry_step': current_step, 'days_to_expiry': days_to_expiry}]
-        # We now explicitly ask _price_legs to enforce the rule for this new position.
         priced_legs = self._price_legs(legs, current_price, iv_bin_index, check_short_rule=True)
         
-        # If pricing failed because of our new rule, abort the action.
         if not priced_legs: return False
 
         pnl_profile = self._calculate_universal_risk_profile(priced_legs, self.realized_pnl, is_new_trade=True)
         if pnl_profile['strategy_max_profit'] <= self.min_profit_hurdle: return False
-        pnl_profile['strategy_id'] = self.strategy_name_to_id.get(action_name, -1)
-        #print(f"DEBUG: {pnl_profile['strategy_id']} {action_name}")
+        
+        # The strategy_id for a naked leg is its internal name, e.g., "SHORT_CALL"
+        internal_strategy_name = f"{direction.upper()}_{option_type.upper()}"
+        strategy_id = self.strategy_name_to_id.get(internal_strategy_name)
+        assert strategy_id is not None, f"Could not find strategy_id for naked leg: {internal_strategy_name}"
+        pnl_profile['strategy_id'] = strategy_id
+
         self._execute_trades(priced_legs, pnl_profile)
         return True
 

@@ -1163,16 +1163,10 @@ class OptionsZeroGameEnv(gym.Env):
 
     def _build_action_space(self) -> Dict[str, int]:
         actions = {'HOLD': 0}; i = 1
-        agent_max_open_offset = self._cfg.get('agent_max_open_offset', 10)
 
-        # Use the configurable max_strike_offset instead of a hardcoded range.
-        for offset in range(-agent_max_open_offset, agent_max_open_offset + 1):
-            sign = '+' if offset >= 0 else ''
-            # We can simplify the action name for offsets > 9, e.g., ATM+10 instead of ATM+ 10
-            offset_str = f"{sign}{offset}"
-            for t in ['CALL', 'PUT']:
-                for d in ['LONG', 'SHORT']:
-                    actions[f'OPEN_{d}_{t}_ATM{offset_str}'] = i; i+=1
+        for t in ['CALL', 'PUT']:
+            for d in ['LONG', 'SHORT']:
+                actions[f'OPEN_{d}_{t}_ATM'] = i; i+=1
 
         actions['OPEN_BULL_CALL_SPREAD'] = i; i+=1
         actions['OPEN_BEAR_CALL_SPREAD'] = i; i+=1
@@ -1488,9 +1482,13 @@ class OptionsZeroGameEnv(gym.Env):
 
         # --- Rule 2: Single-leg specific rules ---
         try:
+            # <<< --- THE DEFINITIVE, SIMPLIFIED FIX IS HERE --- >>>
+            # Since all naked leg actions now end with just "_ATM", the offset is always 0.
+            # We no longer need to parse a number from the action name.
             parts = action_name.split('_')
-            direction, option_type, offset_str = parts[1], parts[2].lower(), parts[3].replace('ATM', '')
-            offset = int(offset_str)
+            direction, option_type = parts[1], parts[2].lower()
+            offset = 0
+
         except (ValueError, IndexError):
             return False # Invalid action name format
 

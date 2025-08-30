@@ -83,7 +83,7 @@ def test_hedge_portfolio_by_rolling_leg():
         'atm_iv': 25.0, 'far_otm_put_iv': 25.0, 'far_otm_call_iv': 25.0,
     }
     env = create_isolated_test_env(
-        'OPEN_SHORT_CALL_ATM-1', # A single naked leg
+        'OPEN_SHORT_CALL_ATM', # A single naked leg
         overrides={
             'use_expert_iv': False,
             'iv_price_correlation_strength': 0.0,
@@ -271,7 +271,7 @@ def test_hedge_delta_with_atm_option():
     # <<< --- THE DEFINITIVE FIX: Isolate the test from all dynamic IV and P&L logic --- >>>
     flat_vol_regime = {'name': 'Flat_Test_Regime', 'mu': 0, 'omega': 0, 'alpha': 0, 'beta': 1, 'atm_iv': 25.0, 'far_otm_put_iv': 25.0, 'far_otm_call_iv': 25.0}
     env = create_isolated_test_env(
-        'OPEN_SHORT_CALL_ATM-1',
+        'OPEN_SHORT_CALL_ATM',
         overrides={'use_expert_iv': False, 'iv_price_correlation_strength': 0.0, 'unified_regimes': [flat_vol_regime]}
     )
 
@@ -322,7 +322,7 @@ def test_increase_delta_by_shifting_leg():
     """Tests if INCREASE_DELTA_BY_SHIFTING_LEG correctly resolves and has the right effect."""
     test_name = "test_increase_delta_by_shifting_leg"
     print(f"\n--- RUNNING: {test_name} ---")
-    env = create_test_env('OPEN_SHORT_PUT_ATM-1')
+    env = create_test_env('OPEN_SHORT_PUT_ATM')
     try:
         env.reset(seed=60)
         env.step(env.actions_to_indices['HOLD'])
@@ -361,7 +361,7 @@ def test_decrease_delta_by_shifting_leg():
     """Tests if DECREASE_DELTA_BY_SHIFTING_LEG correctly resolves and has the right effect."""
     test_name = "test_decrease_delta_by_shifting_leg"
     print(f"\n--- RUNNING: {test_name} ---")
-    env = create_test_env('OPEN_SHORT_PUT_ATM-1')
+    env = create_test_env('OPEN_SHORT_PUT_ATM')
     try:
         env.reset(seed=61)
         env.step(env.actions_to_indices['HOLD'])
@@ -688,7 +688,7 @@ def test_hedge_naked_put():
     """Tests if HEDGE_NAKED_POS correctly converts a naked put into a Bull Put Spread."""
     test_name = "test_hedge_naked_put"
     print(f"\n--- RUNNING: {test_name} ---")
-    env = create_isolated_test_env('OPEN_SHORT_PUT_ATM-1')
+    env = create_isolated_test_env('OPEN_SHORT_PUT_ATM')
     try:
         # Step 0: Reset the environment
         obs_dict = env.reset(seed=42)
@@ -851,7 +851,7 @@ def test_hedge_short_call():
     """Tests hedging a naked SHORT CALL into a Bear Call Spread."""
     test_name = "test_hedge_short_call"
     print(f"\n--- RUNNING: {test_name} ---")
-    env = create_isolated_test_env('OPEN_SHORT_CALL_ATM+1')
+    env = create_isolated_test_env('OPEN_SHORT_CALL_ATM')
     try:
         env.reset(seed=43)
         env.step(env.actions_to_indices['HOLD'])
@@ -881,7 +881,7 @@ def test_hedge_long_put():
     """Tests hedging a naked LONG PUT into a Bear Put Spread."""
     test_name = "test_hedge_long_put"
     print(f"\n--- RUNNING: {test_name} ---")
-    env = create_isolated_test_env('OPEN_LONG_PUT_ATM-1')
+    env = create_isolated_test_env('OPEN_LONG_PUT_ATM')
     try:
         env.reset(seed=44)
         env.step(env.actions_to_indices['HOLD'])
@@ -911,7 +911,7 @@ def test_hedge_long_call():
     """Tests hedging a naked LONG CALL into a Bull Call Spread."""
     test_name = "test_hedge_long_call"
     print(f"\n--- RUNNING: {test_name} ---")
-    env = create_isolated_test_env('OPEN_LONG_CALL_ATM+1')
+    env = create_isolated_test_env('OPEN_LONG_CALL_ATM')
     try:
         env.reset(seed=45)
         env.step(env.actions_to_indices['HOLD'])

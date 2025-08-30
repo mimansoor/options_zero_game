@@ -111,62 +111,62 @@ UNIFIED_REGIMES = [
 
 TRAINING_CURRICULUM1 = {
     # === Phase 1: Master Naked Puts (Bullish Premium Selling) ===
-    # Give the agent 1 million steps to learn this core concept.
-    0: 'OPEN_SHORT_PUT_ATM-1',
-    int(2e5): 'OPEN_SHORT_PUT_ATM-1',
-    int(4e5): 'OPEN_SHORT_PUT_ATM+0',
-    int(6e5): 'OPEN_SHORT_PUT_ATM+1',
-    int(8e5): 'OPEN_SHORT_PUT_ATM+1',
+    # All of these now point to the single 'OPEN_SHORT_CALL_ATM' action.
+    0: 'OPEN_SHORT_CALL_ATM',
+    int(1e6): 'OPEN_SHORT_CALL_ATM',
+    int(1.2e6): 'OPEN_SHORT_CALL_ATM',
+    int(1.4e6): 'OPEN_SHORT_CALL_ATM',
+    int(1.6e6): 'OPEN_SHORT_CALL_ATM',
 
-    # === Phase 2: Master Naked Calls (Bearish Premium Selling) ===
-    # Another 1 million steps for the opposite side.
-    int(1e6): 'OPEN_SHORT_CALL_ATM-1',
-    int(1.2e6): 'OPEN_SHORT_CALL_ATM-1',
-    int(1.4e6): 'OPEN_SHORT_CALL_ATM+0',
-    int(1.6e6): 'OPEN_SHORT_CALL_ATM+1',
-    int(1.8e6): 'OPEN_SHORT_CALL_ATM+1',
+    # === Phase 7: Refine Foundational Naked Put Skills ===
+    # All of these now point to the single 'OPEN_SHORT_PUT_ATM' action.
+    int(2e6): 'OPEN_SHORT_PUT_ATM',
+    int(2.2e6): 'OPEN_SHORT_PUT_ATM',
+    int(2.4e6): 'OPEN_SHORT_PUT_ATM',
+    int(2.6e6): 'OPEN_SHORT_PUT_ATM',
+    int(2.8e6): 'OPEN_SHORT_PUT_ATM',
 
     # === Phase 3: Master Volatility Selling (Undefined Risk) ===
     # Now that it knows calls and puts, learn to combine them.
-    int(2e6): 'OPEN_SHORT_STRADDLE',
-    int(3e6): 'OPEN_SHORT_STRANGLE_DELTA_15', # Introduce delta-based strangles early
+    int(3e6): 'OPEN_SHORT_STRADDLE',
+    int(4e6): 'OPEN_SHORT_STRANGLE_DELTA_15', # Introduce delta-based strangles early
 
     # === Phase 4: Master Volatility Buying (Undefined Risk) ===
-    int(4e6): 'OPEN_LONG_STRADDLE',
-    int(5e6): 'OPEN_LONG_STRANGLE_DELTA_15',
+    int(5e6): 'OPEN_LONG_STRADDLE',
+    int(6e6): 'OPEN_LONG_STRANGLE_DELTA_15',
     
     # === Phase 5: Learn Risk-Defined Volatility Selling ===
-    int(6e6): 'OPEN_SHORT_IRON_CONDOR',
-    int(7e6): 'OPEN_SHORT_CALL_CONDOR',
-    int(8e6): 'OPEN_SHORT_PUT_CONDOR',
-    int(9e6): 'OPEN_SHORT_CALL_FLY', # Butterflies are a good follow-up
+    int(7e6): 'OPEN_SHORT_IRON_CONDOR',
+    int(8e6): 'OPEN_SHORT_CALL_CONDOR',
+    int(9e6): 'OPEN_SHORT_PUT_CONDOR',
+    int(10e6): 'OPEN_SHORT_CALL_FLY', # Butterflies are a good follow-up
 
     # === Phase 6: Learn Risk-Defined Volatility Buying ===
-    int(10e6): 'OPEN_LONG_IRON_CONDOR',
-    int(11e6): 'OPEN_LONG_CALL_CONDOR',
-    int(12e6): 'OPEN_LONG_PUT_CONDOR',
-    int(13e6): 'OPEN_LONG_CALL_FLY',
+    int(11e6): 'OPEN_LONG_IRON_CONDOR',
+    int(12e6): 'OPEN_LONG_CALL_CONDOR',
+    int(13e6): 'OPEN_LONG_PUT_CONDOR',
+    int(14e6): 'OPEN_LONG_CALL_FLY',
 
     # === Phase 7: Master Debit Spreads (Directional Buying) ===
-    int(14e6): 'OPEN_BULL_CALL_SPREAD',
-    int(15e6): 'OPEN_BEAR_PUT_SPREAD',
+    int(15e6): 'OPEN_BULL_CALL_SPREAD',
+    int(16e6): 'OPEN_BEAR_PUT_SPREAD',
     
     # === Phase 8: Master Credit Spreads (Directional Selling) ===
-    int(16e6): 'OPEN_BULL_PUT_SPREAD',
-    int(17e6): 'OPEN_BEAR_CALL_SPREAD',
+    int(17e6): 'OPEN_BULL_PUT_SPREAD',
+    int(18e6): 'OPEN_BEAR_CALL_SPREAD',
 
     # === Phase 9: Train the Jade/Reverse_Jade/Big_Lizard/Reverse_Big/Put_Ration/Call_Ratio spreads (The Final Phase) ===
     # Duration: 200k steps each
-    int(18e6): 'OPEN_JADE_LIZARD',
-    int(18.2e6): 'OPEN_REVERSE_JADE_LIZARD',
-    int(18.4e6): 'OPEN_BIG_LIZARD',
-    int(18.6e6): 'OPEN_REVERSE_BIG_LIZARD',
-    int(18.8e6): 'OPEN_PUT_RATIO_SPREAD',
-    int(18.8e6): 'OPEN_CALL_RATIO_SPREAD',
+    int(19e6): 'OPEN_JADE_LIZARD',
+    int(19.2e6): 'OPEN_REVERSE_JADE_LIZARD',
+    int(19.4e6): 'OPEN_BIG_LIZARD',
+    int(19.6e6): 'OPEN_REVERSE_BIG_LIZARD',
+    int(19.8e6): 'OPEN_PUT_RATIO_SPREAD',
+    int(19.8e6): 'OPEN_CALL_RATIO_SPREAD',
 
     # === Final Phase: Integration and Agent Autonomy ===
     # Allow the agent to use any of its learned strategies to maximize reward.
-    int(19e6): 'ALL'
+    int(20e6): 'ALL'
 }
 
 TRAINING_CURRICULUM = {
@@ -216,21 +216,20 @@ TRAINING_CURRICULUM = {
     int(16e6): 'OPEN_SHORT_STRADDLE',
 
     # === Phase 6: Refine Foundational Naked Call Skills ===
-    # Duration: 200k steps each (e.g., 2e6 - 1.8e6)
-    int(17e6): 'OPEN_SHORT_CALL_ATM+1',
-    int(17.2e6): 'OPEN_SHORT_CALL_ATM+1',
-    int(17.4e6): 'OPEN_SHORT_CALL_ATM+0',
-    int(17.6e6): 'OPEN_SHORT_CALL_ATM-1',
-    int(17.8e6): 'OPEN_SHORT_CALL_ATM-1',
+    # All of these now point to the single 'OPEN_SHORT_CALL_ATM' action.
+    int(17e6): 'OPEN_SHORT_CALL_ATM',
+    int(17.2e6): 'OPEN_SHORT_CALL_ATM',
+    int(17.4e6): 'OPEN_SHORT_CALL_ATM',
+    int(17.6e6): 'OPEN_SHORT_CALL_ATM',
+    int(17.8e6): 'OPEN_SHORT_CALL_ATM',
 
     # === Phase 7: Refine Foundational Naked Put Skills ===
-    # Duration: 200k steps each
-    int(18e6): 'OPEN_SHORT_PUT_ATM+1',
-    int(18.2e6): 'OPEN_SHORT_PUT_ATM+1',
-    int(18.4e6): 'OPEN_SHORT_PUT_ATM+0',
-    int(18.6e6): 'OPEN_SHORT_PUT_ATM-1',
-    # This phase runs until the end of training
-    int(18.8e6): 'OPEN_SHORT_PUT_ATM-1',
+    # All of these now point to the single 'OPEN_SHORT_PUT_ATM' action.
+    int(18e6): 'OPEN_SHORT_PUT_ATM',
+    int(18.2e6): 'OPEN_SHORT_PUT_ATM',
+    int(18.4e6): 'OPEN_SHORT_PUT_ATM',
+    int(18.6e6): 'OPEN_SHORT_PUT_ATM',
+    int(18.8e6): 'OPEN_SHORT_PUT_ATM',
 
     # === Phase 8: Train the Jade/Reverse_Jade/Big_Lizard/Reverse_Big/Put_Ration/Call_Ratio spreads (The Final Phase) ===
     # Duration: 200k steps each
@@ -262,7 +261,6 @@ class CurriculumHolder:
 # This makes the script runnable from anywhere.
 # <<< NEW: Define high-level volatility parameters >>>
 MAX_STRIKE_OFFSET = 50
-AGENT_MAX_OPEN_OFFSET = 1
 ATM_IV = 25.0  # Volatility at the money is 25%
 FAR_OTM_PUT_IV = 50.0 # Volatility for the -30 strike put is 50%
 FAR_OTM_CALL_IV = 20.0 # Volatility for the +30 strike call is 20% (creating a "smirk")
@@ -289,15 +287,11 @@ for direction in ['LONG', 'SHORT']:
     for opt_type in ['CALL', 'PUT']:
         strategy_name_to_id[f'{direction}_{opt_type}'] = next_id; next_id += 1
 
-# Add the full action names for all single leg actions
-agent_max_open_offset = AGENT_MAX_OPEN_OFFSET
-for offset in range(-agent_max_open_offset, agent_max_open_offset + 1):
-    strike_str = f"ATM{offset:+d}"
-    for direction in ['LONG', 'SHORT']:
-        for opt_type in ['CALL', 'PUT']:
-            action_name = f'OPEN_{direction}_{opt_type}_{strike_str}'
-            internal_name = f'{direction}_{opt_type}'
-            strategy_name_to_id[action_name] = strategy_name_to_id[internal_name]
+for direction in ['LONG', 'SHORT']:
+    for opt_type in ['CALL', 'PUT']:
+        action_name = f'OPEN_{direction}_{opt_type}_ATM'
+        internal_name = f'{direction}_{opt_type}'
+        strategy_name_to_id[action_name] = strategy_name_to_id[internal_name]
 
 # --- 2. Core Volatility Strategies ---
 for direction in ['LONG', 'SHORT']:
@@ -418,10 +412,6 @@ options_zero_game_muzero_config = dict(
 
         max_strike_offset=MAX_STRIKE_OFFSET,
         
-        # <<< NEW: Add a parameter specifically for the agent's naked opening actions >>>
-        # The agent can only OPEN naked positions within this narrower range.
-        agent_max_open_offset=AGENT_MAX_OPEN_OFFSET,
-
         # This MUST match the 'sequence_length' used in the expert trainer CONFIG.
         expert_sequence_length=60,
 
