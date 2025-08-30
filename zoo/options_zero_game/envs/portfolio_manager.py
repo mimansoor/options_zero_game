@@ -427,7 +427,7 @@ class PortfolioManager:
         """
         Public method to execute the opening of a vertical spread.
         It first tries to find an ideal spread using the tiered R:R solver.
-        If that fails, it falls back to creating a robust, fixed-width spread.
+        If that fails, it now robustly falls back to creating a fixed-width spread.
         """
         # --- 1. Parse Action Intent ---
         parts = action_name.replace('OPEN_', '').split('_')
@@ -435,23 +435,26 @@ class PortfolioManager:
         option_type = parts[1].lower()
         is_credit_spread = 'BULL_PUT' in direction_name or 'BEAR_CALL' in direction_name
 
-        # --- 2. Attempt to Find the Ideal Spread ---
+        # --- 2. Attempt to Find the Ideal Spread using the Solver ---
         found_legs = self._find_best_available_spread(
             option_type, direction_name, current_price, iv_bin_index, days_to_expiry, is_credit_spread
         )
 
+        # <<< --- THE DEFINITIVE FIX IS HERE: Implement a robust fallback --- >>>
         if not found_legs:
+            # This block now runs if the intelligent solver fails to find a perfect R:R match.
             # print(f"DEBUG: Tiered R:R solver failed for {action_name}. Using fixed-width fallback.")
             
             atm_strike = self.market_rules_manager.get_atm_price(current_price)
-            wing_offset = self.strike_distance * 10 # Use a wider, more robust default width
+            # Use a wide, robust default width that is guaranteed to be available.
+            wing_offset = self.strike_distance * 10 
             
             anchor_strike = 0
             wing_strike = 0
             anchor_dir = ''
             wing_dir = ''
 
-            # This logic now explicitly handles all four cases correctly.
+            # This logic explicitly handles all four cases correctly.
             if direction_name == 'BULL_CALL_SPREAD': # Debit, Bullish
                 anchor_strike, wing_strike = atm_strike, atm_strike + wing_offset
                 anchor_dir, wing_dir = 'long', 'short'
@@ -465,7 +468,7 @@ class PortfolioManager:
                 anchor_strike, wing_strike = atm_strike, atm_strike - wing_offset
                 anchor_dir, wing_dir = 'short', 'long'
 
-            if wing_strike <= 0: return False # Failsafe
+            if wing_strike <= 0: return False # Failsafe for invalid strikes
 
             fallback_legs_def = [
                 {'type': option_type, 'direction': anchor_dir, 'strike_price': anchor_strike},
@@ -473,9 +476,10 @@ class PortfolioManager:
             ]
             for leg in fallback_legs_def: leg['days_to_expiry'] = days_to_expiry
 
+            # Price the fallback legs.
             found_legs = self._price_legs(fallback_legs_def, current_price, iv_bin_index)
 
-        # --- 4. Finalize and Execute the Trade ---
+        # --- 4. Finalize and Execute the Trade (This part is now universal) ---
         if found_legs:
             for leg in found_legs:
                 leg['entry_step'] = current_step
@@ -486,6 +490,7 @@ class PortfolioManager:
             self._execute_trades(found_legs, pnl_profile)
             return True
         else:
+            # If even the fallback fails (which is highly unlikely), abort.
             return False
 
     def update_mtm_water_marks(self, current_total_pnl: float):
@@ -574,15 +579,17 @@ class PortfolioManager:
 
         disable_solver = self.cfg.get('disable_spread_solver', False)
 
-        # Route by most complex/specific keywords first to avoid misrouting
+        # Route by most complex/specific keywords first to avoid misrouting.
+        
+        # 1. Most specific 3-leg strategies
         if 'JADE_LIZARD' in action_name:
             return self._open_jade_lizard(action_name, current_price, iv_bin_index, current_step, days_to_expiry)
         elif 'BIG_LIZARD' in action_name:
             return self._open_big_lizard(action_name, current_price, iv_bin_index, current_step, days_to_expiry)
         elif 'RATIO_SPREAD' in action_name:
             return self._open_ratio_spread(action_name, current_price, iv_bin_index, current_step, days_to_expiry)
-        elif 'SPREAD' in action_name and not disable_solver:
-            return self._open_best_available_vertical(action_name, current_price, iv_bin_index, current_step, days_to_expiry)
+
+        # 2. Four-leg strategies
         elif 'CONDOR' in action_name and 'IRON' not in action_name:
             return self._open_condor(action_name, current_price, iv_bin_index, current_step, days_to_expiry)
         elif 'FLY' in action_name and 'IRON' not in action_name:
@@ -591,12 +598,21 @@ class PortfolioManager:
             return self._open_iron_condor(action_name, current_price, iv_bin_index, current_step, days_to_expiry)
         elif 'IRON_FLY' in action_name:
             return self._open_iron_fly(action_name, current_price, iv_bin_index, current_step, days_to_expiry)
+
+        # 3. Two-leg volatility strategies
         elif 'STRANGLE' in action_name:
             return self._open_strangle(action_name, current_price, iv_bin_index, current_step, days_to_expiry)
         elif 'STRADDLE' in action_name:
             return self._open_straddle(action_name, current_price, iv_bin_index, current_step, days_to_expiry)
+
+        # 4. Two-leg directional SPREADS (less specific, checked later)
+        elif 'SPREAD' in action_name and not disable_solver:
+            return self._open_best_available_vertical(action_name, current_price, iv_bin_index, current_step, days_to_expiry)
+
+        # 5. Single-leg strategies (least specific, checked last)
         elif 'ATM' in action_name:
             return self._open_single_leg(action_name, current_price, iv_bin_index, current_step, days_to_expiry)
+            
         else:
             print(f"Warning: Unrecognized action format in open_strategy: {action_name}")
             return False
