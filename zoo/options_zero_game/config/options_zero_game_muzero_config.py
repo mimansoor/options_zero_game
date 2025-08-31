@@ -131,21 +131,11 @@ TRAINING_CURRICULUM1 = {
     int(3e6): 'OPEN_SHORT_STRADDLE',
     int(4e6): 'OPEN_SHORT_STRANGLE_DELTA_15', # Introduce delta-based strangles early
 
-    # === Phase 4: Master Volatility Buying (Undefined Risk) ===
-    int(5e6): 'OPEN_LONG_STRADDLE',
-    int(6e6): 'OPEN_LONG_STRANGLE_DELTA_15',
-    
     # === Phase 5: Learn Risk-Defined Volatility Selling ===
     int(7e6): 'OPEN_SHORT_IRON_CONDOR',
     int(8e6): 'OPEN_SHORT_CALL_CONDOR',
     int(9e6): 'OPEN_SHORT_PUT_CONDOR',
     int(10e6): 'OPEN_SHORT_CALL_FLY', # Butterflies are a good follow-up
-
-    # === Phase 6: Learn Risk-Defined Volatility Buying ===
-    int(11e6): 'OPEN_LONG_IRON_CONDOR',
-    int(12e6): 'OPEN_LONG_CALL_CONDOR',
-    int(13e6): 'OPEN_LONG_PUT_CONDOR',
-    int(14e6): 'OPEN_LONG_CALL_FLY',
 
     # === Phase 7: Master Debit Spreads (Directional Buying) ===
     int(15e6): 'OPEN_BULL_CALL_SPREAD',
@@ -185,16 +175,6 @@ TRAINING_CURRICULUM = {
     # Duration: 1M steps (15e6 - 14e6)
     int(4e6): 'OPEN_BULL_CALL_SPREAD',
 
-    # === Phase 3: Specialize in Risk-Defined Volatility (Buying) ===
-    # Duration: 1M steps (14e6 - 13e6)
-    int(5e6): 'OPEN_LONG_CALL_FLY',
-    # Duration: 1M steps (13e6 - 12e6)
-    int(6e6): 'OPEN_LONG_PUT_CONDOR',
-    # Duration: 1M steps (12e6 - 11e6)
-    int(7e6): 'OPEN_LONG_CALL_CONDOR',
-    # Duration: 1M steps (11e6 - 10e6)
-    int(8e6): 'OPEN_LONG_IRON_CONDOR',
-
     # === Phase 4: Specialize in Risk-Defined Volatility (Selling) ===
     # Duration: 1M steps (10e6 - 9e6)
     int(9e6): 'OPEN_SHORT_CALL_FLY',
@@ -205,11 +185,6 @@ TRAINING_CURRICULUM = {
     # Duration: 1M steps (7e6 - 6e6)
     int(12e6): 'OPEN_SHORT_IRON_CONDOR',
 
-    # === Phase 5: Specialize in Undefined Risk Volatility (Buying & Selling) ===
-    # Duration: 1M steps (6e6 - 5e6)
-    int(13e6): 'OPEN_LONG_STRANGLE_DELTA_15',
-    # Duration: 1M steps (5e6 - 4e6)
-    int(14e6): 'OPEN_LONG_STRADDLE',
     # Duration: 1M steps (4e6 - 3e6)
     int(15e6): 'OPEN_SHORT_STRANGLE_DELTA_15',
     # Duration: 1M steps (3e6 - 2e6)
@@ -294,18 +269,15 @@ for direction in ['LONG', 'SHORT']:
         strategy_name_to_id[action_name] = strategy_name_to_id[internal_name]
 
 # --- 2. Core Volatility Strategies ---
-for direction in ['LONG', 'SHORT']:
-    internal_name = f'{direction}_STRADDLE'
-    strategy_name_to_id[internal_name] = next_id; next_id += 1
-    # The action name includes "_ATM"
-    strategy_name_to_id[f'OPEN_{internal_name}'] = strategy_name_to_id[internal_name]
+internal_name = 'SHORT_STRADDLE' # Only create SHORT
+strategy_name_to_id[internal_name] = next_id; next_id += 1
+strategy_name_to_id[f'OPEN_{internal_name}'] = strategy_name_to_id[internal_name]
 
 # The other core strategies do not have the suffix
-for direction in ['LONG', 'SHORT']:
-    for name in ['IRON_CONDOR', 'IRON_FLY']:
-        internal_name = f'{direction}_{name}'
-        strategy_name_to_id[internal_name] = next_id; next_id += 1
-        strategy_name_to_id[f'OPEN_{internal_name}'] = strategy_name_to_id[internal_name]
+for name in ['IRON_CONDOR', 'IRON_FLY']:
+    internal_name = f'SHORT_{name}' # Only create SHORT
+    strategy_name_to_id[internal_name] = next_id; next_id += 1
+    strategy_name_to_id[f'OPEN_{internal_name}'] = strategy_name_to_id[internal_name]
 
 # --- 3. Spreads ---
 for direction in ['BULL', 'BEAR']:
@@ -315,25 +287,22 @@ for direction in ['BULL', 'BEAR']:
         strategy_name_to_id[f'OPEN_{internal_name}'] = strategy_name_to_id[internal_name]
 
 # This ensures that Condor strategies have a valid ID.
-for direction in ['LONG', 'SHORT']:
-    for opt_type in ['CALL', 'PUT']:
-        internal_name = f'{direction}_{opt_type}_CONDOR'
-        strategy_name_to_id[internal_name] = next_id; next_id += 1
-        strategy_name_to_id[f'OPEN_{internal_name}'] = strategy_name_to_id[internal_name]
+for opt_type in ['CALL', 'PUT']:
+    internal_name = f'SHORT_{opt_type}_CONDOR' # Only create SHORT
+    strategy_name_to_id[internal_name] = next_id; next_id += 1
+    strategy_name_to_id[f'OPEN_{internal_name}'] = strategy_name_to_id[internal_name]
 
 # --- 4. Strategies with Variations (Strangles, Butterflies) ---
-for direction in ['LONG', 'SHORT']:
-    # Delta Strangles
-    for delta in [15, 20, 25, 30]:
-        internal_name = f'{direction}_STRANGLE_DELTA_{delta}'
-        strategy_name_to_id[internal_name] = next_id; next_id += 1
-        strategy_name_to_id[f'OPEN_{internal_name}'] = strategy_name_to_id[internal_name]
+for delta in [15, 20, 25, 30]:
+    internal_name = f'SHORT_STRANGLE_DELTA_{delta}' # Only create SHORT
+    strategy_name_to_id[internal_name] = next_id; next_id += 1
+    strategy_name_to_id[f'OPEN_{internal_name}'] = strategy_name_to_id[internal_name]
 
-    # There is now only one action per butterfly type.
-    for opt_type in ['CALL', 'PUT']:
-        internal_name = f'{direction}_{opt_type}_FLY' # <-- No more width number
-        strategy_name_to_id[internal_name] = next_id; next_id += 1
-        strategy_name_to_id[f'OPEN_{internal_name}'] = strategy_name_to_id[internal_name]
+# There is now only one action per butterfly type.
+for opt_type in ['CALL', 'PUT']:
+    internal_name = f'SHORT_{opt_type}_FLY' # Only create SHORT
+    strategy_name_to_id[internal_name] = next_id; next_id += 1
+    strategy_name_to_id[f'OPEN_{internal_name}'] = strategy_name_to_id[internal_name]
 
 # <<< --- NEW: Section for Advanced Multi-Leg Strategies --- >>>
 strategy_name_to_id['JADE_LIZARD'] = next_id; next_id += 1

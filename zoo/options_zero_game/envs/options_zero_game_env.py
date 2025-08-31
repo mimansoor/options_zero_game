@@ -1191,25 +1191,20 @@ class OptionsZeroGameEnv(gym.Env):
 
         actions['HEDGE_DELTA_WITH_ATM_OPTION'] = i; i+=1
 
-        for d in ['LONG', 'SHORT']:
-            actions[f'OPEN_{d}_STRADDLE'] = i; i+=1
+        actions['OPEN_SHORT_STRADDLE'] = i; i+=1
 
         # Generate a range of delta-based strangle actions.
         for delta in range(15, 31, 5): # This creates [15, 20, 25, 30]
-            actions[f'OPEN_LONG_STRANGLE_DELTA_{delta}'] = i; i+=1
             actions[f'OPEN_SHORT_STRANGLE_DELTA_{delta}'] = i; i+=1
 
-        for d in ['LONG', 'SHORT']:
-            actions[f'OPEN_{d}_IRON_FLY'] = i; i+=1
-            actions[f'OPEN_{d}_IRON_CONDOR'] = i; i+=1
-
-            for t in ['CALL', 'PUT']:
-                actions[f'OPEN_{d}_{t}_CONDOR'] = i; i+=1
+        actions['OPEN_SHORT_IRON_FLY'] = i; i+=1
+        actions['OPEN_SHORT_IRON_CONDOR'] = i; i+=1
+        for t in ['CALL', 'PUT']:
+            actions[f'OPEN_SHORT_{t}_CONDOR'] = i; i+=1
 
         # The loop for 'w' (width) is removed entirely.
         for t in ['CALL', 'PUT']:
-            for d in ['LONG', 'SHORT']:
-                actions[f'OPEN_{d}_{t}_FLY'] = i; i+=1 # <-- No more width number
+            actions[f'OPEN_SHORT_{t}_FLY'] = i; i+=1 # Only create the short version
 
         for j in range(self._cfg.max_positions):
             actions[f'CLOSE_POSITION_{j}'] = i; i+=1

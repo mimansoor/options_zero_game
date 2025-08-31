@@ -204,59 +204,6 @@ def test_recenter_volatility_position():
     finally:
         env.close()
 
-def test_no_recenter_on_long_volatility_position():
-    """
-    A negative test to ensure RECENTER_VOLATILITY_POSITION is ILLEGAL
-    for a LONG volatility position (e.g., a Long Straddle), as re-centering
-    is strategically incorrect for a position that profits from large moves.
-    """
-    test_name = "test_no_recenter_on_long_volatility_position"
-    print(f"\n--- RUNNING (Negative Test): {test_name} ---")
-
-    # <<< --- THE DEFINITIVE FIX IS HERE --- >>>
-    # We create a custom env_cfg specifically for this test to guarantee the episode is long enough.
-    env_cfg = copy.deepcopy(main_config.env)
-    env_cfg.is_eval_mode = True
-    env_cfg.disable_opening_curriculum = True
-    env_cfg.forced_opening_strategy_name = 'OPEN_LONG_STRADDLE'
-    env_cfg.forced_historical_symbol = 'SPY'
-    # This is the crucial line: ensure the episode is longer than our test loop.
-    env_cfg.forced_episode_length = 20 
-
-    # 2. Directly access the environment's config to disable termination rules.
-    #    This isolates the test to only check if the position opens correctly.
-    env_cfg.use_stop_loss = False
-    env_cfg.credit_strategy_take_profit_pct = 0
-    env_cfg.debit_strategy_take_profit_multiple = 0
-    env_cfg.profit_target_pct = 0
-
-    env = gym.make('OptionsZeroGame-v0', cfg=env_cfg)
-    
-    try:
-        # Step 1: Open the position and let the market move to create a delta imbalance.
-        env.reset(seed=65)
-        timestep = env.step(env.actions_to_indices['HOLD'])
-        
-        # This loop is now safe because we know the episode is 20 steps long.
-        for _ in range(15):
-            timestep = env.step(env.actions_to_indices['HOLD'])
-
-        # --- Assertions ---
-        action_mask = timestep.obs['action_mask']
-        recenter_action_index = env.actions_to_indices['RECENTER_VOLATILITY_POSITION']
-
-        assert action_mask[recenter_action_index] == 0, \
-            "Negative test failed: RECENTER_VOLATILITY_POSITION was incorrectly legal for a LONG straddle."
-
-        print(f"--- PASSED (Negative Test): Action was correctly disabled. ---")
-        return True
-    except Exception:
-        traceback.print_exc()
-        print(f"--- FAILED (Negative Test): {test_name} ---")
-        return False
-    finally:
-        env.close()
-
 # ==============================================================================
 #                 ADVANCED DELTA MANAGEMENT TEST CASES
 # ==============================================================================
@@ -419,65 +366,6 @@ def test_open_short_call_condor():
         assert portfolio_after['direction'].value_counts()['long'] == 2, "Did not open 2 long wing legs."
         assert stats['max_loss'] > -env.portfolio_manager.undefined_risk_cap, "Risk is not defined."
         assert portfolio_after.iloc[0]['strategy_id'] == env.strategy_name_to_id['OPEN_SHORT_CALL_CONDOR'], "Incorrect strategy ID."
-
-        print(f"--- PASSED: {test_name} ---")
-        return True
-    except Exception:
-        traceback.print_exc()
-        print(f"--- FAILED: {test_name} ---")
-        return False
-    finally:
-        env.close()
-
-def test_open_long_call_condor():
-    """Tests if OPEN_LONG_CALL_CONDOR correctly opens a 4-leg position."""
-    test_name = "test_open_long_call_condor"
-    print(f"\n--- RUNNING: {test_name} ---")
-    env = create_isolated_test_env('OPEN_LONG_CALL_CONDOR')
-
-    try:
-        env.reset(seed=56)
-        env.step(env.actions_to_indices['HOLD'])
-
-        portfolio_after = env.portfolio_manager.get_portfolio()
-        assert len(portfolio_after) == 4, f"Did not open {len(portfolio_after)} legs."
-        stats = env.portfolio_manager.get_raw_portfolio_stats(env.price_manager.current_price, env.iv_bin_index)
-
-        assert all(portfolio_after['type'] == 'call'), "Legs are not all puts."
-        assert portfolio_after['direction'].value_counts()['long'] == 2, "Did not open 2 long body legs."
-        assert portfolio_after['direction'].value_counts()['short'] == 2, "Did not open 2 short wing legs."
-        assert stats['max_loss'] > -env.portfolio_manager.undefined_risk_cap, "Risk is not defined."
-        assert portfolio_after.iloc[0]['strategy_id'] == env.strategy_name_to_id['OPEN_LONG_CALL_CONDOR'], "Incorrect strategy ID."
-
-        print(f"--- PASSED: {test_name} ---")
-        return True
-    except Exception:
-        traceback.print_exc()
-        print(f"--- FAILED: {test_name} ---")
-        return False
-    finally:
-        env.close()
-
-def test_open_long_put_condor():
-    """Tests if OPEN_LONG_PUT_CONDOR correctly opens a 4-leg position."""
-    test_name = "test_open_long_put_condor"
-    print(f"\n--- RUNNING: {test_name} ---")
-    env = create_isolated_test_env('OPEN_LONG_PUT_CONDOR')
-
-    try:
-        env.reset(seed=56)
-        pm = env.portfolio_manager
-        env.step(env.actions_to_indices['HOLD'])
-
-        portfolio_after = pm.portfolio
-        assert len(portfolio_after) == 4, f"Did not open {len(portfolio_after)} legs."
-        stats = env.portfolio_manager.get_raw_portfolio_stats(env.price_manager.current_price, env.iv_bin_index)
-
-        assert all(portfolio_after['type'] == 'put'), "Legs are not all puts."
-        assert portfolio_after['direction'].value_counts()['long'] == 2, "Did not open 2 long body legs."
-        assert portfolio_after['direction'].value_counts()['short'] == 2, "Did not open 2 short wing legs."
-        assert stats['max_loss'] > -env.portfolio_manager.undefined_risk_cap, "Risk is not defined."
-        assert portfolio_after.iloc[0]['strategy_id'] == env.strategy_name_to_id['OPEN_LONG_PUT_CONDOR'], "Incorrect strategy ID."
 
         print(f"--- PASSED: {test_name} ---")
         return True
@@ -1583,7 +1471,6 @@ if __name__ == "__main__":
         test_close_all_action,
         test_greeks_and_risk_validation,
         test_open_short_call_condor,
-        test_open_long_call_condor,
         test_convert_bull_call_spread_to_condor,
         test_convert_bear_put_spread_to_condor,
         test_hedge_delta_with_atm_option,
@@ -1591,7 +1478,6 @@ if __name__ == "__main__":
         test_decrease_delta_by_shifting_leg,
         test_hedge_portfolio_by_rolling_leg,
         test_recenter_volatility_position,
-        test_no_recenter_on_long_volatility_position,
 
         # <<< --- NEW: Add the 6 new tests to the runner --- >>>
         test_open_jade_lizard,
