@@ -728,21 +728,24 @@ class OptionsZeroGameEnv(gym.Env):
             )
 
             if new_strike is not None:
-                # b) Determine what the equivalent SHIFT action would be.
-                # This requires checking the original strike and the new strike.
-                original_strike = self.portfolio_manager.get_portfolio().iloc[leg_index]['strike_price']
-                shift_dir = "UP" if new_strike > original_strike else "DOWN"
+                # b) Perform a direct legality check for the new strike.
+                # The only thing that makes a roll illegal is a strike conflict.
                 
-                resolved_action_name = f"SHIFT_{shift_dir}_POS_{leg_index}"
-                resolved_action_index = self.actions_to_indices.get(resolved_action_name)
-                true_action_mask = self._get_true_action_mask()
+                leg_to_roll = self.portfolio_manager.get_portfolio().iloc[leg_index]
+                leg_type = leg_to_roll['type']
                 
-                # c) Re-validate: Check if this equivalent SHIFT would have been legal.
-                # The _get_true_action_mask already contains the conflict check logic for shifts.
-                if resolved_action_index is not None and true_action_mask[resolved_action_index] == 1:
-                    # d) Only execute the roll if the equivalent shift is legal.
+                # Get all other legs in the portfolio to check against.
+                other_legs_df = self.portfolio_manager.portfolio.drop(leg_index)
+                
+                is_conflict = any(
+                    (pos['strike_price'] == new_strike and pos['type'] == leg_type)
+                    for _, pos in other_legs_df.iterrows()
+                )
+
+                # c) Only execute the roll if there is NO conflict.
+                if not is_conflict:
                     self.portfolio_manager.hedge_portfolio_by_rolling_leg(leg_index, self.price_manager.current_price, self.iv_bin_index, self.current_step)
-                # e) If the roll would cause a conflict, do nothing (effectively a HOLD).
+                # d) If the roll would cause a conflict, do nothing (effectively a HOLD).
 
         # 4. Sort the portfolio and take the crucial snapshot.
         self.portfolio_manager.sort_portfolio()
