@@ -638,6 +638,11 @@ class OptionsZeroGameEnv(gym.Env):
             'was_illegal_action': was_illegal_action
         }
 
+        # If the action is HOLD, no further portfolio modification is needed.
+        # We can return early to avoid the long chain of unnecessary checks.
+        if final_action_name == 'HOLD':
+            return
+
         # 3. Execute the final action, which modifies the portfolio.
         if final_action_name.startswith('OPEN_'):
             current_day = self.current_step // self._cfg.steps_per_day
