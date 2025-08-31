@@ -244,6 +244,37 @@ class PortfolioManager:
                 self.STRATEGY_TYPE_MAP[base1] = base2
                 self.STRATEGY_TYPE_MAP[base2] = base1
 
+    def _set_new_portfolio_state(self, legs_to_set: List[Dict], strategy_pnl: Dict):
+        """
+        A safe, internal helper that atomically sets the portfolio to a new state.
+        It handles NO financial calculations (e.g., brokerage). Its only job is
+        to correctly structure and assign the new DataFrame and update hedge status.
+        """
+        # This is a failsafe in case this is called with an empty list.
+        if not legs_to_set:
+            self.portfolio = pd.DataFrame(columns=self.portfolio_columns).astype(self.portfolio_dtypes)
+            return
+
+        transaction_id = self.next_creation_id
+        self.next_creation_id += 1
+        
+        strategy_id = strategy_pnl.get('strategy_id', -1)
+        assert strategy_id != -1, "CRITICAL ERROR: Strategy ID not found for PnL object."
+
+        for trade in legs_to_set:
+            # Only assign a new creation_id if one doesn't already exist from a previous state.
+            if 'creation_id' not in trade:
+                trade['creation_id'] = transaction_id
+            
+            trade['is_hedged'] = False # Default before update
+            trade['strategy_id'] = strategy_id
+            trade['strategy_max_profit'] = strategy_pnl.get('strategy_max_profit', 0.0)
+            trade['strategy_max_loss'] = strategy_pnl.get('strategy_max_loss', 0.0)
+        
+        new_positions_df = pd.DataFrame(legs_to_set).astype(self.portfolio_dtypes)
+        self.portfolio = new_positions_df # Atomically replace the old portfolio
+        self._update_hedge_status()
+
     # <<< --- NEW: The Central Sanitization Function --- >>>
     def _sanitize_dict(self, data_dict: Dict) -> Dict:
         """
@@ -402,7 +433,12 @@ class PortfolioManager:
             priced_hedge_leg = self._price_legs(hedge_leg_def, current_price, iv_bin_index)
             if not priced_hedge_leg: return
 
-            # --- 3. Re-assemble and Intelligently Identify the New Strategy ---
+            # 1. Handle financial logic for the NEW leg only.
+            self.realized_pnl -= self.brokerage_per_leg
+
+            # 2. Assemble the complete, final list of all legs.
+            final_legs_list = untouched_legs.to_dict('records') + sibling_legs.to_dict('records') + leg_to_hedge_df.to_dict('records') + priced_hedge_leg
+
             modified_strategy_legs_list = sibling_legs.to_dict('records') + leg_to_hedge_df.to_dict('records') + priced_hedge_leg
             
             if len(modified_strategy_legs_list) == 2:
@@ -412,13 +448,11 @@ class PortfolioManager:
             else:
                 # If the result is a 3+ leg position, it's a custom hedged structure.
                 new_strategy_name = f"CUSTOM_{len(modified_strategy_legs_list)}_LEGS"
-            
-            pnl_profile = self._calculate_universal_risk_profile(modified_strategy_legs_list, self.realized_pnl)
+
+            # 3. Calculate the unified profile and set the new state.
+            pnl_profile = self._calculate_universal_risk_profile(final_legs_list, self.realized_pnl)
             pnl_profile['strategy_id'] = self.strategy_name_to_id.get(new_strategy_name, -1)
-            
-            # --- 4. Atomically rebuild the portfolio ---
-            self.portfolio = untouched_legs.copy()
-            self._execute_trades(modified_strategy_legs_list, pnl_profile)
+            self._set_new_portfolio_state(final_legs_list, pnl_profile)
             
         except (ValueError, IndexError, KeyError) as e:
             print(f"Warning: Could not execute add_hedge action. Error: {e}")
@@ -1201,82 +1235,76 @@ class PortfolioManager:
         # no further action is needed.
 
     def shift_position(self, action_name: str, current_price: float, iv_bin_index: int, current_step: int):
-        """
-        Shifts a single leg of a strategy, correctly preserving all other legs
-        and strategies in the portfolio. This is the definitive, robust version.
-        """
         try:
             parts = action_name.split('_')
             direction, position_index = parts[1].upper(), int(parts[3])
             if not (-len(self.portfolio) <= position_index < len(self.portfolio)): return
 
-            # --- 1. Identify all components ---
+            # --- 1. Identify all components (Unchanged) ---
             leg_to_shift_df = self.portfolio.iloc[[position_index]]
             leg_to_shift = leg_to_shift_df.iloc[0].to_dict()
-            original_creation_id = leg_to_shift['creation_id']
-            
-            # Isolate all other, untouched legs from all other strategies
-            untouched_legs = self.portfolio[self.portfolio['creation_id'] != original_creation_id]
-            # Isolate the sibling legs of the strategy being modified
-            sibling_legs = self.portfolio[(self.portfolio['creation_id'] == original_creation_id) & (self.portfolio.index != position_index)]
+            sibling_legs = self.portfolio.drop(self.portfolio.index[position_index]) # Simplified
 
-            # --- 2. Process the "close" part of the shift for the target leg ---
+            # --- 2. Process the "close" part, which correctly charges exit brokerage ---
             self._process_leg_closures(leg_to_shift_df, current_price, iv_bin_index, current_step)
             
-            # --- 3. Define and price the new, shifted leg ---
+            # --- 3. Define and price the new, shifted leg (Unchanged) ---
             strike_modifier = self.strike_distance if direction == 'UP' else -self.strike_distance
             new_leg_def = [{'type': leg_to_shift['type'], 'direction': leg_to_shift['direction'],
                             'strike_price': leg_to_shift['strike_price'] + strike_modifier,
                             'days_to_expiry': leg_to_shift['days_to_expiry'], 'entry_step': current_step}]
             priced_new_leg = self._price_legs(new_leg_def, current_price, iv_bin_index)
-            
-            # --- 4. Re-assemble the modified strategy and calculate its new profile ---
+
+            if not priced_new_leg: # Failsafe if the new leg can't be priced
+                self._set_new_portfolio_state(sibling_legs.to_dict(orient='records'), {'strategy_id': leg_to_shift['strategy_id']})
+                return
+
+            # --- 4. Manually charge the entry brokerage for the new leg ---
+            self.realized_pnl -= self.brokerage_per_leg
+
+            # --- 5. Assemble the complete, final list of legs and set the state ---
             modified_strategy_legs = sibling_legs.to_dict(orient='records') + priced_new_leg
             pnl_profile = self._calculate_universal_risk_profile(modified_strategy_legs, self.realized_pnl)
             pnl_profile['strategy_id'] = leg_to_shift['strategy_id'] # Preserve original strategy ID
-
-            # --- 5. Atomically rebuild the entire portfolio ---
-            # Start with the legs that were never touched
-            self.portfolio = untouched_legs.copy()
-            # Add the newly modified strategy
-            self._execute_trades(modified_strategy_legs, pnl_profile)
-            
-            self._update_hedge_status()
+            self._set_new_portfolio_state(modified_strategy_legs, pnl_profile)
 
         except (ValueError, IndexError) as e:
             print(f"Warning: Could not parse shift action '{action_name}'. Error: {e}")
 
     def shift_to_atm(self, action_name: str, current_price: float, iv_bin_index: int, current_step: int):
-        """Shifts a single leg to the ATM strike, correctly preserving other strategies."""
         try:
             position_index = int(action_name.split('_')[-1])
             if not (-len(self.portfolio) <= position_index < len(self.portfolio)): return
             
+            # --- 1. Identify all components (Unchanged) ---
             leg_to_shift_df = self.portfolio.iloc[[position_index]]
             leg_to_shift = leg_to_shift_df.iloc[0].to_dict()
-            original_creation_id = leg_to_shift['creation_id']
+            sibling_legs = self.portfolio.drop(self.portfolio.index[position_index]) # Simplified
             
             new_atm_strike = self.market_rules_manager.get_atm_price(current_price)
             if leg_to_shift['strike_price'] == new_atm_strike: return
 
-            untouched_legs = self.portfolio[self.portfolio['creation_id'] != original_creation_id]
-            sibling_legs = self.portfolio[(self.portfolio['creation_id'] == original_creation_id) & (self.portfolio.index != position_index)]
-
+            # --- 2. Process the "close" part (Unchanged) ---
             self._process_leg_closures(leg_to_shift_df, current_price, iv_bin_index, current_step)
             
+            # --- 3. Define and price the new, shifted leg (Unchanged) ---
             new_leg_def = [{'type': leg_to_shift['type'], 'direction': leg_to_shift['direction'],
                             'strike_price': new_atm_strike, 'days_to_expiry': leg_to_shift['days_to_expiry'],
                             'entry_step': current_step}]
             priced_new_leg = self._price_legs(new_leg_def, current_price, iv_bin_index)
+
+            if not priced_new_leg: # Failsafe
+                self._set_new_portfolio_state(sibling_legs.to_dict(orient='records'), {'strategy_id': leg_to_shift['strategy_id']})
+                return
             
+            # --- 4. Manually charge entry brokerage ---
+            self.realized_pnl -= self.brokerage_per_leg
+
+            # --- 5. Assemble final state and use the safe state-setter ---
             modified_strategy_legs = sibling_legs.to_dict(orient='records') + priced_new_leg
             pnl_profile = self._calculate_universal_risk_profile(modified_strategy_legs, self.realized_pnl)
             pnl_profile['strategy_id'] = leg_to_shift['strategy_id']
-
-            self.portfolio = untouched_legs.copy()
-            self._execute_trades(modified_strategy_legs, pnl_profile)
-            
-            self._update_hedge_status()
+            self._set_new_portfolio_state(modified_strategy_legs, pnl_profile)
         except (ValueError, IndexError) as e:
             print(f"Warning: Could not parse shift_to_atm action '{action_name}'. Error: {e}")
 
@@ -1446,20 +1474,18 @@ class PortfolioManager:
         priced_legs = self._price_legs(hedge_leg_def, current_price, iv_bin_index)
         if not priced_legs: return
 
-        pnl_profile = self._calculate_universal_risk_profile(priced_legs, self.realized_pnl)
-        
-        direction_str = priced_legs[0]['direction'].upper()
-        type_str = priced_legs[0]['type'].upper()
-        # The ID for a naked leg strategy is its simple internal name (e.g., "LONG_CALL")
-        internal_strategy_name = f"{direction_str}_{type_str}"
-        
-        strategy_id = self.strategy_name_to_id.get(internal_strategy_name)
-        
-        assert strategy_id is not None, f"FATAL: Could not find strategy ID for hedge key: '{internal_strategy_name}'"
-        pnl_profile['strategy_id'] = strategy_id
-        
-        self._execute_trades(priced_legs, pnl_profile)
-     
+        # 1. Handle financial logic for the NEW leg only.
+        self.realized_pnl -= self.brokerage_per_leg
+
+        # 2. Assemble the complete, final list of all legs (old portfolio + new leg).
+        final_legs_list = self.portfolio.to_dict('records') + priced_legs
+
+        # 3. Calculate the unified profile and set the new state.
+        # Since this creates a custom hedged position, we use a generic ID.
+        pnl_profile = self._calculate_universal_risk_profile(final_legs_list, self.realized_pnl)
+        pnl_profile['strategy_id'] = self.strategy_name_to_id.get('CUSTOM_HEDGED', -1)
+        self._set_new_portfolio_state(final_legs_list, pnl_profile)
+
     def render(self, current_price: float, current_step: int, iv_bin_index: int, steps_per_day: int):
         total_pnl = self.get_total_pnl(current_price, iv_bin_index)
         day = current_step // steps_per_day + 1
@@ -1470,48 +1496,24 @@ class PortfolioManager:
 
     def _execute_trades(self, trades_to_execute: List[Dict], strategy_pnl: Dict):
         """ 
-        The definitive method for adding legs to the portfolio. It is the single
-        source of truth for updating hedge status.
-        This version ensures state is finalized even when trades_to_execute is empty.
+        The definitive method for adding NEW legs to the portfolio. It correctly
+        handles brokerage and then uses the state-setter helper.
         """
+        if not trades_to_execute:
+            return
 
-        # --- 1. Add New Trades (if any) ---
-        if trades_to_execute:
-            # Deduct brokerage from realized PnL for each new leg being opened.
-            opening_brokerage = len(trades_to_execute) * self.brokerage_per_leg
-            self.realized_pnl -= opening_brokerage
-            
-            transaction_id = self.next_creation_id
-            self.next_creation_id += 1
+        # 1. Handle financial logic: Brokerage for NEW legs.
+        opening_brokerage = len(trades_to_execute) * self.brokerage_per_leg
+        self.realized_pnl -= opening_brokerage
+        
+        per_share_net_premium = sum(
+            leg['entry_premium'] * (1 if leg['direction'] == 'long' else -1) 
+            for leg in trades_to_execute
+        )
+        self.initial_net_premium = per_share_net_premium * self.lot_size
 
-            strategy_id = strategy_pnl.get('strategy_id', -1) 
-            assert strategy_id != -1, (f"CRITICAL ERROR: Strategy ID not found for PnL object: {strategy_pnl}")
-            
-            # <<< --- THE DEFINITIVE FIX IS HERE --- >>>
-            # Calculate and set the manager's own initial_net_premium state.
-            # This is the single source of truth for the cost/credit of the initial trade.
-            per_share_net_premium = sum(
-                leg['entry_premium'] * (1 if leg['direction'] == 'long' else -1) 
-                for leg in trades_to_execute
-            )
-            self.initial_net_premium = per_share_net_premium * self.lot_size
-
-            for trade in trades_to_execute:
-                trade['creation_id'] = transaction_id
-                trade['is_hedged'] = False # Default to False before the update
-                trade['strategy_id'] = strategy_id
-                # Note: strategy_pnl now correctly refers to the strategy's theoretical max profit,
-                # which is what should be stored with the leg.
-                trade['strategy_max_profit'] = strategy_pnl.get('strategy_max_profit', 0.0)
-                trade['strategy_max_loss'] = strategy_pnl.get('strategy_max_loss', 0.0)
-             
-            new_positions_df = pd.DataFrame(trades_to_execute).astype(self.portfolio_dtypes)
-            self.portfolio = pd.concat([self.portfolio, new_positions_df], ignore_index=True)
-
-        # --- 2. Finalize State (ALWAYS runs) ---
-        # This ensures that after any modification (add, close, shift),
-        # the hedge status and the post-action snapshot are correctly updated.
-        self._update_hedge_status()
+        # 2. Call the new helper to handle the data manipulation.
+        self._set_new_portfolio_state(trades_to_execute, strategy_pnl)
 
     def _price_legs(self, legs: List[Dict], current_price: float, iv_bin_index: int, check_short_rule: bool = False) -> List[Dict] or None:
         """
@@ -2093,81 +2095,14 @@ class PortfolioManager:
         priced_wings = self._price_legs(new_wing_legs_def, current_price, iv_bin_index, check_short_rule=True)
         if not priced_wings: return
 
+        # 1. Manually charge brokerage for the 2 NEW wing legs.
+        self.realized_pnl -= 2 * self.brokerage_per_leg
+
+        # 2. Assemble final state and use the safe state-setter.
         final_condor_legs = original_legs + priced_wings
-        
         pnl_profile = self._calculate_universal_risk_profile(final_condor_legs, self.realized_pnl)
-
         pnl_profile['strategy_id'] = self.strategy_name_to_id.get('OPEN_SHORT_IRON_CONDOR')
-        
-        self.portfolio = self.portfolio[self.portfolio['creation_id'] != original_creation_id].reset_index(drop=True)
-        self._execute_trades(final_condor_legs, pnl_profile)
-
-    def convert_to_condor(self, option_type: str, current_price: float, iv_bin_index: int, current_step: int):
-        """
-        Converts an existing 2-leg vertical spread into a 4-leg Condor by adding
-        a corresponding spread on the other side.
-        """
-        if len(self.portfolio) != 2 or not all(self.portfolio['type'] == option_type) or len(self.portfolio['direction'].unique()) != 2:
-            return
-        if len(self.portfolio) > self.max_positions - 2:
-            return
-
-        original_legs = self.portfolio.to_dict('records')
-        original_strategy_id = original_legs[0]['strategy_id']
-        days_to_expiry = original_legs[0]['days_to_expiry']
-        
-        # <<< --- THE DEFINITIVE, CORRECTED LOGIC IS HERE --- >>>
-        
-        # 1. Correctly identify the original spread type.
-        original_spread_name = self._identify_strategy_from_legs(self.portfolio)
-
-        # 2. Define the new legs based on the original spread.
-        strikes = sorted([leg['strike_price'] for leg in original_legs])
-        lower_strike, upper_strike = strikes[0], strikes[1]
-        spread_width = upper_strike - lower_strike
-        new_legs_def = []
-
-        if original_spread_name == 'OPEN_BULL_CALL_SPREAD':
-            # Add a Bear Call Spread above it
-            new_lower_strike = upper_strike + self.strike_distance
-            new_upper_strike = new_lower_strike + spread_width
-            new_legs_def = [
-                {'type': 'call', 'direction': 'short', 'strike_price': new_lower_strike},
-                {'type': 'call', 'direction': 'long', 'strike_price': new_upper_strike}
-            ]
-        elif original_spread_name == 'OPEN_BEAR_PUT_SPREAD':
-            # Add a Bull Put Spread below it
-            new_upper_strike = lower_strike - self.strike_distance
-            new_lower_strike = new_upper_strike - spread_width
-            if new_lower_strike <= 0: return
-            new_legs_def = [
-                {'type': 'put', 'direction': 'long', 'strike_price': new_lower_strike},
-                {'type': 'put', 'direction': 'short', 'strike_price': new_upper_strike}
-            ]
-        else: # It must be a credit spread, which morphs into an Iron Condor
-            # This logic branch is for future expansion if needed, but the test case is a debit spread.
-            # For now, we can assume the test case will not hit this.
-            return # This action is not supported for credit spreads yet.
-
-        # 3. Price, Assemble, and Determine Final Strategy Name
-        for leg in new_legs_def:
-            leg.update({'entry_step': current_step, 'days_to_expiry': days_to_expiry})
-        
-        priced_new_legs = self._price_legs(new_legs_def, current_price, iv_bin_index)
-        if not priced_new_legs: return
-
-        final_condor_legs = original_legs + priced_new_legs
-        
-        # A Bull Call Spread + a Bear Call Spread = a SHORT Call Condor
-        # A Bear Put Spread + a Bull Put Spread = a SHORT Put Condor
-        final_strategy_name = f'OPEN_SHORT_{option_type.upper()}_CONDOR'
-        
-        # 4. Finalize and Execute
-        pnl_profile = self._calculate_universal_risk_profile(final_condor_legs, self.realized_pnl)
-        pnl_profile['strategy_id'] = self.strategy_name_to_id.get(final_strategy_name, -1)
-        
-        self.portfolio = pd.DataFrame() # Clear the old 2-leg position
-        self._execute_trades(final_condor_legs, pnl_profile)
+        self._set_new_portfolio_state(final_condor_legs, pnl_profile)
 
     def convert_to_iron_fly(self, current_price: float, iv_bin_index: int, current_step: int):
         """
@@ -2211,18 +2146,21 @@ class PortfolioManager:
         # A short straddle converts to a SHORT iron fly (credit trade), so we check the rule.
         priced_wings = self._price_legs(new_wing_legs_def, current_price, iv_bin_index, check_short_rule=True)
         if not priced_wings: return
-        
+
+        # 1. Handle financial logic for the NEW legs only.
+        new_legs_brokerage = len(priced_wings) * self.brokerage_per_leg
+        self.realized_pnl -= new_legs_brokerage
+
+        # 2. Assemble the final, complete list of legs (old + new).
         final_fly_legs = original_legs + priced_wings
         
-        # --- 5. Calculate Unified Profile and Atomically Update Portfolio ---
+        # 3. Calculate the unified profile for the new 4-leg strategy.
         pnl_profile = self._calculate_universal_risk_profile(final_fly_legs, self.realized_pnl)
         pnl_profile['strategy_id'] = self.strategy_name_to_id.get('OPEN_SHORT_IRON_FLY')
         
-        self.portfolio = self.portfolio[self.portfolio['creation_id'] != original_creation_id].reset_index(drop=True)
-        self._execute_trades(final_fly_legs, pnl_profile)
-
-    # --- "REMOVE LEGS" ACTIONS (FILTER, CLOSE, AND REBUILD PATTERN) ---
-
+        # 4. Atomically set the new portfolio state using the safe helper.
+        self._set_new_portfolio_state(final_fly_legs, pnl_profile)
+        
     def convert_to_strangle(self, current_price: float, iv_bin_index: int, current_step: int):
         """Removes the long wings from an Iron Condor to become a strangle."""
         if len(self.portfolio) != 4: return
@@ -2232,8 +2170,8 @@ class PortfolioManager:
         self._process_leg_closures(legs_to_close, current_price, iv_bin_index, current_step)
         pnl_profile = self._calculate_universal_risk_profile(legs_to_keep, self.realized_pnl)
         pnl_profile['strategy_id'] = self.strategy_name_to_id.get('OPEN_SHORT_STRANGLE_DELTA_20')
-        self.portfolio = self.portfolio[self.portfolio['creation_id'] != original_creation_id].reset_index(drop=True)
-        self._execute_trades(legs_to_keep, pnl_profile)
+        # Atomically set the new 2-leg portfolio state.
+        self._set_new_portfolio_state(legs_to_keep, pnl_profile)
 
     def convert_to_straddle(self, current_price: float, iv_bin_index: int, current_step: int):
         """Removes the long wings from an Iron Fly to become a straddle."""
@@ -2242,10 +2180,10 @@ class PortfolioManager:
         legs_to_keep = self.portfolio[self.portfolio['direction'] == 'short'].to_dict(orient='records')
         legs_to_close = self.portfolio[self.portfolio['direction'] == 'long']
         self._process_leg_closures(legs_to_close, current_price, iv_bin_index, current_step)
+
         pnl_profile = self._calculate_universal_risk_profile(legs_to_keep, self.realized_pnl)
         pnl_profile['strategy_id'] = self.strategy_name_to_id.get('OPEN_SHORT_STRADDLE')
-        self.portfolio = self.portfolio[self.portfolio['creation_id'] != original_creation_id].reset_index(drop=True)
-        self._execute_trades(legs_to_keep, pnl_profile)
+        self._set_new_portfolio_state(legs_to_keep, pnl_profile)
 
     def convert_to_bull_call_spread(self, current_price: float, iv_bin_index: int, current_step: int):
         """
@@ -2262,13 +2200,11 @@ class PortfolioManager:
         legs_to_close_df = self.portfolio.drop(legs_to_keep_df.index)
         
         self._process_leg_closures(legs_to_close_df, current_price, iv_bin_index, current_step)
-        
+
         legs_to_keep_list = legs_to_keep_df.to_dict(orient='records')
         pnl_profile = self._calculate_universal_risk_profile(legs_to_keep_list, self.realized_pnl)
         pnl_profile['strategy_id'] = self.strategy_name_to_id.get('OPEN_BULL_CALL_SPREAD')
-
-        self.portfolio = pd.DataFrame()
-        self._execute_trades(legs_to_keep_list, pnl_profile)
+        self._set_new_portfolio_state(legs_to_keep_list, pnl_profile)
 
     def convert_to_bear_call_spread(self, current_price: float, iv_bin_index: int, current_step: int):
         """
@@ -2285,13 +2221,11 @@ class PortfolioManager:
         legs_to_close_df = self.portfolio.drop(legs_to_keep_df.index)
         
         self._process_leg_closures(legs_to_close_df, current_price, iv_bin_index, current_step)
-        
+
         legs_to_keep_list = legs_to_keep_df.to_dict(orient='records')
         pnl_profile = self._calculate_universal_risk_profile(legs_to_keep_list, self.realized_pnl)
         pnl_profile['strategy_id'] = self.strategy_name_to_id.get('OPEN_BEAR_CALL_SPREAD')
-
-        self.portfolio = pd.DataFrame()
-        self._execute_trades(legs_to_keep_list, pnl_profile)
+        self._set_new_portfolio_state(legs_to_keep_list, pnl_profile)
 
     def convert_to_bull_put_spread(self, current_price: float, iv_bin_index: int, current_step: int):
         """
@@ -2308,13 +2242,11 @@ class PortfolioManager:
         legs_to_close_df = self.portfolio.drop(legs_to_keep_df.index)
         
         self._process_leg_closures(legs_to_close_df, current_price, iv_bin_index, current_step)
-        
+
         legs_to_keep_list = legs_to_keep_df.to_dict(orient='records')
         pnl_profile = self._calculate_universal_risk_profile(legs_to_keep_list, self.realized_pnl)
         pnl_profile['strategy_id'] = self.strategy_name_to_id.get('OPEN_BULL_PUT_SPREAD')
-
-        self.portfolio = pd.DataFrame()
-        self._execute_trades(legs_to_keep_list, pnl_profile)
+        self._set_new_portfolio_state(legs_to_keep_list, pnl_profile)
 
     def convert_to_bear_put_spread(self, current_price: float, iv_bin_index: int, current_step: int):
         """
@@ -2331,13 +2263,11 @@ class PortfolioManager:
         legs_to_close_df = self.portfolio.drop(legs_to_keep_df.index)
         
         self._process_leg_closures(legs_to_close_df, current_price, iv_bin_index, current_step)
-        
+
         legs_to_keep_list = legs_to_keep_df.to_dict(orient='records')
         pnl_profile = self._calculate_universal_risk_profile(legs_to_keep_list, self.realized_pnl)
         pnl_profile['strategy_id'] = self.strategy_name_to_id.get('OPEN_BEAR_PUT_SPREAD')
-
-        self.portfolio = pd.DataFrame()
-        self._execute_trades(legs_to_keep_list, pnl_profile)
+        self._set_new_portfolio_state(legs_to_keep_list, pnl_profile)
 
     def recenter_volatility_position(self, current_price: float, iv_bin_index: int, current_step: int):
         """
@@ -2385,11 +2315,11 @@ class PortfolioManager:
             print("DEBUG: Re-centering failed due to illegal new legs. Position is now flat.")
             return
 
-        # --- 5. Finalize the New Position ---
-        # The portfolio is now empty. We create the new one, preserving the original strategy ID.
-        pnl_profile = self._calculate_universal_risk_profile(priced_new_legs, self.realized_pnl)
+        # The portfolio is now empty. We can safely call _execute_trades, which will
+        # correctly handle brokerage for the 2 new legs and set the state.
+        pnl_profile = self._calculate_universal_risk_profile(priced_new_legs, self.realized_pnl, is_new_trade=True)
         pnl_profile['strategy_id'] = original_strategy_id
-        self._execute_trades(priced_new_legs, pnl_profile)
+        self._execute_trades(priced_new_legs, pnl_profile) # This is now correct
 
     def debug_print_portfolio(self, current_price: float, step: int, day: int, action_taken: str):
         return

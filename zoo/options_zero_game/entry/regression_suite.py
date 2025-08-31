@@ -1224,6 +1224,60 @@ def test_open_call_ratio_spread():
     finally:
         env.close()
 
+def test_transform_action_brokerage_cost():
+    """
+    A critical regression test to ensure that transformation actions which add
+    new legs only charge brokerage for the NEW legs, preventing the
+    "double brokerage" bug.
+    """
+    test_name = "test_transform_action_brokerage_cost"
+    print(f"\n--- RUNNING: {test_name} ---")
+
+    # We use an isolated env to prevent P&L termination rules from interfering.
+    env = create_isolated_test_env('OPEN_SHORT_STRADDLE')
+
+    try:
+        # --- 1. Setup Phase ---
+        env.reset(seed=46)
+        # This step opens the initial 2-leg straddle.
+        timestep_before_transform = env.step(env.actions_to_indices['HOLD'])
+        assert len(env.portfolio_manager.get_portfolio()) == 2, "Setup failed: Did not open initial 2-leg straddle."
+
+        # --- 2. Record State Before Action ---
+        # Get the realized P&L after the initial opening cost. It should be -50.00.
+        pnl_verification_before = env.portfolio_manager.get_pnl_verification(env.price_manager.current_price, env.iv_bin_index)
+        pnl_before = pnl_verification_before['realized_pnl']
+
+        # Get the brokerage cost per leg directly from the environment for a robust check.
+        brokerage_per_leg = env.unwrapped.portfolio_manager.brokerage_per_leg
+        
+        # --- 3. Define the Expected Outcome ---
+        # The CONVERT_TO_IRON_FLY action adds 2 new legs.
+        expected_brokerage_for_transform = 2 * brokerage_per_leg
+        expected_pnl_after = pnl_before - expected_brokerage_for_transform
+
+        # --- 4. Execute the Transformation Action ---
+        env.step(env.actions_to_indices['CONVERT_TO_IRON_FLY'])
+        
+        # --- 5. The Assertion ---
+        pnl_verification_after = env.portfolio_manager.get_pnl_verification(env.price_manager.current_price, env.iv_bin_index)
+        pnl_after = pnl_verification_after['realized_pnl']
+
+        assert np.isclose(pnl_after, expected_pnl_after), \
+            f"Incorrect brokerage charged during transform. Expected PnL: {expected_pnl_after:.2f}, but Got: {pnl_after:.2f}"
+        
+        # Also assert the final portfolio has the correct number of legs.
+        assert len(env.portfolio_manager.get_portfolio()) == 4, "Transform failed: Did not result in 4 legs."
+
+        print(f"--- PASSED: {test_name} ---")
+        return True
+    except Exception:
+        traceback.print_exc()
+        print(f"--- FAILED: {test_name} ---")
+        return False
+    finally:
+        env.close()
+
 # ==============================================================================
 #                                TEST SUITE RUNNER
 # ==============================================================================
@@ -1261,6 +1315,8 @@ if __name__ == "__main__":
         test_open_reverse_big_lizard,
         test_open_put_ratio_spread,
         test_open_call_ratio_spread,
+
+        test_transform_action_brokerage_cost,
     ]
 
     failures = []
