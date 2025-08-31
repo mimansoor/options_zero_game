@@ -88,7 +88,7 @@ class OptionsZeroGameEnv(gym.Env):
         stop_loss_multiple_of_cost=3.0, # NEW: Added stop loss multiple
         use_stop_loss=True,
         forced_opening_strategy_name=None,
-        disable_opening_curriculum=True,
+        disable_opening_curriculum=False,
 
         disable_spread_solver=False,
         
@@ -310,8 +310,8 @@ class OptionsZeroGameEnv(gym.Env):
         # 1 = Symmetric Mirror (e.g., Bull Call -> Bear Call)
         # 2 = Strategy-Type Mirror (e.g., Bull Call -> Bull Put)
         self.mirror_mode = 0
-        if self.is_training_mode:
-            self.mirror_mode = self.np_random.choice([0, 1, 2])
+        #if self.is_training_mode:
+        #    self.mirror_mode = self.np_random.choice([0, 1, 2])
 
         # The scaling factor is now proportional to a "standard" unit of P&L:
         # the max profit from a 1-strike-wide vertical spread.

@@ -109,46 +109,37 @@ UNIFIED_REGIMES = [
 # A structured training plan that teaches the agent concepts in phases.
 # Each phase focuses on a core strategy for 2 million steps before moving to the next.
 
-TRAINING_CURRICULUM1 = {
-    # === Phase 1: Master Naked Puts (Bullish Premium Selling) ===
-    # All of these now point to the single 'OPEN_SHORT_CALL_ATM' action.
-    0: 'OPEN_SHORT_CALL_ATM',
+TRAINING_CURRICULUM = {
+    #Master all Strategies that strategy Analyzer says you are weak.
+    0: 'OPEN_BEAR_CALL_SPREAD',
 
-    # === Phase 7: Refine Foundational Naked Put Skills ===
-    # All of these now point to the single 'OPEN_SHORT_PUT_ATM' action.
-    int(1e6): 'OPEN_SHORT_PUT_ATM',
+    int(1e6): 'OPEN_SHORT_STRADDLE',
 
-    # === Phase 3: Master Volatility Selling (Undefined Risk) ===
-    # Now that it knows calls and puts, learn to combine them.
-    int(2e6): 'OPEN_SHORT_STRADDLE',
-    int(3e6): 'OPEN_SHORT_STRANGLE_DELTA_15', # Introduce delta-based strangles early
+    int(2e6): 'OPEN_REVERSE_JADE_LIZARD',
+    int(3e6): 'OPEN_REVERSE_BIG_LIZARD', # Introduce delta-based strangles early
 
-    # === Phase 5: Learn Risk-Defined Volatility Selling ===
-    int(4e6): 'OPEN_SHORT_IRON_CONDOR',
+    int(4e6): 'OPEN_PUT_RATIO_SPREAD',
 
-    # === Phase 7: Master Debit Spreads (Directional Buying) ===
-    int(7e6): 'OPEN_BULL_CALL_SPREAD',
-    int(8e6): 'OPEN_BEAR_PUT_SPREAD',
+    int(7e6): 'OPEN_SHORT_STRANGLE_DELTA_25',
+    int(8e6): 'OPEN_SHORT_PUT_ATM',
     
-    # === Phase 8: Master Credit Spreads (Directional Selling) ===
-    int(9e6): 'OPEN_BULL_PUT_SPREAD',
-    int(10e6): 'OPEN_BEAR_CALL_SPREAD',
+    int(9e6): 'OPEN_SHORT_STRANGLE_DELTA_30',
+    int(10e6): 'OPEN_SHORT_STRANGLE_DELTA_15',
 
-    # === Phase 9: Train the Jade/Reverse_Jade/Big_Lizard/Reverse_Big/Put_Ration/Call_Ratio spreads (The Final Phase) ===
     # Duration: 200k steps each
-    int(11e6): 'OPEN_JADE_LIZARD',
-    int(11.2e6): 'OPEN_REVERSE_JADE_LIZARD',
-    int(11.4e6): 'OPEN_BIG_LIZARD',
-    int(11.6e6): 'OPEN_REVERSE_BIG_LIZARD',
-    int(11.8e6): 'OPEN_PUT_RATIO_SPREAD',
-    int(11.8e6): 'OPEN_CALL_RATIO_SPREAD',
+    int(11e6): 'OPEN_BIG_LIZARD',
+    int(11.2e6): 'OPEN_JADE_LIZARD',
+    int(11.4e6): 'OPEN_BULL_PUT_SPREAD',
+    int(11.6e6): 'OPEN_SHORT_IRON_FLY',
+    int(11.8e6): 'OPEN_BEAR_PUT_SPREAD',
+    int(11.8e6): 'OPEN_SHORT_STRANGLE_DELTA_20',
 
     # === Final Phase: Integration and Agent Autonomy ===
     # Allow the agent to use any of its learned strategies to maximize reward.
     int(12e6): 'ALL'
 }
 
-TRAINING_CURRICULUM = {
+TRAINING_CURRICULUM1 = {
     # === Phase 1: Start with Full Autonomy ===
     # Goal: Force the agent to learn a general, high-level policy by exposing
     # it to the entire action space from the beginning.
@@ -313,7 +304,7 @@ options_zero_game_muzero_config = dict(
         # --- Collector-Specific Settings ---
         collector_env_num=collector_env_num,
         # The collector uses the opening curriculum.
-        disable_opening_curriculum=True,
+        disable_opening_curriculum=False,
         
         # --- Evaluator-Specific Settings ---
         evaluator_env_num=evaluator_env_num,
