@@ -698,14 +698,20 @@ class OptionsZeroGameEnv(gym.Env):
                 elif leg_type == 'put' and leg_dir == 'short': shift_dir = 'DOWN' # <<< --- CORRECTED LINE
             
             if shift_dir:
-                resolved_action_name = f"SHIFT_{shift_dir}_POS_{leg_index}"
+                # 1. Determine the potential new strike price.
+                delta = self._cfg.strike_distance if shift_dir == "UP" else -self._cfg.strike_distance
+                new_strike = leg['strike_price'] + delta
                 
-                # b) Re-validate the resolved action against the true action mask.
-                resolved_action_index = self.actions_to_indices.get(resolved_action_name)
-                true_action_mask = self._get_true_action_mask()
+                # 2. Check if this new strike would conflict with any other leg in the portfolio.
+                portfolio_df = self.portfolio_manager.portfolio.drop(leg_index)
+                is_conflict = any(
+                    (pos['strike_price'] == new_strike and pos['type'] == leg_type)
+                    for _, pos in portfolio_df.iterrows()
+                )
 
-                if resolved_action_index is not None and true_action_mask[resolved_action_index] == 1:
-                    # c) Only execute if the resolved action is valid AND legal.
+                # 3. Only execute the shift if there is NO conflict.
+                if not is_conflict:
+                    resolved_action_name = f"SHIFT_{shift_dir}_POS_{leg_index}"
                     self.portfolio_manager.shift_position(resolved_action_name, self.price_manager.current_price, self.iv_bin_index, self.current_step)
 
         elif final_action_name.startswith('HEDGE_PORTFOLIO_BY_ROLLING_LEG_'):
@@ -1205,10 +1211,6 @@ class OptionsZeroGameEnv(gym.Env):
         for j in range(self._cfg.max_positions):
             actions[f'CLOSE_POSITION_{j}'] = i; i+=1
 
-        for j in range(self._cfg.max_positions):
-            actions[f'SHIFT_UP_POS_{j}'] = i; i+=1
-            actions[f'SHIFT_DOWN_POS_{j}'] = i; i+=1
-
         # New actions to re-center a position directly to the ATM strike.
         for j in range(self._cfg.max_positions):
             actions[f'SHIFT_TO_ATM_{j}'] = i; i+=1
@@ -1304,8 +1306,6 @@ class OptionsZeroGameEnv(gym.Env):
                 if pos['strike_price'] != atm_price:
                     # The flawed SHIFT_TO_ATM action is now correctly restricted.
                     self._set_if_exists(action_mask, f'SHIFT_TO_ATM_{i}')
-            self._set_shift_if_no_conflict(action_mask, i, pos, direction="UP")
-            self._set_shift_if_no_conflict(action_mask, i, pos, direction="DOWN")
             if self._is_delta_shift_possible(pos, 'increase'): self._set_if_exists(action_mask, f'INCREASE_DELTA_BY_SHIFTING_LEG_{i}')
             if self._is_delta_shift_possible(pos, 'decrease'): self._set_if_exists(action_mask, f'DECREASE_DELTA_BY_SHIFTING_LEG_{i}')
 
@@ -1400,21 +1400,6 @@ class OptionsZeroGameEnv(gym.Env):
                 return True # SHIFT_DOWN is possible
         
         return False
-
-    def _set_shift_if_no_conflict(self, action_mask, i, original_pos, direction):
-        """Set SHIFT_UP or SHIFT_DOWN if no strike conflict."""
-        delta = self._cfg.strike_distance if direction == "UP" else -self._cfg.strike_distance
-        new_strike = original_pos['strike_price'] + delta
-        portfolio_df = self.portfolio_manager.portfolio.drop(i)
-
-        is_conflict = any(
-            (pos['strike_price'] == new_strike and pos['type'] == original_pos['type'])
-            for _, pos in portfolio_df.iterrows()
-        )
-
-        action_name = f'SHIFT_{direction}_POS_{i}'
-        if not is_conflict:
-            self._set_if_exists(action_mask, action_name)
 
     def _set_shift_to_atm_if_no_conflict(self, action_mask, i, original_pos, atm_price):
         """Set SHIFT_TO_ATM if no strike conflict."""

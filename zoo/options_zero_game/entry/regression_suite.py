@@ -681,46 +681,41 @@ def test_convert_condor_to_vertical():
     finally:
         env.close()
 
-def test_shift_preserves_strategy():
+def test_meta_action_preserves_strategy():
     """
-    Tests if a SHIFT action modifies a leg but preserves the overall strategy.
-    This version is robust to changes in the portfolio's sort order.
+    Tests if a meta-action like INCREASE_DELTA modifies a leg but preserves
+    the overall strategy ID across all legs of the position.
     """
-    test_name = "test_shift_preserves_strategy"
+    test_name = "test_meta_action_preserves_strategy"
     print(f"\n--- RUNNING: {test_name} ---")
-    env = create_isolated_test_env('OPEN_SHORT_STRANGLE_DELTA_20')
+
+    # We open a short call. The only way to increase its delta is to SHIFT UP.
+    env = create_isolated_test_env('OPEN_SHORT_CALL_ATM')
+
     try:
-        # Step 0: Open the position and get its initial state
         env.reset(seed=42)
         env.step(env.actions_to_indices['HOLD'])
 
         portfolio_before = env.portfolio_manager.get_portfolio()
-        assert len(portfolio_before) == 2, "Setup failed: Did not open a 2-leg strangle."
+        assert len(portfolio_before) == 1, "Setup failed: Did not open a 1-leg position."
 
-        # --- THE FIX: Identify the target leg by its properties, not its index ---
-        call_leg_before = portfolio_before[portfolio_before['type'] == 'call'].iloc[0]
-        original_strike = call_leg_before['strike_price']
-        original_strat_id = call_leg_before['strategy_id']
-        # The action is targeting the leg at index 0, which is the CALL in this setup.
-        action_to_take = env.actions_to_indices['SHIFT_UP_POS_0']
+        original_strike = portfolio_before.iloc[0]['strike_price']
+        original_strat_id = portfolio_before.iloc[0]['strategy_id']
 
-        # Step 1: Execute the shift action
+        # Execute the high-level meta-action
+        action_to_take = env.actions_to_indices['INCREASE_DELTA_BY_SHIFTING_LEG_0']
         env.step(action_to_take)
 
-        # --- Assertions ---
         portfolio_after = env.portfolio_manager.get_portfolio()
-        assert len(portfolio_after) == 2, "Shift failed: Number of legs changed."
+        assert len(portfolio_after) == 1, "Meta-action failed: Number of legs changed."
 
-        # --- THE FIX: Find the call leg again after the sort ---
-        call_leg_after = portfolio_after[portfolio_after['type'] == 'call'].iloc[0]
-
-        # Check that the strike was modified correctly
+        leg_after = portfolio_after.iloc[0]
+        # Check that the strike was modified correctly (it should have moved up)
         expected_new_strike = original_strike + env.strike_distance
-        assert call_leg_after['strike_price'] == expected_new_strike, f"Shift failed: Strike price did not update correctly. Expected {expected_new_strike}, got {call_leg_after['strike_price']}."
+        assert leg_after['strike_price'] == expected_new_strike, f"Shift failed: Strike price did not update correctly."
 
-        # Check that the strategy's identity was preserved across all legs
-        assert portfolio_after.iloc[0]['strategy_id'] == original_strat_id, "Shift failed: Strategy ID was not preserved."
-        assert portfolio_after.iloc[1]['strategy_id'] == original_strat_id, "Shift failed: Strategy ID was not preserved."
+        # Check that the strategy's identity was preserved
+        assert leg_after['strategy_id'] == original_strat_id, "Meta-action failed: Strategy ID was not preserved."
 
         print(f"--- PASSED: {test_name} ---")
         return True
@@ -1030,44 +1025,41 @@ def test_dte_decay_logic():
 def test_no_runaway_duplication_on_transform():
     """
     A critical regression test to ensure that transformation actions like
-    HEDGE and SHIFT do not incorrectly increase the number of portfolio legs.
-    This test explicitly targets the "runaway duplication" bug.
+    HEDGE and the DELTA_SHIFT meta-actions do not incorrectly increase the
+    number of portfolio legs, targeting the "runaway duplication" bug.
     """
     test_name = "test_no_runaway_duplication_on_transform"
     print(f"\n--- RUNNING: {test_name} ---")
 
-    # Start with a 2-leg strangle
     env = create_isolated_test_env('OPEN_SHORT_STRANGLE_DELTA_20')
     try:
-        # Step 0: Open the initial position
         env.reset(seed=53)
         env.step(env.actions_to_indices['HOLD'])
         portfolio_step0 = env.portfolio_manager.get_portfolio()
         assert len(portfolio_step0) == 2, "Setup failed: Did not open a 2-leg strangle."
 
-        # --- Test 1: HEDGE action ---
-        # Hedge one of the legs. The portfolio should grow from 2 to 3 legs.
+        # --- Test 1: HEDGE action (Unchanged) ---
         print("  - Testing HEDGE action...")
         env.step(env.actions_to_indices['HEDGE_NAKED_POS_0'])
         portfolio_step1 = env.portfolio_manager.get_portfolio()
         assert len(portfolio_step1) == 3, \
-            f"HEDGE failed: Expected 3 legs, but found {len(portfolio_step1)}. Runaway duplication may have occurred."
+            f"HEDGE failed: Expected 3 legs, but found {len(portfolio_step1)}."
 
-        # --- Test 2: SHIFT action on the new 3-leg portfolio ---
-        # Shift one of the legs. The portfolio size should remain exactly 3.
-        print("  - Testing SHIFT action on a 3-leg portfolio...")
-        env.step(env.actions_to_indices['SHIFT_UP_POS_1'])
+        # --- Test 2: Use a META-ACTION on the new 3-leg portfolio ---
+        print("  - Testing a meta-action (DECREASE_DELTA) on a 3-leg portfolio...")
+        # The leg at index 1 is now a short put. Decreasing its delta will shift it DOWN.
+        env.step(env.actions_to_indices['DECREASE_DELTA_BY_SHIFTING_LEG_1'])
         portfolio_step2 = env.portfolio_manager.get_portfolio()
         assert len(portfolio_step2) == 3, \
-            f"SHIFT failed: Expected 3 legs, but found {len(portfolio_step2)}. Runaway duplication may have occurred."
+            f"DECREASE_DELTA failed: Expected 3 legs, but found {len(portfolio_step2)}."
 
-        # --- Test 3: Another SHIFT action ---
-        # Shift another leg. The portfolio size should still be exactly 3.
-        print("  - Testing a second SHIFT action...")
-        env.step(env.actions_to_indices['SHIFT_DOWN_POS_2'])
+        # --- Test 3: Use another META-ACTION ---
+        print("  - Testing a second meta-action (INCREASE_DELTA)...")
+        # The leg at index 2 is now a long call (from the hedge). Increasing its delta will shift it DOWN.
+        env.step(env.actions_to_indices['INCREASE_DELTA_BY_SHIFTING_LEG_2'])
         portfolio_step3 = env.portfolio_manager.get_portfolio()
         assert len(portfolio_step3) == 3, \
-            f"Second SHIFT failed: Expected 3 legs, but found {len(portfolio_step3)}. Runaway duplication may have occurred."
+            f"INCREASE_DELTA failed: Expected 3 legs, but found {len(portfolio_step3)}."
 
         print(f"--- PASSED: {test_name} ---")
         return True
@@ -1343,7 +1335,7 @@ if __name__ == "__main__":
         test_hedge_naked_put,
         test_convert_strangle_to_condor,
         test_convert_condor_to_vertical,
-        test_shift_preserves_strategy,
+        test_meta_action_preserves_strategy,
         test_hedge_short_call,
         test_convert_straddle_to_fly,
         test_hedge_strangle_leg,
