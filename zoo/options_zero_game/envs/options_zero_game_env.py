@@ -763,8 +763,6 @@ class OptionsZeroGameEnv(gym.Env):
         elif action_name == 'CONVERT_TO_BULL_PUT_SPREAD': pm.convert_to_bull_put_spread(price, iv_idx, step)
         elif action_name == 'CONVERT_TO_BEAR_CALL_SPREAD': pm.convert_to_bear_call_spread(price, iv_idx, step)
         elif action_name == 'CONVERT_TO_BEAR_PUT_SPREAD': pm.convert_to_bear_put_spread(price, iv_idx, step)
-        elif action_name == 'CONVERT_TO_CALL_CONDOR': pm.convert_to_condor('call', price, iv_idx, step)
-        elif action_name == 'CONVERT_TO_PUT_CONDOR': pm.convert_to_condor('put', price, iv_idx, step)
 
     def _advance_market_and_get_outcome(self, equity_before: float, action_taken: str) -> BaseEnvTimestep:
         """
@@ -1187,10 +1185,6 @@ class OptionsZeroGameEnv(gym.Env):
         actions['OPEN_BULL_PUT_SPREAD'] = i; i+=1
         actions['OPEN_BEAR_PUT_SPREAD'] = i; i+=1
 
-        # <<< --- ADD THE NEW CONDOR CONVERSION ACTIONS HERE --- >>>
-        actions['CONVERT_TO_CALL_CONDOR'] = i; i+=1
-        actions['CONVERT_TO_PUT_CONDOR'] = i; i+=1
-
         # --- NEW: Strategy Morphing Actions ---
         actions['CONVERT_TO_IRON_CONDOR'] = i; i+=1
         actions['CONVERT_TO_IRON_FLY'] = i; i+=1
@@ -1341,9 +1335,6 @@ class OptionsZeroGameEnv(gym.Env):
                     self._set_if_exists(action_mask, 'CONVERT_TO_IRON_CONDOR')
                 if current_strategy_id == short_straddle_id and len(portfolio_df) <= self._cfg.max_positions - 2:
                     self._set_if_exists(action_mask, 'CONVERT_TO_IRON_FLY')
-                if current_strategy_id in spread_ids and len(portfolio_df) <= self._cfg.max_positions - 2:
-                    if option_type == 'call': self._set_if_exists(action_mask, 'CONVERT_TO_CALL_CONDOR')
-                    else: self._set_if_exists(action_mask, 'CONVERT_TO_PUT_CONDOR')
                 is_short_vol_position = current_strategy_id in short_strangle_ids or current_strategy_id == short_straddle_id
                 if is_short_vol_position:
                     greeks = self.portfolio_manager.get_portfolio_greeks(self.price_manager.current_price, self.iv_bin_index)
