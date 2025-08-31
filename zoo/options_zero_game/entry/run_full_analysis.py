@@ -36,14 +36,12 @@ def run_full_analysis():
 
     print(f"--- [ {datetime.now()} ] Starting Full Analysis Cycle ---")
 
-    # <<< --- NEW: Add a command-line argument for determinism --- >>>
     parser = argparse.ArgumentParser(description="Run a full, deterministic strategy analysis with Elo ratings.")
     parser.add_argument(
         '--deterministic',
         action='store_true',
         help="Run the analysis in a fully deterministic mode by disabling the C++ MCTS. Slower but reproducible."
     )
-    # <<< --- NEW: Add the debug flag --- >>>
     parser.add_argument(
         '--debug_one',
         action='store_true',
@@ -51,11 +49,11 @@ def run_full_analysis():
     )
     args, remaining_argv = parser.parse_known_args()
 
-    print(f"--- [ {datetime.now()} ] Starting Full Analysis Cycle ---")
     if args.deterministic:
         print("--- RUNNING IN DETERMINISTIC MODE ---")
 
-    if args.debug_one: print("--- RUNNING IN DEBUG_ONE MODE (SINGLE STRATEGY) ---")
+    if args.debug_one:
+        print("--- RUNNING IN DEBUG_ONE MODE (SINGLE STRATEGY) ---")
 
     try:
         # 1. Initial Cleanup
@@ -101,9 +99,12 @@ def run_full_analysis():
             strategy_list = get_valid_strategies()
             print(f"Found {len(strategy_list)} strategies to analyze.")
 
-        # 6. The Main Loop: Run one analysis per strategy
-        for strategy in tqdm(strategy_list, desc="Overall Progress"):
-            print(f"\n--- Analyzing strategy: {strategy} ---")
+        # 6. The Main Loop: Run one analysis per strategy with a single-line progress bar
+        progress_bar = tqdm(strategy_list, desc="Starting Analysis...", ncols=120)
+        for strategy in progress_bar:
+            # Update the description on the single line for each new strategy
+            progress_bar.set_description(f"Analyzing: {strategy.ljust(35)}")
+
             command = [
                 "python3", ANALYZER_SCRIPT_PATH,
                 "--strategy", strategy,
@@ -111,7 +112,6 @@ def run_full_analysis():
                 "--exp_name", ANALYZER_RUN_DIR
             ]
 
-            # <<< --- NEW: Pass the deterministic flag to the worker script --- >>>
             if args.deterministic:
                 command.append("--deterministic")
 
@@ -120,6 +120,7 @@ def run_full_analysis():
             try:
                 subprocess.run(command, check=True, capture_output=True, text=True)
             except subprocess.CalledProcessError as e:
+                # Use print statements here since they happen outside the normal loop flow
                 print("\n" + "="*80)
                 print(f"❌ WARNING: Analysis for strategy '{strategy}' FAILED.")
                 print(f"Exit Code: {e.returncode}")
@@ -133,7 +134,7 @@ def run_full_analysis():
 
         # 7. Post-Processing Step
         print("\n--- All strategies analyzed. Starting post-processing and Elo calculation... ---")
-        
+
         with open(intermediate_file, 'r') as f:
             raw_pnl_data = json.load(f)
 
@@ -143,23 +144,19 @@ def run_full_analysis():
             if stats: all_stats.append(stats)
             all_pnl_by_strategy[item['strategy']] = item['pnl_results']
 
-        # a) Calculate both standard and PnL-weighted Elo ratings.
         standard_elo = calculate_elo_ratings(all_pnl_by_strategy, existing_ratings)
         pnl_weighted_elo = calculate_pnl_weighted_elo(all_pnl_by_strategy, existing_ratings)
 
-        # b) Add all metrics to the final stats dictionary.
         for strategy_row in all_stats:
             strategy_name = strategy_row['Strategy']
             strategy_row['Trader_Score'] = calculate_trader_score(strategy_row)
             strategy_row['ELO_Rank'] = standard_elo.get(strategy_name, 1200)
-            strategy_row['PnL_ELO_Rank'] = pnl_weighted_elo.get(strategy_name, 1200) # <-- Add the new rank
+            strategy_row['PnL_ELO_Rank'] = pnl_weighted_elo.get(strategy_name, 1200)
 
-        # c) Update the persistent Elo file with the STANDARD Elo ratings for next time.
         with open(ELO_STATE_FILE, 'w') as f:
             json.dump(standard_elo, f, indent=2)
         print(f"Successfully updated and saved standard Elo ratings to {ELO_STATE_FILE}")
-        
-        # d) Sort the final DataFrame by the new PnL-Weighted Elo Rank for display.
+
         df = pd.DataFrame(all_stats).sort_values(by="PnL_ELO_Rank", ascending=False).set_index('Strategy')
         pd.set_option('display.max_rows', None)
         pd.set_option('display.width', 200)
@@ -171,20 +168,18 @@ def run_full_analysis():
 
         # 8. Save the final, complete report
         final_report_file = os.path.join(REPORTS_DIR, f"strategy_report_{timestamp}.json")
-        # Sanitize the final data one last time before saving to JSON.
         sanitized_stats = []
         for strategy_row in all_stats:
             sanitized_row = {}
             for key, value in strategy_row.items():
                 if isinstance(value, (float, np.floating)) and not np.isfinite(value):
-                    # Replace NaN/inf with None, which serializes to 'null' in JSON.
                     sanitized_row[key] = None
                 else:
                     sanitized_row[key] = value
             sanitized_stats.append(sanitized_row)
         with open(final_report_file, 'w') as f:
             json.dump(sanitized_stats, f, indent=2)
-        
+
         os.remove(intermediate_file)
 
         # 9. Final Cleanup
