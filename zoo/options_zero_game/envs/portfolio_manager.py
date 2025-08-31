@@ -603,8 +603,6 @@ class PortfolioManager:
             return self._open_ratio_spread(action_name, current_price, iv_bin_index, current_step, days_to_expiry)
 
         # 2. Four-leg strategies
-        elif 'CONDOR' in action_name and 'IRON' not in action_name:
-            return self._open_condor(action_name, current_price, iv_bin_index, current_step, days_to_expiry)
         elif 'FLY' in action_name and 'IRON' not in action_name:
             return self._open_butterfly(action_name, current_price, iv_bin_index, current_step, days_to_expiry)
         elif 'IRON_CONDOR' in action_name:
@@ -1832,57 +1830,6 @@ class PortfolioManager:
         if pnl['strategy_max_profit'] <= self.min_profit_hurdle: return False
         pnl['strategy_id'] = self.strategy_name_to_id.get(action_name, -1)
         self._execute_trades(legs, pnl)
-        return True
-
-    def _open_condor(self, action_name: str, current_price: float, iv_bin_index: int, current_step: int, days_to_expiry: float):
-        """
-        Opens a four-leg Call or Put Condor.
-        MODIFIED: Now creates a wider, more strategically sound condor by default.
-        """
-        if len(self.portfolio) > self.max_positions - 4: return False
-
-        parts = action_name.split('_')
-        direction = parts[1].lower()
-        option_type = parts[2].lower()
-
-        atm_price = self.market_rules_manager.get_atm_price(current_price)
-        
-        # Define the strikes for a wider, more realistic condor.
-        # This creates a body that is 10 strikes wide.
-        body_width_multiplier = 5
-        wing_width_multiplier = 15
-        
-        s1 = atm_price - (wing_width_multiplier * self.strike_distance)
-        s2 = atm_price - (body_width_multiplier * self.strike_distance)
-        s3 = atm_price + (body_width_multiplier * self.strike_distance)
-        s4 = atm_price + (wing_width_multiplier * self.strike_distance)
-
-        if s1 <= 0:
-            print(f"DEBUG: Aborting condor open, calculated strike s1={s1} is invalid.")
-            return False
-
-        body_direction = 'long' if direction == 'long' else 'short'
-        wing_direction = 'short' if direction == 'long' else 'long'
-        legs_def = [
-            {'type': option_type, 'direction': wing_direction, 'strike_price': s1},
-            {'type': option_type, 'direction': body_direction, 'strike_price': s2},
-            {'type': option_type, 'direction': body_direction, 'strike_price': s3},
-            {'type': option_type, 'direction': wing_direction, 'strike_price': s4}
-        ]
-        
-        for leg in legs_def:
-            leg['entry_step'] = current_step
-            leg['days_to_expiry'] = days_to_expiry
-        
-        priced_legs = self._price_legs(legs_def, current_price, iv_bin_index)
-        
-        if not priced_legs:
-            return False
-
-        pnl_profile = self._calculate_universal_risk_profile(priced_legs, self.realized_pnl, is_new_trade=True)
-        if pnl_profile['strategy_max_profit'] <= self.min_profit_hurdle: return False
-        pnl_profile['strategy_id'] = self.strategy_name_to_id.get(action_name, -1)
-        self._execute_trades(priced_legs, pnl_profile)
         return True
 
     def _open_iron_fly(self, action_name: str, current_price: float, iv_bin_index: int, current_step: int, days_to_expiry: float):

@@ -1207,8 +1207,6 @@ class OptionsZeroGameEnv(gym.Env):
 
         actions['OPEN_SHORT_IRON_FLY'] = i; i+=1
         actions['OPEN_SHORT_IRON_CONDOR'] = i; i+=1
-        for t in ['CALL', 'PUT']:
-            actions[f'OPEN_SHORT_{t}_CONDOR'] = i; i+=1
 
         for j in range(self._cfg.max_positions):
             actions[f'CLOSE_POSITION_{j}'] = i; i+=1

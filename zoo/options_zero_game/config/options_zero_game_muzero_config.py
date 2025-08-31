@@ -125,8 +125,6 @@ TRAINING_CURRICULUM1 = {
 
     # === Phase 5: Learn Risk-Defined Volatility Selling ===
     int(4e6): 'OPEN_SHORT_IRON_CONDOR',
-    int(5e6): 'OPEN_SHORT_CALL_CONDOR',
-    int(6e6): 'OPEN_SHORT_PUT_CONDOR',
 
     # === Phase 7: Master Debit Spreads (Directional Buying) ===
     int(7e6): 'OPEN_BULL_CALL_SPREAD',
@@ -167,11 +165,6 @@ TRAINING_CURRICULUM = {
     int(4e6): 'OPEN_BULL_CALL_SPREAD',
 
     # === Phase 4: Specialize in Risk-Defined Volatility (Selling) ===
-    # Duration: 1M steps (9e6 - 8e6)
-    int(5e6): 'OPEN_SHORT_PUT_CONDOR',
-    # Duration: 1M steps (8e6 - 7e6)
-    int(6e6): 'OPEN_SHORT_CALL_CONDOR',
-    # Duration: 1M steps (7e6 - 6e6)
     int(7e6): 'OPEN_SHORT_IRON_CONDOR',
 
     # Duration: 1M steps (4e6 - 3e6)
@@ -277,12 +270,6 @@ for direction in ['BULL', 'BEAR']:
         internal_name = f'{direction}_{opt_type}_SPREAD'
         strategy_name_to_id[internal_name] = next_id; next_id += 1
         strategy_name_to_id[f'OPEN_{internal_name}'] = strategy_name_to_id[internal_name]
-
-# This ensures that Condor strategies have a valid ID.
-for opt_type in ['CALL', 'PUT']:
-    internal_name = f'SHORT_{opt_type}_CONDOR' # Only create SHORT
-    strategy_name_to_id[internal_name] = next_id; next_id += 1
-    strategy_name_to_id[f'OPEN_{internal_name}'] = strategy_name_to_id[internal_name]
 
 # --- 4. Strategies with Variations (Strangles, Butterflies) ---
 for delta in [15, 20, 25, 30]:

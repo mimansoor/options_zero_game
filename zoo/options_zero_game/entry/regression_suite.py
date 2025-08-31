@@ -343,39 +343,6 @@ def test_decrease_delta_by_shifting_leg():
     finally:
         env.close()
 
-# ==============================================================================
-#                      CONDOR STRATEGY TEST CASES
-# ==============================================================================
-
-def test_open_short_call_condor():
-    """Tests if OPEN_SHORT_CALL_CONDOR correctly opens a 4-leg position."""
-    test_name = "test_open_short_call_condor"
-    print(f"\n--- RUNNING: {test_name} ---")
-    env = create_isolated_test_env('OPEN_SHORT_CALL_CONDOR')
-
-    try:
-        env.reset(seed=55)
-        env.step(env.actions_to_indices['HOLD'])
-
-        portfolio_after = env.portfolio_manager.get_portfolio()
-        stats = env.portfolio_manager.get_raw_portfolio_stats(env.price_manager.current_price, env.iv_bin_index)
-
-        assert len(portfolio_after) == 4, "Did not open 4 legs."
-        assert all(portfolio_after['type'] == 'call'), "Legs are not all calls."
-        assert portfolio_after['direction'].value_counts()['short'] == 2, "Did not open 2 short body legs."
-        assert portfolio_after['direction'].value_counts()['long'] == 2, "Did not open 2 long wing legs."
-        assert stats['max_loss'] > -env.portfolio_manager.undefined_risk_cap, "Risk is not defined."
-        assert portfolio_after.iloc[0]['strategy_id'] == env.strategy_name_to_id['OPEN_SHORT_CALL_CONDOR'], "Incorrect strategy ID."
-
-        print(f"--- PASSED: {test_name} ---")
-        return True
-    except Exception:
-        traceback.print_exc()
-        print(f"--- FAILED: {test_name} ---")
-        return False
-    finally:
-        env.close()
-
 def test_greeks_and_risk_validation():
     test_name = "test_greeks_and_risk_validation"
     print(f"\n--- RUNNING: {test_name} ---")
@@ -514,54 +481,13 @@ def test_greeks_and_risk_validation():
     finally:
         env.close()
 
-def test_hedge_naked_put():
-    """Tests if HEDGE_NAKED_POS correctly converts a naked put into a Bull Put Spread."""
-    test_name = "test_hedge_naked_put"
-    print(f"\n--- RUNNING: {test_name} ---")
-    env = create_isolated_test_env('OPEN_SHORT_PUT_ATM')
-    try:
-        # Step 0: Reset the environment
-        obs_dict = env.reset(seed=42)
-        
-        # <<< THE FIX: Execute the forced opening action on Step 0 >>>
-        # We pass a HOLD action, but the env will override it with the forced strategy.
-        timestep = env.step(env.actions_to_indices['HOLD'])
-        
-        # --- Now, we can begin the actual test ---
-        portfolio_before = env.portfolio_manager.get_portfolio()
-        assert len(portfolio_before) == 1, "Setup failed: Did not open 1 leg."
-        assert not portfolio_before.iloc[0]['is_hedged'], "Setup failed: Leg is not naked."
-        
-        # Step 1: Execute the hedge action
-        action_to_take = env.actions_to_indices['HEDGE_NAKED_POS_0']
-        timestep = env.step(action_to_take)
-        
-        # --- Assertions ---
-        portfolio_after = env.portfolio_manager.get_portfolio()
-        assert len(portfolio_after) == 2, "Hedge failed: Expected 2 legs."
-        assert portfolio_after.iloc[0]['is_hedged'] and portfolio_after.iloc[1]['is_hedged'], "Hedge failed: Legs not marked as hedged."
-        stats = env.portfolio_manager.get_raw_portfolio_stats(env.price_manager.current_price, env.iv_bin_index)
-        assert stats['max_loss'] > -500000, "Hedge failed: Max loss is still undefined."
-
-        print(f"--- PASSED: {test_name} ---")
-        return True
-    except Exception:
-        traceback.print_exc()
-        print(f"--- FAILED: {test_name} ---")
-        return False
-    finally:
-        env.close()
-
 def test_convert_strangle_to_condor():
     """Tests if CONVERT_TO_IRON_CONDOR correctly adds wings to a strangle."""
     test_name = "test_convert_strangle_to_condor"
     print(f"\n--- RUNNING: {test_name} ---")
 
-    flat_vol_regime = {'name': 'Flat_Test_Regime', 'mu': 0, 'omega': 0, 'alpha': 0, 'beta': 1, 'atm_iv': 25.0, 'far_otm_put_iv': 25.0, 'far_otm_call_iv': 25.0}
-    env = create_isolated_test_env(
-        'OPEN_SHORT_STRANGLE_DELTA_20',
-        overrides={'use_expert_iv': False, 'iv_price_correlation_strength': 0.0, 'unified_regimes': [flat_vol_regime]}
-    )
+    # Use the isolated env to prevent P&L rules from interfering
+    env = create_isolated_test_env('OPEN_SHORT_STRANGLE_DELTA_20')
 
     try:
         env.reset(seed=42)
@@ -591,12 +517,8 @@ def test_convert_condor_to_vertical():
     test_name = "test_convert_condor_to_vertical"
     print(f"\n--- RUNNING: {test_name} ---")
 
-    # <<< --- THE DEFINITIVE FIX: Isolate the test in a sterile, flat-volatility environment --- >>>
-    flat_vol_regime = {'name': 'Flat_Test_Regime', 'mu': 0, 'omega': 0, 'alpha': 0, 'beta': 1, 'atm_iv': 25.0, 'far_otm_put_iv': 25.0, 'far_otm_call_iv': 25.0}
-    env = create_isolated_test_env(
-        'OPEN_SHORT_IRON_CONDOR',
-        overrides={'use_expert_iv': False, 'iv_price_correlation_strength': 0.0, 'unified_regimes': [flat_vol_regime]}
-    )
+    # Use the isolated env to prevent P&L rules from interfering
+    env = create_isolated_test_env('OPEN_SHORT_IRON_CONDOR')
 
     try:
         env.reset(seed=42)
@@ -613,6 +535,44 @@ def test_convert_condor_to_vertical():
         final_strat_id = portfolio_after.iloc[0]['strategy_id']
         expected_strat_id = env.strategy_name_to_id['BULL_PUT_SPREAD']
         assert final_strat_id == expected_strat_id, f"Incorrect strategy ID. Expected {expected_strat_id}, got {final_strat_id}."
+
+        print(f"--- PASSED: {test_name} ---")
+        return True
+    except Exception:
+        traceback.print_exc()
+        print(f"--- FAILED: {test_name} ---")
+        return False
+    finally:
+        env.close()
+
+def test_hedge_naked_put():
+    """Tests if HEDGE_NAKED_POS correctly converts a naked put into a Bull Put Spread."""
+    test_name = "test_hedge_naked_put"
+    print(f"\n--- RUNNING: {test_name} ---")
+    env = create_isolated_test_env('OPEN_SHORT_PUT_ATM')
+    try:
+        # Step 0: Reset the environment
+        obs_dict = env.reset(seed=42)
+        
+        # <<< THE FIX: Execute the forced opening action on Step 0 >>>
+        # We pass a HOLD action, but the env will override it with the forced strategy.
+        timestep = env.step(env.actions_to_indices['HOLD'])
+        
+        # --- Now, we can begin the actual test ---
+        portfolio_before = env.portfolio_manager.get_portfolio()
+        assert len(portfolio_before) == 1, "Setup failed: Did not open 1 leg."
+        assert not portfolio_before.iloc[0]['is_hedged'], "Setup failed: Leg is not naked."
+        
+        # Step 1: Execute the hedge action
+        action_to_take = env.actions_to_indices['HEDGE_NAKED_POS_0']
+        timestep = env.step(action_to_take)
+        
+        # --- Assertions ---
+        portfolio_after = env.portfolio_manager.get_portfolio()
+        assert len(portfolio_after) == 2, "Hedge failed: Expected 2 legs."
+        assert portfolio_after.iloc[0]['is_hedged'] and portfolio_after.iloc[1]['is_hedged'], "Hedge failed: Legs not marked as hedged."
+        stats = env.portfolio_manager.get_raw_portfolio_stats(env.price_manager.current_price, env.iv_bin_index)
+        assert stats['max_loss'] > -500000, "Hedge failed: Max loss is still undefined."
 
         print(f"--- PASSED: {test_name} ---")
         return True
@@ -1288,7 +1248,6 @@ if __name__ == "__main__":
         test_no_runaway_duplication_on_transform,
         test_close_all_action,
         test_greeks_and_risk_validation,
-        test_open_short_call_condor,
         test_hedge_delta_with_atm_option,
         test_increase_delta_by_shifting_leg,
         test_decrease_delta_by_shifting_leg,
