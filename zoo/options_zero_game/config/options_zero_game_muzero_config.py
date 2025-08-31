@@ -113,50 +113,41 @@ TRAINING_CURRICULUM1 = {
     # === Phase 1: Master Naked Puts (Bullish Premium Selling) ===
     # All of these now point to the single 'OPEN_SHORT_CALL_ATM' action.
     0: 'OPEN_SHORT_CALL_ATM',
-    int(1e6): 'OPEN_SHORT_CALL_ATM',
-    int(1.2e6): 'OPEN_SHORT_CALL_ATM',
-    int(1.4e6): 'OPEN_SHORT_CALL_ATM',
-    int(1.6e6): 'OPEN_SHORT_CALL_ATM',
 
     # === Phase 7: Refine Foundational Naked Put Skills ===
     # All of these now point to the single 'OPEN_SHORT_PUT_ATM' action.
-    int(2e6): 'OPEN_SHORT_PUT_ATM',
-    int(2.2e6): 'OPEN_SHORT_PUT_ATM',
-    int(2.4e6): 'OPEN_SHORT_PUT_ATM',
-    int(2.6e6): 'OPEN_SHORT_PUT_ATM',
-    int(2.8e6): 'OPEN_SHORT_PUT_ATM',
+    int(1e6): 'OPEN_SHORT_PUT_ATM',
 
     # === Phase 3: Master Volatility Selling (Undefined Risk) ===
     # Now that it knows calls and puts, learn to combine them.
-    int(3e6): 'OPEN_SHORT_STRADDLE',
-    int(4e6): 'OPEN_SHORT_STRANGLE_DELTA_15', # Introduce delta-based strangles early
+    int(2e6): 'OPEN_SHORT_STRADDLE',
+    int(3e6): 'OPEN_SHORT_STRANGLE_DELTA_15', # Introduce delta-based strangles early
 
     # === Phase 5: Learn Risk-Defined Volatility Selling ===
-    int(7e6): 'OPEN_SHORT_IRON_CONDOR',
-    int(8e6): 'OPEN_SHORT_CALL_CONDOR',
-    int(9e6): 'OPEN_SHORT_PUT_CONDOR',
-    int(10e6): 'OPEN_SHORT_CALL_FLY', # Butterflies are a good follow-up
+    int(4e6): 'OPEN_SHORT_IRON_CONDOR',
+    int(5e6): 'OPEN_SHORT_CALL_CONDOR',
+    int(6e6): 'OPEN_SHORT_PUT_CONDOR',
 
     # === Phase 7: Master Debit Spreads (Directional Buying) ===
-    int(15e6): 'OPEN_BULL_CALL_SPREAD',
-    int(16e6): 'OPEN_BEAR_PUT_SPREAD',
+    int(7e6): 'OPEN_BULL_CALL_SPREAD',
+    int(8e6): 'OPEN_BEAR_PUT_SPREAD',
     
     # === Phase 8: Master Credit Spreads (Directional Selling) ===
-    int(17e6): 'OPEN_BULL_PUT_SPREAD',
-    int(18e6): 'OPEN_BEAR_CALL_SPREAD',
+    int(9e6): 'OPEN_BULL_PUT_SPREAD',
+    int(10e6): 'OPEN_BEAR_CALL_SPREAD',
 
     # === Phase 9: Train the Jade/Reverse_Jade/Big_Lizard/Reverse_Big/Put_Ration/Call_Ratio spreads (The Final Phase) ===
     # Duration: 200k steps each
-    int(19e6): 'OPEN_JADE_LIZARD',
-    int(19.2e6): 'OPEN_REVERSE_JADE_LIZARD',
-    int(19.4e6): 'OPEN_BIG_LIZARD',
-    int(19.6e6): 'OPEN_REVERSE_BIG_LIZARD',
-    int(19.8e6): 'OPEN_PUT_RATIO_SPREAD',
-    int(19.8e6): 'OPEN_CALL_RATIO_SPREAD',
+    int(11e6): 'OPEN_JADE_LIZARD',
+    int(11.2e6): 'OPEN_REVERSE_JADE_LIZARD',
+    int(11.4e6): 'OPEN_BIG_LIZARD',
+    int(11.6e6): 'OPEN_REVERSE_BIG_LIZARD',
+    int(11.8e6): 'OPEN_PUT_RATIO_SPREAD',
+    int(11.8e6): 'OPEN_CALL_RATIO_SPREAD',
 
     # === Final Phase: Integration and Agent Autonomy ===
     # Allow the agent to use any of its learned strategies to maximize reward.
-    int(20e6): 'ALL'
+    int(12e6): 'ALL'
 }
 
 TRAINING_CURRICULUM = {
@@ -176,48 +167,46 @@ TRAINING_CURRICULUM = {
     int(4e6): 'OPEN_BULL_CALL_SPREAD',
 
     # === Phase 4: Specialize in Risk-Defined Volatility (Selling) ===
-    # Duration: 1M steps (10e6 - 9e6)
-    int(9e6): 'OPEN_SHORT_CALL_FLY',
     # Duration: 1M steps (9e6 - 8e6)
-    int(10e6): 'OPEN_SHORT_PUT_CONDOR',
+    int(5e6): 'OPEN_SHORT_PUT_CONDOR',
     # Duration: 1M steps (8e6 - 7e6)
-    int(11e6): 'OPEN_SHORT_CALL_CONDOR',
+    int(6e6): 'OPEN_SHORT_CALL_CONDOR',
     # Duration: 1M steps (7e6 - 6e6)
-    int(12e6): 'OPEN_SHORT_IRON_CONDOR',
+    int(7e6): 'OPEN_SHORT_IRON_CONDOR',
 
     # Duration: 1M steps (4e6 - 3e6)
-    int(15e6): 'OPEN_SHORT_STRANGLE_DELTA_15',
+    int(8e6): 'OPEN_SHORT_STRANGLE_DELTA_15',
     # Duration: 1M steps (3e6 - 2e6)
-    int(16e6): 'OPEN_SHORT_STRADDLE',
+    int(9e6): 'OPEN_SHORT_STRADDLE',
 
     # === Phase 6: Refine Foundational Naked Call Skills ===
     # All of these now point to the single 'OPEN_SHORT_CALL_ATM' action.
-    int(17e6): 'OPEN_SHORT_CALL_ATM',
-    int(17.2e6): 'OPEN_SHORT_CALL_ATM',
-    int(17.4e6): 'OPEN_SHORT_CALL_ATM',
-    int(17.6e6): 'OPEN_SHORT_CALL_ATM',
-    int(17.8e6): 'OPEN_SHORT_CALL_ATM',
+    int(10e6): 'OPEN_SHORT_CALL_ATM',
+    int(10.2e6): 'OPEN_SHORT_CALL_ATM',
+    int(10.4e6): 'OPEN_SHORT_CALL_ATM',
+    int(10.6e6): 'OPEN_SHORT_CALL_ATM',
+    int(10.8e6): 'OPEN_SHORT_CALL_ATM',
 
     # === Phase 7: Refine Foundational Naked Put Skills ===
     # All of these now point to the single 'OPEN_SHORT_PUT_ATM' action.
-    int(18e6): 'OPEN_SHORT_PUT_ATM',
-    int(18.2e6): 'OPEN_SHORT_PUT_ATM',
-    int(18.4e6): 'OPEN_SHORT_PUT_ATM',
-    int(18.6e6): 'OPEN_SHORT_PUT_ATM',
-    int(18.8e6): 'OPEN_SHORT_PUT_ATM',
+    int(11e6): 'OPEN_SHORT_PUT_ATM',
+    int(11.2e6): 'OPEN_SHORT_PUT_ATM',
+    int(11.4e6): 'OPEN_SHORT_PUT_ATM',
+    int(11.6e6): 'OPEN_SHORT_PUT_ATM',
+    int(11.8e6): 'OPEN_SHORT_PUT_ATM',
 
     # === Phase 8: Train the Jade/Reverse_Jade/Big_Lizard/Reverse_Big/Put_Ration/Call_Ratio spreads (The Final Phase) ===
     # Duration: 200k steps each
-    int(19e6): 'OPEN_JADE_LIZARD',
-    int(19.2e6): 'OPEN_REVERSE_JADE_LIZARD',
-    int(19.4e6): 'OPEN_BIG_LIZARD',
-    int(19.6e6): 'OPEN_REVERSE_BIG_LIZARD',
-    int(19.8e6): 'OPEN_PUT_RATIO_SPREAD',
-    int(19.8e6): 'OPEN_CALL_RATIO_SPREAD',
+    int(12e6): 'OPEN_JADE_LIZARD',
+    int(12.2e6): 'OPEN_REVERSE_JADE_LIZARD',
+    int(12.4e6): 'OPEN_BIG_LIZARD',
+    int(12.6e6): 'OPEN_REVERSE_BIG_LIZARD',
+    int(12.8e6): 'OPEN_PUT_RATIO_SPREAD',
+    int(12.8e6): 'OPEN_CALL_RATIO_SPREAD',
 
     # === Final Phase: Integration and Agent Autonomy ===
     # Allow the agent to use any of its learned strategies to maximize reward.
-    int(20e6): 'ALL'
+    int(13e6): 'ALL'
 }
 
 # This class will "hide" the integer-keyed dictionary from EasyDict.
@@ -262,11 +251,14 @@ for direction in ['LONG', 'SHORT']:
     for opt_type in ['CALL', 'PUT']:
         strategy_name_to_id[f'{direction}_{opt_type}'] = next_id; next_id += 1
 
-for direction in ['LONG', 'SHORT']:
-    for opt_type in ['CALL', 'PUT']:
-        action_name = f'OPEN_{direction}_{opt_type}_ATM'
-        internal_name = f'{direction}_{opt_type}'
-        strategy_name_to_id[action_name] = strategy_name_to_id[internal_name]
+# Modify the loop to only map the OPEN names for SHORT naked legs.
+# for direction in ['LONG', 'SHORT']:
+#     for opt_type in ['CALL', 'PUT']:
+for opt_type in ['CALL', 'PUT']: # Only loop through option types
+    direction = 'SHORT' # Hardcode the direction
+    action_name = f'OPEN_{direction}_{opt_type}_ATM'
+    internal_name = f'{direction}_{opt_type}'
+    strategy_name_to_id[action_name] = strategy_name_to_id[internal_name]
 
 # --- 2. Core Volatility Strategies ---
 internal_name = 'SHORT_STRADDLE' # Only create SHORT
@@ -295,12 +287,6 @@ for opt_type in ['CALL', 'PUT']:
 # --- 4. Strategies with Variations (Strangles, Butterflies) ---
 for delta in [15, 20, 25, 30]:
     internal_name = f'SHORT_STRANGLE_DELTA_{delta}' # Only create SHORT
-    strategy_name_to_id[internal_name] = next_id; next_id += 1
-    strategy_name_to_id[f'OPEN_{internal_name}'] = strategy_name_to_id[internal_name]
-
-# There is now only one action per butterfly type.
-for opt_type in ['CALL', 'PUT']:
-    internal_name = f'SHORT_{opt_type}_FLY' # Only create SHORT
     strategy_name_to_id[internal_name] = next_id; next_id += 1
     strategy_name_to_id[f'OPEN_{internal_name}'] = strategy_name_to_id[internal_name]
 

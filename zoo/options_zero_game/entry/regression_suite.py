@@ -765,66 +765,6 @@ def test_hedge_short_call():
     finally:
         env.close()
 
-def test_hedge_long_put():
-    """Tests hedging a naked LONG PUT into a Bear Put Spread."""
-    test_name = "test_hedge_long_put"
-    print(f"\n--- RUNNING: {test_name} ---")
-    env = create_isolated_test_env('OPEN_LONG_PUT_ATM')
-    try:
-        env.reset(seed=44)
-        env.step(env.actions_to_indices['HOLD'])
-        assert len(env.portfolio_manager.get_portfolio()) == 1, "Setup failed"
-        
-        env.step(env.actions_to_indices['HEDGE_NAKED_POS_0'])
-        
-        portfolio_after = env.portfolio_manager.get_portfolio()
-        stats = env.portfolio_manager.get_raw_portfolio_stats(env.price_manager.current_price, env.iv_bin_index)
-        assert len(portfolio_after) == 2, "Hedge failed: Did not create 2 legs."
-        
-        # <<< THE FIX: A LONG PUT hedged with a SHORT PUT is a BEAR Put Spread >>>
-        assert portfolio_after.iloc[0]['strategy_id'] == env.strategy_name_to_id['BEAR_PUT_SPREAD'], "Incorrect strategy ID."
-        
-        assert stats['max_profit'] < 500000, "Hedge failed: Profit is still undefined."
-        
-        print(f"--- PASSED: {test_name} ---")
-        return True
-    except Exception:
-        traceback.print_exc()
-        print(f"--- FAILED: {test_name} ---")
-        return False
-    finally:
-        env.close()    
-
-def test_hedge_long_call():
-    """Tests hedging a naked LONG CALL into a Bull Call Spread."""
-    test_name = "test_hedge_long_call"
-    print(f"\n--- RUNNING: {test_name} ---")
-    env = create_isolated_test_env('OPEN_LONG_CALL_ATM')
-    try:
-        env.reset(seed=45)
-        env.step(env.actions_to_indices['HOLD'])
-        assert len(env.portfolio_manager.get_portfolio()) == 1, "Setup failed"
-
-        env.step(env.actions_to_indices['HEDGE_NAKED_POS_0'])
-
-        portfolio_after = env.portfolio_manager.get_portfolio()
-        stats = env.portfolio_manager.get_raw_portfolio_stats(env.price_manager.current_price, env.iv_bin_index)
-        assert len(portfolio_after) == 2, "Hedge failed: Did not create 2 legs."
-
-        # <<< THE FIX: A LONG CALL hedged with a SHORT CALL is a BULL Call Spread >>>
-        assert portfolio_after.iloc[0]['strategy_id'] == env.strategy_name_to_id['BULL_CALL_SPREAD'], "Incorrect strategy ID."
-
-        assert stats['max_profit'] < 500000, "Hedge failed: Profit is still undefined."
-
-        print(f"--- PASSED: {test_name} ---")
-        return True
-    except Exception:
-        traceback.print_exc()
-        print(f"--- FAILED: {test_name} ---")
-        return False
-    finally:
-        env.close()
-
 def test_convert_straddle_to_fly():
     """Tests if CONVERT_TO_IRON_FLY correctly adds wings to a straddle."""
     test_name = "test_convert_straddle_to_fly"
@@ -851,58 +791,6 @@ def test_convert_straddle_to_fly():
         assert portfolio_after.iloc[0]['strategy_id'] == env.strategy_name_to_id['SHORT_IRON_FLY'], "Incorrect strategy ID."
         assert stats['max_loss'] > -500000, f"Conversion failed: Risk is still undefined. {stats['max_loss']}"
 
-        print(f"--- PASSED: {test_name} ---")
-        return True
-    except Exception:
-        traceback.print_exc()
-        print(f"--- FAILED: {test_name} ---")
-        return False
-    finally:
-        env.close()
-
-def test_convert_call_fly_to_vertical():
-    """Tests decomposing a Call Fly into a Bull Call Spread."""
-    test_name = "test_convert_call_fly_to_vertical"
-    print(f"\n--- RUNNING: {test_name} ---")
-    env = create_isolated_test_env('OPEN_SHORT_CALL_FLY')
-    try:
-        env.reset(seed=47)
-        env.step(env.actions_to_indices['HOLD'])
-        assert len(env.portfolio_manager.get_portfolio()) == 4, "Setup failed"
-        
-        env.step(env.actions_to_indices['CONVERT_TO_BULL_CALL_SPREAD'])
-        
-        portfolio_after = env.portfolio_manager.get_portfolio()
-        assert len(portfolio_after) == 2, "Decomposition failed: Expected 2 legs."
-        assert all(portfolio_after['type'] == 'call'), "Decomposition failed: Legs are not all calls."
-        assert portfolio_after.iloc[0]['strategy_id'] == env.strategy_name_to_id['BULL_CALL_SPREAD'], "Incorrect strategy ID."
-
-        print(f"--- PASSED: {test_name} ---")
-        return True
-    except Exception:
-        traceback.print_exc()
-        print(f"--- FAILED: {test_name} ---")
-        return False
-    finally:
-        env.close()
-
-def test_convert_put_fly_to_vertical():
-    """Tests decomposing a Put Fly into a Bear Put Spread."""
-    test_name = "test_convert_put_fly_to_vertical"
-    print(f"\n--- RUNNING: {test_name} ---")
-    env = create_isolated_test_env('OPEN_SHORT_PUT_FLY')
-    try:
-        env.reset(seed=48)
-        env.step(env.actions_to_indices['HOLD'])
-        assert len(env.portfolio_manager.get_portfolio()) == 4, "Setup failed"
-        
-        env.step(env.actions_to_indices['CONVERT_TO_BEAR_PUT_SPREAD'])
-        
-        portfolio_after = env.portfolio_manager.get_portfolio()
-        assert len(portfolio_after) == 2, "Decomposition failed: Expected 2 legs."
-        assert all(portfolio_after['type'] == 'put'), "Decomposition failed: Legs are not all puts."
-        assert portfolio_after.iloc[0]['strategy_id'] == env.strategy_name_to_id['BEAR_PUT_SPREAD'], "Incorrect strategy ID."
-        
         print(f"--- PASSED: {test_name} ---")
         return True
     except Exception:
@@ -1457,11 +1345,7 @@ if __name__ == "__main__":
         test_convert_condor_to_vertical,
         test_shift_preserves_strategy,
         test_hedge_short_call,
-        test_hedge_long_put,
-        test_hedge_long_call,
         test_convert_straddle_to_fly,
-        test_convert_call_fly_to_vertical,
-        test_convert_put_fly_to_vertical,
         test_hedge_strangle_leg,
         test_hedge_straddle_leg,
         test_no_new_trades_when_active,

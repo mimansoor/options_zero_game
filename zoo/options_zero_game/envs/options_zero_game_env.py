@@ -1164,9 +1164,9 @@ class OptionsZeroGameEnv(gym.Env):
     def _build_action_space(self) -> Dict[str, int]:
         actions = {'HOLD': 0}; i = 1
 
+        # Modify the loop to ONLY create SHORT naked ATM options.
         for t in ['CALL', 'PUT']:
-            for d in ['LONG', 'SHORT']:
-                actions[f'OPEN_{d}_{t}_ATM'] = i; i+=1
+            actions[f'OPEN_SHORT_{t}_ATM'] = i; i+=1 # Only create SHORT
 
         actions['OPEN_BULL_CALL_SPREAD'] = i; i+=1
         actions['OPEN_BEAR_CALL_SPREAD'] = i; i+=1
@@ -1201,10 +1201,6 @@ class OptionsZeroGameEnv(gym.Env):
         actions['OPEN_SHORT_IRON_CONDOR'] = i; i+=1
         for t in ['CALL', 'PUT']:
             actions[f'OPEN_SHORT_{t}_CONDOR'] = i; i+=1
-
-        # The loop for 'w' (width) is removed entirely.
-        for t in ['CALL', 'PUT']:
-            actions[f'OPEN_SHORT_{t}_FLY'] = i; i+=1 # Only create the short version
 
         for j in range(self._cfg.max_positions):
             actions[f'CLOSE_POSITION_{j}'] = i; i+=1
