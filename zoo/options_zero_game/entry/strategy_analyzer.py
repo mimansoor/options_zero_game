@@ -196,19 +196,24 @@ def calculate_trader_score(strategy_data):
 def calculate_elo_ratings(all_pnl_by_strategy: dict, existing_ratings: dict, k_factor=32, initial_rating=1200):
     """
     Calculates Elo ratings for all strategies by simulating a round-robin tournament.
-    This version uses existing ratings as a starting point, creating a persistent league.
+    This version is robust to strategies having different numbers of completed episodes.
     """
     strategies = list(all_pnl_by_strategy.keys())
     if not strategies: return {}
 
     # --- 1. Initialize ratings for all strategies ---
-    # Use the existing rating if available, otherwise assign the default initial rating.
-    # This gracefully handles the addition of new strategies to the environment.
-    elo_ratings = {}
-    for strategy in strategies:
-        elo_ratings[strategy] = existing_ratings.get(strategy, initial_rating)
+    elo_ratings = {strategy: existing_ratings.get(strategy, initial_rating) for strategy in strategies}
 
-    num_episodes = len(list(all_pnl_by_strategy.values())[0])
+    # The robust solution is to find the MINIMUM number of completed episodes
+    # across all strategies and run the tournament for that many rounds.
+    try:
+        pnl_lengths = [len(pnl_list) for pnl_list in all_pnl_by_strategy.values() if pnl_list]
+        if not pnl_lengths: # Failsafe for empty data
+            return elo_ratings
+        num_episodes = min(pnl_lengths)
+    except Exception: # Catch any other potential errors
+        print("Warning: Could not determine a valid number of episodes for Elo tournament. Aborting Elo calculation.")
+        return elo_ratings
 
     print(f"\n--- Starting Elo Tournament Simulation ({num_episodes} rounds) ---")
 
@@ -232,7 +237,6 @@ def calculate_elo_ratings(all_pnl_by_strategy: dict, existing_ratings: dict, k_f
 
     return {k: round(v) for k, v in elo_ratings.items()}
 
-# <<< --- NEW: The PnL-Weighted Elo Calculation Function --- >>>
 def calculate_pnl_weighted_elo(all_pnl_by_strategy: dict, existing_ratings: dict, k_factor=32, initial_rating=1200, pnl_weight=0.5, base_pnl_unit=10000.0):
     """
     Calculates Elo ratings where the points exchanged are weighted by the
