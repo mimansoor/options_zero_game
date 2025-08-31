@@ -548,18 +548,30 @@ class PortfolioManager:
         final_net_premium = current_net_premium * self.lot_size
         legs_from_portfolio = self.portfolio.to_dict(orient='records')
         pnl_profile  = self._calculate_universal_risk_profile(legs_from_portfolio, self.realized_pnl)
+        # <<< --- THE DEFINITIVE, FINAL FIX IS HERE --- >>>
+        # We now explicitly check each potentially problematic value and provide a safe,
+        # JSON-compliant default if it is NaN or otherwise invalid. This is the
+        # final, unbreakable safety net before the data is logged.
+
+        max_profit_val = summary.get('max_profit')
+        max_loss_val = summary.get('max_loss')
+        profit_factor_val = pnl_profile.get('profit_factor')
+        breakevens_val = pnl_profile.get('breakevens')
 
         stats = {
             'delta': total_delta,
             'gamma': total_gamma,
             'theta': total_theta,
             'vega': total_vega,
-            'max_profit': summary['max_profit'],
-            'max_loss': summary['max_loss'],
-            'rr_ratio': summary['rr_ratio'],
-            'prob_profit': summary['prob_profit'],
-            'breakevens': pnl_profile['breakevens'],
-            'profit_factor': pnl_profile['profit_factor'],
+            
+            # --- Sanitized Values ---
+            'max_profit': max_profit_val if np.isfinite(max_profit_val) else 0.0,
+            'max_loss': max_loss_val if np.isfinite(max_loss_val) else 0.0,
+            'rr_ratio': summary.get('rr_ratio', 0.0), # rr_ratio is already sanitized in its own function
+            'prob_profit': summary.get('prob_profit', 0.0),
+            'breakevens': breakevens_val if isinstance(breakevens_val, list) else [], # Ensure it's a list
+            'profit_factor': profit_factor_val if np.isfinite(profit_factor_val) else 0.0,
+            
             'highest_realized_profit': self.highest_realized_profit,
             'lowest_realized_loss': self.lowest_realized_loss,
             'mtm_pnl_high': self.mtm_pnl_high,
@@ -567,6 +579,7 @@ class PortfolioManager:
             'net_premium': final_net_premium,
         }
 
+        # The final sanitizer provides one last layer of protection.
         return self._sanitize_dict(stats)
 
     def get_portfolio(self) -> pd.DataFrame:
