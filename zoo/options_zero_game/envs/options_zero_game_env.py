@@ -947,56 +947,46 @@ class OptionsZeroGameEnv(gym.Env):
 
     def _handle_action(self, action: int) -> Tuple[int, bool]:
         """
-        The definitive, correct action handler. It correctly prioritizes all rules
-        and ensures the action mask is always respected, with intelligent overrides
-        for all game states.
+        The definitive, correct action handler. It correctly prioritizes all rules.
         """
-
-        # PRIORITY 1: A forced opening strategy for testing.
+        # --- PRIORITY 1: A forced opening strategy for testing. ---
         forced_strategy = self.forced_opening_strategy_name
         if self.current_step == 0 and forced_strategy:
-            # The name is what matters. We just need to return ANY valid OPEN action
-            # to signal that an opening should occur. The name will override the choice.
             return self.actions_to_indices['OPEN_BULLISH_POSITION'], False
 
-        # If it's not a forced-open scenario, proceed with normal validation.
+        # --- PRIORITY 2: Normal action validation ---
         true_action_mask = self._get_true_action_mask()
         is_illegal = true_action_mask[action] == 0
 
-        # --- PRIORITY 2: Handle a legal action first ---
         if not is_illegal:
             return action, False
 
         # --- If we reach here, the agent's action was ILLEGAL. We must decide the override. ---
         self.illegal_action_count += 1
 
-        # This logic now correctly forces the high-level intent from the updated curriculum.
+        # --- PRIORITY 3: Training Curriculum Override ---
         if self.is_training_mode and self.forced_opening_strategy_name and self.forced_opening_strategy_name != 'ALL':
-            # Look up the high-level intent (e.g., 'OPEN_BULLISH_POSITION')
-            # in the agent's action space. This will now succeed.
             return self.actions_to_indices[self.forced_opening_strategy_name], True
 
-        # Override Rule 2: Liquidation Period
+        # --- PRIORITY 4: Handle illegal actions on an EMPTY portfolio ---
+        if self.portfolio_manager.portfolio.empty:
+            # If the portfolio is empty, doing a 'HOLD' is a wasted step.
+            # Instead, force the agent to explore by picking a random legal OPEN action.
+            legal_open_indices = [
+                idx for idx, is_legal in enumerate(true_action_mask) 
+                if is_legal and self.indices_to_actions[idx].startswith('OPEN_')
+            ]
+            if legal_open_indices:
+                # This ensures the agent is always put "in the game".
+                return self.np_random.choice(legal_open_indices), True
+
+        # --- PRIORITY 5: Liquidation Period Override ---
         is_liquidation_period = self.current_day_index >= (self.episode_time_to_expiry - self._cfg.days_before_liquidation)
         if is_liquidation_period and not self.portfolio_manager.portfolio.empty:
-            # Let us HOLD if POP > 90% and PF > 1.0
-            # We need to get the current POP and Profit Factor
-            summary = self.portfolio_manager.get_portfolio_summary(
-                self.price_manager.current_price, self.iv_bin_index
-            )
             if not (summary['prob_profit'] > 0.9 and summary.get('profit_factor', 0) > 1.0):
                 return self.actions_to_indices['CLOSE_ALL'], True
 
-        # Override Rule 3: Step 0 (Training or Evaluation)
-        # If the agent attempts an illegal move on step 0, it MUST open a position.
-        if self.current_step == 0:
-            legal_open_indices = [idx for idx, is_legal in enumerate(true_action_mask) if is_legal]
-            if not legal_open_indices: # Failsafe
-                raise RuntimeError("No legal opening moves available on Step 0. Check action mask logic.")
-            # We override the illegal action with a random valid opening.
-            return self.np_random.choice(legal_open_indices), True
-
-        # Override Rule 4: Default fallback for all other mid-episode illegal moves
+        # --- PRIORITY 6: Default fallback for all other illegal moves (active portfolio) ---
         return self.actions_to_indices['HOLD'], True
 
     def _get_observation(self) -> np.ndarray:
