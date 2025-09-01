@@ -214,7 +214,6 @@ class PriceActionManager:
             # This can happen on the final step. We should just use the last available price.
             path_index = len(self.price_path) - 1
         self.current_price = self.price_path[path_index]
-        print(f"DEBUG: current_price: {self.current_price}")
         
         if not self.experts: return
 
