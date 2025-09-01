@@ -106,6 +106,8 @@ class OptionsZeroGameEnv(gym.Env):
         hedge_roll_search_width=20, # ATM +/- 20 strikes seems like a reasonable default
 
         strategy_name_to_id={}, # Can be left empty, as it's populated from the main config
+
+        delta_penalty_weight=0.05,  # How severe the penalty is
     )
 
     @classmethod
@@ -1122,11 +1124,21 @@ class OptionsZeroGameEnv(gym.Env):
         current_pnl = equity_after - self._cfg.initial_cash
         if self.capital_preservation_bonus_pct > 0 and current_pnl > 0:
             capital_preservation_bonus = current_pnl * self.capital_preservation_bonus_pct
+
+        # --- 5. Calculate the Delta Neutrality Penalty ---
+        delta_penalty = 0.0
+        # Get the current, un-normalized greeks
+        greeks = self.portfolio_manager.get_portfolio_greeks(self.price_manager.current_price, self.iv_bin_index)
+        delta_norm = abs(greeks['delta_norm'])
+
+        # If delta is outside our desired neutral zone, apply a penalty
+        if delta_norm > self.delta_neutral_threshold:
+            # The penalty scales with how far out of balance the delta is
+            delta_penalty = (delta_norm - self.delta_neutral_threshold) * self._cfg.delta_penalty_weight
+
+        # --- 6. Combine ALL Components into the Final Reward ---
+        risk_adjusted_reward = raw_reward - drawdown_penalty + capital_preservation_bonus - opportunity_cost_penalty - delta_penalty
             
-        # --- 5. Combine Components into the Final Reward ---
-        # The agent's reward is now its P&L, adjusted for risk, and "taxed" by the risk-free rate.
-        risk_adjusted_reward = raw_reward - drawdown_penalty + capital_preservation_bonus - opportunity_cost_penalty
-        
         # --- 6. Scale and Squash the Reward ---
         scaled_reward = risk_adjusted_reward / self.pnl_scaling_factor
         if not math.isfinite(scaled_reward):
