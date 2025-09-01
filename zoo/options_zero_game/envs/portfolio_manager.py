@@ -113,7 +113,8 @@ class PortfolioManager:
     def __init__(self, cfg: Dict, bs_manager: BlackScholesManager, 
                  market_rules_manager: MarketRulesManager, 
                  iv_calculator_func: Callable,
-                 strategy_name_to_id: Dict):
+                 strategy_name_to_id: Dict,
+                 np_random: any):
         # Config
         self.cfg = cfg
         self.initial_cash = cfg['initial_cash']
@@ -132,6 +133,7 @@ class PortfolioManager:
         self.steps_per_day = cfg.get('steps_per_day', 1)
         self.butterfly_target_cost_pct = cfg.get('butterfly_target_cost_pct', 0.01)
         self.hedge_roll_search_width = cfg.get('hedge_roll_search_width', 10)
+        self.np_random = np_random
 
         # 1. Pre-calculate the 5-day opportunity cost of the initial capital.
         # This becomes our minimum profit hurdle for any new trade.
@@ -653,7 +655,7 @@ class PortfolioManager:
 
         # The resolver's core logic: pick a random valid strategy that matches the intent.
         # This can be made more sophisticated with more rules in the future.
-        selected_action = random.choice(candidate_actions)
+        selected_action = self.np_random.choice(candidate_actions)
         
         # Call the original open_strategy method to execute the chosen trade.
         was_opened = self.open_strategy(selected_action, current_price, iv_bin_index, current_step, days_to_expiry)

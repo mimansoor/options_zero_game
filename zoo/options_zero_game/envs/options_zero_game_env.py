@@ -392,7 +392,8 @@ class OptionsZeroGameEnv(gym.Env):
         # First, ensure the PortfolioManager is initialized, as it's needed for all paths.
         self.portfolio_manager = PortfolioManager(
             cfg=self._cfg, bs_manager=self.bs_manager, market_rules_manager=self.market_rules_manager,
-            iv_calculator_func=self._get_dynamic_iv, strategy_name_to_id=self.strategy_name_to_id
+            iv_calculator_func=self._get_dynamic_iv, strategy_name_to_id=self.strategy_name_to_id,
+            np_random=self.np_random
         )
         
         self.fixed_profit_target_pnl = 0.0
@@ -969,9 +970,10 @@ class OptionsZeroGameEnv(gym.Env):
         # --- If we reach here, the agent's action was ILLEGAL. We must decide the override. ---
         self.illegal_action_count += 1
 
-        # The curriculum takes highest priority during training.
-        if self.is_training_mode and self.forced_opening_strategy_name:
-            # This logic is for the training curriculum, not the regression test override.
+        # This logic now correctly forces the high-level intent from the updated curriculum.
+        if self.is_training_mode and self.forced_opening_strategy_name and self.forced_opening_strategy_name != 'ALL':
+            # Look up the high-level intent (e.g., 'OPEN_BULLISH_POSITION')
+            # in the agent's action space. This will now succeed.
             return self.actions_to_indices[self.forced_opening_strategy_name], True
 
         # Override Rule 2: Liquidation Period

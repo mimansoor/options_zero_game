@@ -108,88 +108,20 @@ UNIFIED_REGIMES = [
 # ==============================================================
 # A structured training plan that teaches the agent concepts in phases.
 # Each phase focuses on a core strategy for 2 million steps before moving to the next.
-
 TRAINING_CURRICULUM = {
-    #Master all Strategies that strategy Analyzer says you are weak.
-    0: 'OPEN_BEAR_CALL_SPREAD',
+    # Phase 1: Learn how to be Bullish (4M steps)
+    0: 'OPEN_BULLISH_POSITION',
 
-    int(1e6): 'OPEN_SHORT_STRADDLE',
+    # Phase 2: Learn how to be Bearish (4M steps)
+    int(4e6): 'OPEN_BEARISH_POSITION',
 
-    int(2e6): 'OPEN_REVERSE_JADE_LIZARD',
-    int(3e6): 'OPEN_REVERSE_BIG_LIZARD', # Introduce delta-based strangles early
+    # Phase 3: Learn how to be Neutral / Sell Volatility (4M steps)
+    int(8e6): 'OPEN_NEUTRAL_POSITION',
 
-    int(4e6): 'OPEN_PUT_RATIO_SPREAD',
-
-    int(7e6): 'OPEN_SHORT_STRANGLE_DELTA_25',
-    int(8e6): 'OPEN_SHORT_PUT_ATM',
-    
-    int(9e6): 'OPEN_SHORT_STRANGLE_DELTA_30',
-
-    # Duration: 200k steps each
-    int(11e6): 'OPEN_BIG_LIZARD',
-    int(11.2e6): 'OPEN_JADE_LIZARD',
-    int(11.4e6): 'OPEN_BULL_PUT_SPREAD',
-    int(11.6e6): 'OPEN_SHORT_IRON_FLY',
-    int(11.8e6): 'OPEN_BEAR_PUT_SPREAD',
-
-    # === Final Phase: Integration and Agent Autonomy ===
-    # Allow the agent to use any of its learned strategies to maximize reward.
+    # Final Phase: Full Autonomy - Agent can choose any intent.
     int(12e6): 'ALL'
 }
 
-TRAINING_CURRICULUM1 = {
-    # === Phase 1: Start with Full Autonomy ===
-    # Goal: Force the agent to learn a general, high-level policy by exposing
-    # it to the entire action space from the beginning.
-    0: 'ALL',
-
-    # === Phase 2: Specialize in Spreads (Credit & Debit) ===
-    # Duration of this phase is 1M steps (18e6 - 17e6 from original)
-    int(1e6): 'OPEN_BEAR_CALL_SPREAD',
-    # Duration: 1M steps (17e6 - 16e6)
-    int(2e6): 'OPEN_BULL_PUT_SPREAD',
-    # Duration: 1M steps (16e6 - 15e6)
-    int(3e6): 'OPEN_BEAR_PUT_SPREAD',
-    # Duration: 1M steps (15e6 - 14e6)
-    int(4e6): 'OPEN_BULL_CALL_SPREAD',
-
-    # === Phase 4: Specialize in Risk-Defined Volatility (Selling) ===
-    int(7e6): 'OPEN_SHORT_IRON_CONDOR',
-
-    # Duration: 1M steps (4e6 - 3e6)
-    int(8e6): 'OPEN_SHORT_STRANGLE_DELTA_25',
-    # Duration: 1M steps (3e6 - 2e6)
-    int(9e6): 'OPEN_SHORT_STRADDLE',
-
-    # === Phase 6: Refine Foundational Naked Call Skills ===
-    # All of these now point to the single 'OPEN_SHORT_CALL_ATM' action.
-    int(10e6): 'OPEN_SHORT_CALL_ATM',
-    int(10.2e6): 'OPEN_SHORT_CALL_ATM',
-    int(10.4e6): 'OPEN_SHORT_CALL_ATM',
-    int(10.6e6): 'OPEN_SHORT_CALL_ATM',
-    int(10.8e6): 'OPEN_SHORT_CALL_ATM',
-
-    # === Phase 7: Refine Foundational Naked Put Skills ===
-    # All of these now point to the single 'OPEN_SHORT_PUT_ATM' action.
-    int(11e6): 'OPEN_SHORT_PUT_ATM',
-    int(11.2e6): 'OPEN_SHORT_PUT_ATM',
-    int(11.4e6): 'OPEN_SHORT_PUT_ATM',
-    int(11.6e6): 'OPEN_SHORT_PUT_ATM',
-    int(11.8e6): 'OPEN_SHORT_PUT_ATM',
-
-    # === Phase 8: Train the Jade/Reverse_Jade/Big_Lizard/Reverse_Big/Put_Ration/Call_Ratio spreads (The Final Phase) ===
-    # Duration: 200k steps each
-    int(12e6): 'OPEN_JADE_LIZARD',
-    int(12.2e6): 'OPEN_REVERSE_JADE_LIZARD',
-    int(12.4e6): 'OPEN_BIG_LIZARD',
-    int(12.6e6): 'OPEN_REVERSE_BIG_LIZARD',
-    int(12.8e6): 'OPEN_PUT_RATIO_SPREAD',
-    int(12.8e6): 'OPEN_CALL_RATIO_SPREAD',
-
-    # === Final Phase: Integration and Agent Autonomy ===
-    # Allow the agent to use any of its learned strategies to maximize reward.
-    int(13e6): 'ALL'
-}
 
 # This class will "hide" the integer-keyed dictionary from EasyDict.
 class CurriculumHolder:
