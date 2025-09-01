@@ -639,10 +639,32 @@ class PortfolioManager:
 
         # --- High-Level Intent Resolution Logic ---
         candidate_actions = []
-        if intent_or_specific_action == 'OPEN_BULLISH_POSITION':
-            candidate_actions = ['OPEN_BULL_PUT_SPREAD', 'OPEN_SHORT_PUT_ATM', 'OPEN_BULL_CALL_SPREAD']
-        elif intent_or_specific_action == 'OPEN_BEARISH_POSITION':
-            candidate_actions = ['OPEN_BEAR_CALL_SPREAD', 'OPEN_SHORT_CALL_ATM', 'OPEN_BEAR_PUT_SPREAD']
+        if intent_action_name == 'OPEN_BULLISH_POSITION':
+            # <<< --- THE DEFINITIVE FIX (Part 1): Add the new bullish strategies --- >>>
+            candidate_actions = [
+                # Standard Strategies
+                'OPEN_BULL_PUT_SPREAD',
+                'OPEN_SHORT_PUT_ATM',
+                'OPEN_BULL_CALL_SPREAD',
+                # Advanced Strategies
+                'OPEN_BIG_LIZARD',
+                'OPEN_JADE_LIZARD',
+                'OPEN_PUT_RATIO_SPREAD',
+            ]
+        
+        elif intent_action_name == 'OPEN_BEARISH_POSITION':
+            # <<< --- THE DEFINITIVE FIX (Part 2): Add the new bearish strategies --- >>>
+            candidate_actions = [
+                # Standard Strategies
+                'OPEN_BEAR_CALL_SPREAD',
+                'OPEN_SHORT_CALL_ATM',
+                'OPEN_BEAR_PUT_SPREAD',
+                # Advanced Strategies
+                'OPEN_REVERSE_BIG_LIZARD',
+                'OPEN_REVERSE_JADE_LIZARD',
+                'OPEN_CALL_RATIO_SPREAD',
+            ]
+
         elif intent_or_specific_action == 'OPEN_NEUTRAL_POSITION':
             # In a high IV environment, credit strategies are preferred.
             if "High" in volatility_bias:

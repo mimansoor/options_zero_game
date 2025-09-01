@@ -20,10 +20,7 @@ def get_valid_strategies() -> list:
     that can be individually analyzed. This is now decoupled from the agent's
     high-level action space.
     """
-    # <<< --- THE DEFINITIVE FIX IS HERE --- >>>
-    # This list is now the single source of truth for the strategy analyzer.
-    # It must contain all the specific strategies that the PortfolioManager's
-    # resolver knows how to open.
+    # This list is the single source of truth for the strategy analyzer.
     return [
         # Bullish Strategies
         'OPEN_BULL_PUT_SPREAD',
@@ -38,7 +35,9 @@ def get_valid_strategies() -> list:
         'OPEN_SHORT_STRANGLE_DELTA_25',
         'OPEN_SHORT_STRANGLE_DELTA_30',
         'OPEN_SHORT_IRON_CONDOR',
-        # Advanced Strategies (if they are in the resolver)
+
+        # <<< --- THE DEFINITIVE FIX (Part 3): Add the new strategies to the list --- >>>
+        # Advanced Strategies
         'OPEN_JADE_LIZARD',
         'OPEN_REVERSE_JADE_LIZARD',
         'OPEN_BIG_LIZARD',
