@@ -124,7 +124,6 @@ TRAINING_CURRICULUM = {
     int(8e6): 'OPEN_SHORT_PUT_ATM',
     
     int(9e6): 'OPEN_SHORT_STRANGLE_DELTA_30',
-    int(10e6): 'OPEN_SHORT_STRANGLE_DELTA_15',
 
     # Duration: 200k steps each
     int(11e6): 'OPEN_BIG_LIZARD',
@@ -132,7 +131,6 @@ TRAINING_CURRICULUM = {
     int(11.4e6): 'OPEN_BULL_PUT_SPREAD',
     int(11.6e6): 'OPEN_SHORT_IRON_FLY',
     int(11.8e6): 'OPEN_BEAR_PUT_SPREAD',
-    int(11.8e6): 'OPEN_SHORT_STRANGLE_DELTA_20',
 
     # === Final Phase: Integration and Agent Autonomy ===
     # Allow the agent to use any of its learned strategies to maximize reward.
@@ -159,7 +157,7 @@ TRAINING_CURRICULUM1 = {
     int(7e6): 'OPEN_SHORT_IRON_CONDOR',
 
     # Duration: 1M steps (4e6 - 3e6)
-    int(8e6): 'OPEN_SHORT_STRANGLE_DELTA_15',
+    int(8e6): 'OPEN_SHORT_STRANGLE_DELTA_25',
     # Duration: 1M steps (3e6 - 2e6)
     int(9e6): 'OPEN_SHORT_STRADDLE',
 
@@ -263,7 +261,7 @@ for direction in ['BULL', 'BEAR']:
         strategy_name_to_id[f'OPEN_{internal_name}'] = strategy_name_to_id[internal_name]
 
 # --- 4. Strategies with Variations (Strangles, Butterflies) ---
-for delta in [15, 20, 25, 30]:
+for delta in [25, 30]:
     internal_name = f'SHORT_STRANGLE_DELTA_{delta}' # Only create SHORT
     strategy_name_to_id[internal_name] = next_id; next_id += 1
     strategy_name_to_id[f'OPEN_{internal_name}'] = strategy_name_to_id[internal_name]

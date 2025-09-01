@@ -1202,7 +1202,7 @@ class OptionsZeroGameEnv(gym.Env):
         actions['OPEN_SHORT_STRADDLE'] = i; i+=1
 
         # Generate a range of delta-based strangle actions.
-        for delta in range(15, 31, 5): # This creates [15, 20, 25, 30]
+        for delta in [25, 30]: # ONLY create the desired Delta 25 and 30 variants
             actions[f'OPEN_SHORT_STRANGLE_DELTA_{delta}'] = i; i+=1
 
         actions['OPEN_SHORT_IRON_FLY'] = i; i+=1

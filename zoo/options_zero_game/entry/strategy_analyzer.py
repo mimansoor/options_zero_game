@@ -245,44 +245,49 @@ def calculate_pnl_weighted_elo(all_pnl_by_strategy: dict, existing_ratings: dict
     strategies = list(all_pnl_by_strategy.keys())
     if not strategies: return {}
 
-    # Initialize ratings, using existing ones as a baseline.
     elo_ratings = {strategy: existing_ratings.get(strategy, initial_rating) for strategy in strategies}
 
-    num_episodes = len(list(all_pnl_by_strategy.values())[0])
+    # <<< --- THE DEFINITIVE, ROBUST FIX IS HERE --- >>>
+    # This block ensures we only compare strategies over the number of episodes
+    # that ALL of them have successfully completed.
+    try:
+        pnl_lengths = [len(pnl_list) for pnl_list in all_pnl_by_strategy.values() if pnl_list]
+        if not pnl_lengths: return elo_ratings
+        num_episodes = min(pnl_lengths)
+    except Exception:
+        return elo_ratings
+
     if num_episodes == 0: return elo_ratings
 
     print(f"\n--- Starting PnL-Weighted Elo Calculation ---")
 
-    # This is a single round-robin tournament based on average performance.
     for i in tqdm(range(len(strategies)), desc="PnL Elo Matchups"):
         for j in range(i + 1, len(strategies)):
             player_a, player_b = strategies[i], strategies[j]
 
-            # 1. Calculate Average PNL Outperformance
-            pnl_a = all_pnl_by_strategy[player_a]
-            pnl_b = all_pnl_by_strategy[player_b]
-            pnl_diffs = [pnl_a[k] - pnl_b[k] for k in range(num_episodes)]
-            avg_outperformance = np.mean(pnl_diffs)
+            # 1. Get the PnL lists, truncated to the common number of episodes.
+            pnl_a = all_pnl_by_strategy[player_a][:num_episodes]
+            pnl_b = all_pnl_by_strategy[player_b][:num_episodes]
 
-            # 2. Determine Win/Loss/Draw
-            actual_score_a = 0.5 # Default to draw
-            if avg_outperformance > 0: actual_score_a = 1.0 # Player A wins
-            elif avg_outperformance < 0: actual_score_a = 0.0 # Player B wins
+            # 2. Calculate Average PNL Outperformance directly.
+            #    The old code had a buggy list comprehension. This is the correct way.
+            avg_outperformance = np.mean(pnl_a) - np.mean(pnl_b)
 
-            # 3. Calculate Log-Scaled Multiplier
+            # 3. Determine Win/Loss/Draw
+            actual_score_a = 0.5
+            if avg_outperformance > 0: actual_score_a = 1.0
+            elif avg_outperformance < 0: actual_score_a = 0.0
+
+            # 4. Calculate Log-Scaled Multiplier based on the magnitude of outperformance.
             pnl_diff_abs = abs(avg_outperformance)
             multiplier = math.log(1 + pnl_diff_abs / base_pnl_unit)
 
-            # 4. Calculate Dynamic K-Factor
+            # 5. Update Elo Ratings using a dynamic K-Factor (Unchanged)
             dynamic_k = k_factor * (1 + pnl_weight * multiplier)
-
-            # 5. Update Elo Ratings
             rating_a, rating_b = elo_ratings[player_a], elo_ratings[player_b]
             expected_score_a = 1 / (1 + 10 ** ((rating_b - rating_a) / 400))
-            expected_score_b = 1 - expected_score_a
-
             elo_ratings[player_a] += dynamic_k * (actual_score_a - expected_score_a)
-            elo_ratings[player_b] += dynamic_k * ((1 - actual_score_a) - expected_score_b)
+            elo_ratings[player_b] += dynamic_k * ((1 - actual_score_a) - (1 - expected_score_a))
 
     return {k: round(v) for k, v in elo_ratings.items()}
 

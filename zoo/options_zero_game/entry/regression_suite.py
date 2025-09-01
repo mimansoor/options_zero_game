@@ -487,7 +487,7 @@ def test_convert_strangle_to_condor():
     print(f"\n--- RUNNING: {test_name} ---")
 
     # Use the isolated env to prevent P&L rules from interfering
-    env = create_isolated_test_env('OPEN_SHORT_STRANGLE_DELTA_20')
+    env = create_isolated_test_env('OPEN_SHORT_STRANGLE_DELTA_25')
 
     try:
         env.reset(seed=42)
@@ -701,7 +701,7 @@ def test_hedge_strangle_leg():
     """Tests hedging one leg of a two-leg strangle."""
     test_name = "test_hedge_strangle_leg"
     print(f"\n--- RUNNING: {test_name} ---")
-    env = create_isolated_test_env('OPEN_SHORT_STRANGLE_DELTA_20')
+    env = create_isolated_test_env('OPEN_SHORT_STRANGLE_DELTA_25')
     try:
         env.reset(seed=49)
         env.step(env.actions_to_indices['HOLD'])
@@ -933,7 +933,7 @@ def test_no_runaway_duplication_on_transform():
     test_name = "test_no_runaway_duplication_on_transform"
     print(f"\n--- RUNNING: {test_name} ---")
 
-    env = create_isolated_test_env('OPEN_SHORT_STRANGLE_DELTA_20')
+    env = create_isolated_test_env('OPEN_SHORT_STRANGLE_DELTA_25')
     try:
         env.reset(seed=53)
         env.step(env.actions_to_indices['HOLD'])
