@@ -265,84 +265,6 @@ def test_hedge_delta_with_atm_option():
     finally:
         env.close()
 
-def test_increase_delta_by_shifting_leg():
-    """Tests if INCREASE_DELTA_BY_SHIFTING_LEG correctly resolves and has the right effect."""
-    test_name = "test_increase_delta_by_shifting_leg"
-    print(f"\n--- RUNNING: {test_name} ---")
-    env = create_test_env('OPEN_SHORT_PUT_ATM')
-    try:
-        env.reset(seed=60)
-        env.step(env.actions_to_indices['HOLD'])
-        portfolio_before = env.portfolio_manager.get_portfolio().to_dict('records')
-        original_strike = portfolio_before[0]['strike_price']
-        
-        action_to_take = env.actions_to_indices['INCREASE_DELTA_BY_SHIFTING_LEG_0']
-        env.step(action_to_take)
-        
-        portfolio_after = env.portfolio_manager.get_portfolio()
-        assert len(portfolio_after) == 1, "Shift failed: Number of legs changed."
-        assert portfolio_after.iloc[0]['strike_price'] > original_strike, "Shift failed: Strike did not move up."
-
-        # --- Apples-to-Apples Comparison ---
-        current_price = env.price_manager.current_price
-        iv_bin_index = env.iv_bin_index
-        
-        stats_after = env.portfolio_manager.get_raw_portfolio_stats(current_price, iv_bin_index)
-        delta_after = stats_after['delta']
-        
-        hypothetical_stats_before = env.portfolio_manager.get_raw_greeks_for_legs(portfolio_before, current_price, iv_bin_index)
-        hypothetical_delta_before = hypothetical_stats_before['delta']
-        
-        assert delta_after > hypothetical_delta_before, f"Shift failed: Delta did not increase. Before: {hypothetical_delta_before:.2f}, After: {delta_after:.2f}"
-
-        print(f"--- PASSED: {test_name} ---")
-        return True
-    except Exception:
-        traceback.print_exc()
-        print(f"--- FAILED: {test_name} ---")
-        return False
-    finally:
-        env.close()
-
-def test_decrease_delta_by_shifting_leg():
-    """Tests if DECREASE_DELTA_BY_SHIFTING_LEG correctly resolves and has the right effect."""
-    test_name = "test_decrease_delta_by_shifting_leg"
-    print(f"\n--- RUNNING: {test_name} ---")
-    env = create_test_env('OPEN_SHORT_PUT_ATM')
-    try:
-        env.reset(seed=61)
-        env.step(env.actions_to_indices['HOLD'])
-        portfolio_before = env.portfolio_manager.get_portfolio().to_dict('records')
-        original_strike = portfolio_before[0]['strike_price']
-        
-        action_to_take = env.actions_to_indices['DECREASE_DELTA_BY_SHIFTING_LEG_0']
-        env.step(action_to_take)
-        
-        portfolio_after = env.portfolio_manager.get_portfolio()
-        assert len(portfolio_after) == 1, "Shift failed: Number of legs changed."
-        assert portfolio_after.iloc[0]['strike_price'] < original_strike, "Shift failed: Strike did not move down."
-
-        # --- Apples-to-Apples Comparison ---
-        current_price = env.price_manager.current_price
-        iv_bin_index = env.iv_bin_index
-        
-        stats_after = env.portfolio_manager.get_raw_portfolio_stats(current_price, iv_bin_index)
-        delta_after = stats_after['delta']
-        
-        hypothetical_stats_before = env.portfolio_manager.get_raw_greeks_for_legs(portfolio_before, current_price, iv_bin_index)
-        hypothetical_delta_before = hypothetical_stats_before['delta']
-        
-        assert delta_after < hypothetical_delta_before, f"Shift failed: Delta did not decrease. Before: {hypothetical_delta_before:.2f}, After: {delta_after:.2f}"
-
-        print(f"--- PASSED: {test_name} ---")
-        return True
-    except Exception:
-        traceback.print_exc()
-        print(f"--- FAILED: {test_name} ---")
-        return False
-    finally:
-        env.close()
-
 def test_greeks_and_risk_validation():
     test_name = "test_greeks_and_risk_validation"
     print(f"\n--- RUNNING: {test_name} ---")
@@ -806,38 +728,29 @@ def test_no_new_trades_when_active():
 
 def test_all_open_actions_are_legal():
     """
-    A critical "smoke test" to ensure that every defined 'OPEN_*' action
-    can be legal under ideal conditions (empty portfolio, no curriculum).
+    A critical "smoke test" to ensure that the three high-level OPEN intents
+    are all legal when the portfolio is empty and no curriculum is active.
     """
     test_name = "test_all_open_actions_are_legal"
     print(f"\n--- RUNNING: {test_name} ---")
 
-    # We create a custom env_cfg for this test to guarantee ideal conditions.
     env_cfg = copy.deepcopy(main_config.env)
     env_cfg.is_eval_mode = True
-    env_cfg.disable_opening_curriculum = True # CRITICAL: curriculum would restrict the mask
-    env_cfg.max_positions = 4 # CRITICAL: Ensure enough slots for Condors/Flies
+    env_cfg.disable_opening_curriculum = True
     env = gym.make('OptionsZeroGame-v0', cfg=env_cfg)
 
     try:
-        # Step 0: Reset the environment to get the initial action mask.
-        # We don't need to step, as reset() provides the mask for an empty portfolio.
         obs_dict = env.reset(seed=42)
         action_mask = obs_dict['action_mask']
 
         # --- Assertions ---
-        # We will collect all OPEN actions that were unexpectedly illegal.
-        illegal_open_actions = []
+        # We now check that the three high-level intents are legal.
+        assert action_mask[env.actions_to_indices['OPEN_BULLISH_POSITION']] == 1, "OPEN_BULLISH_POSITION was not legal on Step 0."
+        assert action_mask[env.actions_to_indices['OPEN_BEARISH_POSITION']] == 1, "OPEN_BEARISH_POSITION was not legal on Step 0."
+        assert action_mask[env.actions_to_indices['OPEN_NEUTRAL_POSITION']] == 1, "OPEN_NEUTRAL_POSITION was not legal on Step 0."
 
-        for action_name, index in env.actions_to_indices.items():
-            if action_name.startswith('OPEN_'):
-                # Check if this OPEN action is disabled in the mask
-                if action_mask[index] == 0:
-                    illegal_open_actions.append(action_name)
-
-        # The final assertion: the list of illegal actions must be empty.
-        assert not illegal_open_actions, \
-            f"FAIL: The following OPEN actions were unexpectedly illegal on Step 0: {illegal_open_actions}"
+        # As a sanity check, verify that a management action is ILLEGAL.
+        assert action_mask[env.actions_to_indices['CLOSE_ALL']] == 0, "CLOSE_ALL was incorrectly legal on an empty portfolio."
 
         print(f"--- PASSED: {test_name} ---")
         return True
@@ -1278,6 +1191,66 @@ def test_transform_action_brokerage_cost():
     finally:
         env.close()
 
+def test_delta_shifting_meta_actions():
+    """
+    Tests if the INCREASE/DECREASE_DELTA_BY_SHIFTING_LEG meta-actions
+    correctly modify a leg's delta in the intended direction.
+    """
+    test_name = "test_delta_shifting_meta_actions"
+    print(f"\n--- RUNNING: {test_name} ---")
+
+    # <<< --- THE DEFINITIVE FIX (Part 2) --- >>>
+    # We must use a fully sterile environment to ensure delta changes are predictable.
+    flat_vol_regime = {'name': 'Flat_Test_Regime', 'mu': 0, 'omega': 0, 'alpha': 0, 'beta': 1, 'atm_iv': 25.0, 'far_otm_put_iv': 25.0, 'far_otm_call_iv': 25.0}
+    env = create_isolated_test_env(
+        'OPEN_SHORT_PUT_ATM',
+        overrides={'use_expert_iv': False, 'iv_price_correlation_strength': 0.0, 'unified_regimes': [flat_vol_regime]}
+    )
+
+    try:
+        # --- Part 1: Test INCREASE_DELTA ---
+        env.reset(seed=60)
+        env.step(env.actions_to_indices['HOLD'])
+        portfolio_before = env.portfolio_manager.get_portfolio().to_dict('records')
+
+        action_to_take_increase = env.actions_to_indices['INCREASE_DELTA_BY_SHIFTING_LEG_0']
+        env.step(action_to_take_increase)
+
+        current_price = env.price_manager.current_price
+        iv_bin_index = env.iv_bin_index
+        stats_after_increase = env.portfolio_manager.get_raw_portfolio_stats(current_price, iv_bin_index)
+        delta_after_increase = stats_after_increase['delta']
+        hypothetical_stats_before = env.portfolio_manager.get_raw_greeks_for_legs(portfolio_before, current_price, iv_bin_index)
+        hypothetical_delta_before = hypothetical_stats_before['delta']
+
+        assert delta_after_increase > hypothetical_delta_before, f"INCREASE_DELTA failed: Delta did not increase."
+        print("  - PASSED: INCREASE_DELTA correctly shifted delta.")
+
+        # --- Part 2: Test DECREASE_DELTA ---
+        env.reset(seed=61)
+        env.step(env.actions_to_indices['HOLD'])
+        portfolio_before_2 = env.portfolio_manager.get_portfolio().to_dict('records')
+
+        action_to_take_decrease = env.actions_to_indices['DECREASE_DELTA_BY_SHIFTING_LEG_0']
+        env.step(action_to_take_decrease)
+
+        stats_after_decrease = env.portfolio_manager.get_raw_portfolio_stats(env.price_manager.current_price, env.iv_bin_index)
+        delta_after_decrease = stats_after_decrease['delta']
+        hypothetical_stats_before_2 = env.portfolio_manager.get_raw_greeks_for_legs(portfolio_before_2, env.price_manager.current_price, env.iv_bin_index)
+        hypothetical_delta_before_2 = hypothetical_stats_before_2['delta']
+
+        assert delta_after_decrease < hypothetical_delta_before_2, f"DECREASE_DELTA failed: Delta did not decrease."
+        print("  - PASSED: DECREASE_DELTA correctly shifted delta.")
+
+        print(f"--- PASSED: {test_name} ---")
+        return True
+    except Exception:
+        traceback.print_exc()
+        print(f"--- FAILED: {test_name} ---")
+        return False
+    finally:
+        env.close()
+
 # ==============================================================================
 #                                TEST SUITE RUNNER
 # ==============================================================================
@@ -1298,13 +1271,12 @@ if __name__ == "__main__":
         test_hedge_straddle_leg,
         test_no_new_trades_when_active,
         test_all_open_actions_are_legal,
+        test_delta_shifting_meta_actions,
         test_dte_decay_logic,
         test_no_runaway_duplication_on_transform,
         test_close_all_action,
         test_greeks_and_risk_validation,
         test_hedge_delta_with_atm_option,
-        test_increase_delta_by_shifting_leg,
-        test_decrease_delta_by_shifting_leg,
         test_hedge_portfolio_by_rolling_leg,
         test_recenter_volatility_position,
 

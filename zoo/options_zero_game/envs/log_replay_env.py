@@ -135,7 +135,20 @@ class LogReplayEnv(gym.Wrapper):
         if is_post_action:
             log_step, log_day = step_num, day_num
             portfolio_to_log = self.env.portfolio_manager.get_portfolio()
-            info['executed_action_name'] = action_info['final_action_name']
+
+            # <<< --- THE DEFINITIVE DUAL-LOGGING LOGIC IS HERE --- >>>
+            # 1. Get both the agent's intent and the resolver's choice from the action_info dict.
+            agent_intent = action_info.get('final_action_name', 'N/A')
+            resolver_choice = action_info.get('resolved_action_name')
+
+            # 2. Create the descriptive string for the UI.
+            # If the resolver was used and chose a specific strategy, format it as "Intent -> Execution".
+            if resolver_choice and resolver_choice != agent_intent:
+                info['executed_action_name'] = f"{agent_intent} -> {resolver_choice}"
+            else:
+                # Otherwise, just log the single action taken (e.g., HOLD, CLOSE_ALL, or a specific forced strategy).
+                info['executed_action_name'] = agent_intent
+            
             reward, done = None, False
             obs_for_bias = self.env._get_observation()
         else: # End-of-Day
@@ -150,12 +163,8 @@ class LogReplayEnv(gym.Wrapper):
         payoff_data = self.env.portfolio_manager.get_payoff_data(price_for_log, self.env.iv_bin_index)
         
         meter = BiasMeter(obs_for_bias[:self.env.model_observation_size], self.env.OBS_IDX)
-
-        # If the history is empty (i.e., this is the very first log entry),
-        # the "last price" is the same as the current price, resulting in a 0% change.
-        # For all subsequent entries, it correctly uses the price from the previous sub-step.
-        last_price = self._episode_history[-1]['info']['price'] if self._episode_history else price_for_log
         
+        last_price = self._episode_history[-1]['info']['price'] if self._episode_history else price_for_log
         last_price_change_pct = ((price_for_log / last_price) - 1) * 100 if last_price > 0 else 0.0
         
         info.update({

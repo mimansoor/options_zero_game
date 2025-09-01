@@ -623,6 +623,42 @@ class PortfolioManager:
         """Public API to get the portfolio state."""
         return self.portfolio
 
+    def resolve_and_open_strategy(self, intent_or_specific_action: str, current_price: float, iv_bin_index: int, current_step: int, days_to_expiry: float, volatility_bias: str) -> Tuple[bool, str]:
+        """
+        The "Resolver." Takes a high-level strategic intent from the agent
+        (or a specific forced action) and selects the best concrete trade to execute.
+        Returns a tuple of (was_opened_successfully, resolved_action_name).
+        """
+        # --- Bypass Logic for Evaluation and Analysis ---
+        # If the action name is a specific, low-level strategy, execute it directly.
+        if intent_or_specific_action not in ['OPEN_BULLISH_POSITION', 'OPEN_BEARISH_POSITION', 'OPEN_NEUTRAL_POSITION']:
+            was_opened = self.open_strategy(intent_or_specific_action, current_price, iv_bin_index, current_step, days_to_expiry)
+            return was_opened, intent_or_specific_action
+
+        # --- High-Level Intent Resolution Logic ---
+        candidate_actions = []
+        if intent_or_specific_action == 'OPEN_BULLISH_POSITION':
+            candidate_actions = ['OPEN_BULL_PUT_SPREAD', 'OPEN_SHORT_PUT_ATM', 'OPEN_BULL_CALL_SPREAD']
+        elif intent_or_specific_action == 'OPEN_BEARISH_POSITION':
+            candidate_actions = ['OPEN_BEAR_CALL_SPREAD', 'OPEN_SHORT_CALL_ATM', 'OPEN_BEAR_PUT_SPREAD']
+        elif intent_or_specific_action == 'OPEN_NEUTRAL_POSITION':
+            # In a high IV environment, credit strategies are preferred.
+            if "High" in volatility_bias:
+                candidate_actions = ['OPEN_SHORT_STRADDLE', 'OPEN_SHORT_STRANGLE_DELTA_25', 'OPEN_SHORT_STRANGLE_DELTA_30', 'OPEN_SHORT_IRON_CONDOR']
+            else: # In low IV, we can be more selective, perhaps avoiding straddles.
+                candidate_actions = ['OPEN_SHORT_STRANGLE_DELTA_25', 'OPEN_SHORT_STRANGLE_DELTA_30', 'OPEN_SHORT_IRON_CONDOR']
+        
+        if not candidate_actions:
+            return False, "NONE"
+
+        # The resolver's core logic: pick a random valid strategy that matches the intent.
+        # This can be made more sophisticated with more rules in the future.
+        selected_action = random.choice(candidate_actions)
+        
+        # Call the original open_strategy method to execute the chosen trade.
+        was_opened = self.open_strategy(selected_action, current_price, iv_bin_index, current_step, days_to_expiry)
+        return was_opened, selected_action
+
     def open_strategy(self, action_name: str, current_price: float, iv_bin_index: int, current_step: int, days_to_expiry: float):
         """Routes any 'OPEN_' action to the correct specialized private method."""
         if len(self.portfolio) >= self.max_positions: return False

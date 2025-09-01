@@ -608,146 +608,152 @@ class OptionsZeroGameEnv(gym.Env):
     def _take_action_on_state(self, action: int):
         """
         PART 1 of the step process. It takes the agent's action, enforces all rules,
-        updates the portfolio,
-        It does NOT advance time or the market price.
+        updates the portfolio, and prepares logging info. It does NOT advance time.
         """
-
-        # Intercept the call at Step 0 if a portfolio setup is pending.
+        # --- Step 0 Override for Custom Portfolio Setups (e.g., from JSON) ---
         if self.current_step == 0 and self.portfolio_to_setup_on_step_0:
             self._setup_initial_portfolio(self.portfolio_to_setup_on_step_0)
-            
-            # Set the action info for a clean log file, then exit this method.
             self.last_action_info = {
-                'final_action': -1, # Use a dummy action index
+                'final_action': -1,
                 'final_action_name': 'SETUP_PORTFOLIO_FROM_FILE',
+                'resolved_action_name': 'SETUP_PORTFOLIO_FROM_FILE',
                 'total_steps_in_episode': self.total_steps,
                 'was_illegal_action': False
             }
             self.portfolio_manager.sort_portfolio()
             return # Skip all other action handling
 
-        # 1. Determine the final action and if the agent's attempt was illegal.
+        # 1. Determine the final action intent and if the agent's attempt was illegal.
         final_action, was_illegal_action = self._handle_action(action)
-        final_action_name = self.indices_to_actions.get(final_action, 'INVALID')
 
-        # 2. Store this information for the second half of the step.
-        self.last_action_info = {
-            'final_action': final_action,
-            'final_action_name': final_action_name,
-            'total_steps_in_episode': self.total_steps,
-            'was_illegal_action': was_illegal_action
-        }
+        # If a forced strategy is set for a test, use that name. Otherwise, use the agent's action.
+        final_action_name = self.forced_opening_strategy_name if self.current_step == 0 and self.forced_opening_strategy_name else self.indices_to_actions.get(final_action, 'INVALID')
 
-        # If the action is HOLD, no further portfolio modification is needed.
-        # We can return early to avoid the long chain of unnecessary checks.
+        # Initialize the name of the action that will actually be executed.
+        resolved_action_name = None
+
+        # 2. Optimization: If the action is HOLD, no portfolio changes are needed.
         if final_action_name == 'HOLD':
+            self.last_action_info = {
+                'final_action': final_action, 'final_action_name': 'HOLD',
+                'resolved_action_name': 'HOLD', 'total_steps_in_episode': self.total_steps,
+                'was_illegal_action': was_illegal_action
+            }
             return
 
-        # 3. Execute the final action, which modifies the portfolio.
+        # 3. Execute the appropriate action based on its type.
         if final_action_name.startswith('OPEN_'):
             current_day = self.current_step // self._cfg.steps_per_day
             days_to_expiry_float = (self.episode_time_to_expiry - current_day) * (self.TOTAL_DAYS_IN_WEEK / self.TRADING_DAYS_IN_WEEK)
-            days_to_expiry = int(round(days_to_expiry_float))
-            # 1. Call the manager's open_strategy and capture the success status.
-            was_opened_successfully = self.portfolio_manager.open_strategy(
+            
+            # Get the current volatility bias to pass to the resolver.
+            current_obs_vector = self._get_observation()[:self.model_observation_size]
+            meter = BiasMeter(current_obs_vector, self.OBS_IDX)
+            volatility_bias = meter.volatility_bias
+
+            # The resolver takes the agent's intent and returns the executed action.
+            was_opened_successfully, resolved_action_name = self.portfolio_manager.resolve_and_open_strategy(
                 final_action_name, self.price_manager.current_price, 
-                self.iv_bin_index, self.current_step, days_to_expiry
+                self.iv_bin_index, self.current_step, days_to_expiry_float, volatility_bias
             )
             
-            # 2. If the open failed (e.g., due to our new safety check),
-            #    we override the log to show that a HOLD action was taken instead.
             if not was_opened_successfully:
-                self.last_action_info['final_action_name'] = 'HOLD'
+                # If the resolver fails, the action defaults to HOLD.
+                resolved_action_name = 'HOLD'
 
         elif final_action_name.startswith('CLOSE_POSITION_'):
             self.portfolio_manager.close_position(int(final_action_name.split('_')[-1]), self.price_manager.current_price, self.iv_bin_index, self.current_step)
+        
         elif final_action_name == 'CLOSE_ALL':
             self.portfolio_manager.close_all_positions(self.price_manager.current_price, self.iv_bin_index, self.current_step)
-        elif final_action_name.startswith('SHIFT_'):
-            if 'ATM' in final_action_name: self.portfolio_manager.shift_to_atm(final_action_name, self.price_manager.current_price, self.iv_bin_index, self.current_step)
-            else: self.portfolio_manager.shift_position(final_action_name, self.price_manager.current_price, self.iv_bin_index, self.current_step)
+
+        elif final_action_name.startswith('SHIFT_TO_ATM_'):
+            self.portfolio_manager.shift_to_atm(final_action_name, self.price_manager.current_price, self.iv_bin_index, self.current_step)
+
         elif final_action_name.startswith('HEDGE_NAKED_POS_'):
-            self.portfolio_manager.add_hedge(int(final_action_name.split('_')[-1]),
-                self.price_manager.current_price, self.iv_bin_index, self.current_step
-            )
+            self.portfolio_manager.add_hedge(int(final_action_name.split('_')[-1]), self.price_manager.current_price, self.iv_bin_index, self.current_step)
+
         elif final_action_name.startswith('CONVERT_TO_'):
             self._route_convert_action(final_action_name)
+
         elif final_action_name == 'RECENTER_VOLATILITY_POSITION':
             self.portfolio_manager.recenter_volatility_position(self.price_manager.current_price, self.iv_bin_index, self.current_step)
+
         elif final_action_name == 'HEDGE_DELTA_WITH_ATM_OPTION':
             current_day = self.current_step // self._cfg.steps_per_day
             days_to_expiry_float = (self.episode_time_to_expiry - current_day) * (self.TOTAL_DAYS_IN_WEEK / self.TRADING_DAYS_IN_WEEK)
             self.portfolio_manager.hedge_delta_with_atm_option(self.price_manager.current_price, self.iv_bin_index, self.current_step, days_to_expiry_float)
+
         elif 'DELTA_BY_SHIFTING_LEG' in final_action_name:
             parts = final_action_name.split('_')
             change_direction = 'increase' if parts[0] == 'INCREASE' else 'decrease'
             leg_index = int(parts[-1])
             
-            if not (0 <= leg_index < len(self.portfolio_manager.get_portfolio())): return
+            if 0 <= leg_index < len(self.portfolio_manager.get_portfolio()):
+                leg = self.portfolio_manager.get_portfolio().iloc[leg_index]
+                leg_type = leg['type']
+                leg_dir = leg['direction']
+                shift_dir = ""
 
-            leg = self.portfolio_manager.get_portfolio().iloc[leg_index]
-            leg_type = leg['type']
-            leg_dir = leg['direction']
-            shift_dir = ""
-
-            # a) Resolve the meta-action into a concrete SHIFT_UP or SHIFT_DOWN
-            if change_direction == 'increase':
-                if leg_type == 'call' and leg_dir == 'long': shift_dir = 'DOWN'
-                elif leg_type == 'call' and leg_dir == 'short': shift_dir = 'UP'
-                elif leg_type == 'put' and leg_dir == 'long': shift_dir = 'UP'
-                elif leg_type == 'put' and leg_dir == 'short': shift_dir = 'UP' # <<< --- CORRECTED LINE
-            else: # 'decrease'
-                if leg_type == 'call' and leg_dir == 'long': shift_dir = 'UP'
-                elif leg_type == 'call' and leg_dir == 'short': shift_dir = 'DOWN'
-                elif leg_type == 'put' and leg_dir == 'long': shift_dir = 'DOWN'
-                elif leg_type == 'put' and leg_dir == 'short': shift_dir = 'DOWN' # <<< --- CORRECTED LINE
-            
-            if shift_dir:
-                # 1. Determine the potential new strike price.
-                delta = self._cfg.strike_distance if shift_dir == "UP" else -self._cfg.strike_distance
-                new_strike = leg['strike_price'] + delta
+                # This block correctly resolves the agent's strategic intent (e.g., "increase delta")
+                # into a concrete tactical action ("shift this leg up/down").
+                if change_direction == 'increase': # To make delta more positive / less negative
+                    if leg_type == 'call' and leg_dir == 'long': shift_dir = 'DOWN'
+                    elif leg_type == 'call' and leg_dir == 'short': shift_dir = 'UP'
+                    elif leg_type == 'put' and leg_dir == 'long': shift_dir = 'UP'
+                    elif leg_type == 'put' and leg_dir == 'short': shift_dir = 'UP'
+                else: # 'decrease' (To make delta more negative / less positive)
+                    if leg_type == 'call' and leg_dir == 'long': shift_dir = 'UP'
+                    elif leg_type == 'call' and leg_dir == 'short': shift_dir = 'DOWN'
+                    elif leg_type == 'put' and leg_dir == 'long': shift_dir = 'DOWN'
+                    elif leg_type == 'put' and leg_dir == 'short': shift_dir = 'DOWN'
                 
-                # 2. Check if this new strike would conflict with any other leg in the portfolio.
-                portfolio_df = self.portfolio_manager.portfolio.drop(leg_index)
-                is_conflict = any(
-                    (pos['strike_price'] == new_strike and pos['type'] == leg_type)
-                    for _, pos in portfolio_df.iterrows()
-                )
-
-                # 3. Only execute the shift if there is NO conflict.
-                if not is_conflict:
-                    resolved_action_name = f"SHIFT_{shift_dir}_POS_{leg_index}"
-                    self.portfolio_manager.shift_position(resolved_action_name, self.price_manager.current_price, self.iv_bin_index, self.current_step)
+                if shift_dir:
+                    # Perform a direct legality check for the resolved action.
+                    # The only thing that makes a shift illegal is a strike conflict.
+                    delta = self._cfg.strike_distance if shift_dir == "UP" else -self._cfg.strike_distance
+                    new_strike = leg['strike_price'] + delta
+                    
+                    portfolio_df = self.portfolio_manager.portfolio.drop(leg_index)
+                    is_conflict = any(
+                        (pos['strike_price'] == new_strike and pos['type'] == leg_type)
+                        for _, pos in portfolio_df.iterrows()
+                    )
+                    
+                    # Only execute the shift if there is NO conflict.
+                    if not is_conflict:
+                        # We still need a "resolved" name to pass to the manager,
+                        # which expects a SHIFT_* action name.
+                        resolved_action_name = f"SHIFT_{shift_dir}_POS_{leg_index}"
+                        self.portfolio_manager.shift_position(resolved_action_name, self.price_manager.current_price, self.iv_bin_index, self.current_step)
 
         elif final_action_name.startswith('HEDGE_PORTFOLIO_BY_ROLLING_LEG_'):
             leg_index = int(final_action_name.split('_')[-1])
-            
-            # a) Resolve the meta-action: Find the optimal new strike first.
             new_strike = self.portfolio_manager._find_portfolio_neutral_strike(
                 leg_index, self.price_manager.current_price, self.iv_bin_index
             )
-
             if new_strike is not None:
-                # b) Perform a direct legality check for the new strike.
-                # The only thing that makes a roll illegal is a strike conflict.
-                
                 leg_to_roll = self.portfolio_manager.get_portfolio().iloc[leg_index]
                 leg_type = leg_to_roll['type']
-                
-                # Get all other legs in the portfolio to check against.
                 other_legs_df = self.portfolio_manager.portfolio.drop(leg_index)
-                
                 is_conflict = any(
                     (pos['strike_price'] == new_strike and pos['type'] == leg_type)
                     for _, pos in other_legs_df.iterrows()
                 )
-
-                # c) Only execute the roll if there is NO conflict.
                 if not is_conflict:
                     self.portfolio_manager.hedge_portfolio_by_rolling_leg(leg_index, self.price_manager.current_price, self.iv_bin_index, self.current_step)
-                # d) If the roll would cause a conflict, do nothing (effectively a HOLD).
 
-        # 4. Sort the portfolio and take the crucial snapshot.
+        # 4. Update the log info AFTER the action has been fully resolved and executed.
+        #    If a non-OPEN action was taken, resolved_action_name will be None, which is fine.
+        self.last_action_info = {
+            'final_action': final_action,
+            'final_action_name': final_action_name,
+            'resolved_action_name': resolved_action_name,
+            'total_steps_in_episode': self.total_steps,
+            'was_illegal_action': was_illegal_action
+        }
+
+        # 5. Sort the portfolio to ensure a deterministic state representation.
         self.portfolio_manager.sort_portfolio()
 
     def _route_convert_action(self, action_name):
@@ -944,10 +950,19 @@ class OptionsZeroGameEnv(gym.Env):
         and ensures the action mask is always respected, with intelligent overrides
         for all game states.
         """
+
+        # PRIORITY 1: A forced opening strategy for testing.
+        forced_strategy = self.forced_opening_strategy_name
+        if self.current_step == 0 and forced_strategy:
+            # The name is what matters. We just need to return ANY valid OPEN action
+            # to signal that an opening should occur. The name will override the choice.
+            return self.actions_to_indices['OPEN_BULLISH_POSITION'], False
+
+        # If it's not a forced-open scenario, proceed with normal validation.
         true_action_mask = self._get_true_action_mask()
         is_illegal = true_action_mask[action] == 0
 
-        # --- PRIORITY 1: Handle a legal action first ---
+        # --- PRIORITY 2: Handle a legal action first ---
         if not is_illegal:
             return action, False
 
@@ -956,12 +971,8 @@ class OptionsZeroGameEnv(gym.Env):
 
         # The curriculum takes highest priority during training.
         if self.is_training_mode and self.forced_opening_strategy_name:
+            # This logic is for the training curriculum, not the regression test override.
             return self.actions_to_indices[self.forced_opening_strategy_name], True
-
-        # Override Rule 1: Forced Strategy for Analysis (should not be illegal, but a good failsafe)
-        forced_strategy = self.forced_opening_strategy_name
-        if self.current_step == 0 and forced_strategy:
-            return self.actions_to_indices.get(forced_strategy), True
 
         # Override Rule 2: Liquidation Period
         is_liquidation_period = self.current_day_index >= (self.episode_time_to_expiry - self._cfg.days_before_liquidation)
@@ -1176,37 +1187,9 @@ class OptionsZeroGameEnv(gym.Env):
     def _build_action_space(self) -> Dict[str, int]:
         actions = {'HOLD': 0}; i = 1
 
-        # Modify the loop to ONLY create SHORT naked ATM options.
-        for t in ['CALL', 'PUT']:
-            actions[f'OPEN_SHORT_{t}_ATM'] = i; i+=1 # Only create SHORT
-
-        actions['OPEN_BULL_CALL_SPREAD'] = i; i+=1
-        actions['OPEN_BEAR_CALL_SPREAD'] = i; i+=1
-        actions['OPEN_BULL_PUT_SPREAD'] = i; i+=1
-        actions['OPEN_BEAR_PUT_SPREAD'] = i; i+=1
-
-        # --- NEW: Strategy Morphing Actions ---
-        actions['CONVERT_TO_IRON_CONDOR'] = i; i+=1
-        actions['CONVERT_TO_IRON_FLY'] = i; i+=1
-        actions['CONVERT_TO_STRANGLE'] = i; i+=1
-        actions['CONVERT_TO_STRADDLE'] = i; i+=1
-        actions['CONVERT_TO_BULL_CALL_SPREAD'] = i; i+=1
-        actions['CONVERT_TO_BEAR_CALL_SPREAD'] = i; i+=1
-        actions['CONVERT_TO_BULL_PUT_SPREAD'] = i; i+=1
-        actions['CONVERT_TO_BEAR_PUT_SPREAD'] = i; i+=1
-
-        actions['RECENTER_VOLATILITY_POSITION'] = i; i+=1
-
-        actions['HEDGE_DELTA_WITH_ATM_OPTION'] = i; i+=1
-
-        actions['OPEN_SHORT_STRADDLE'] = i; i+=1
-
-        # Generate a range of delta-based strangle actions.
-        for delta in [25, 30]: # ONLY create the desired Delta 25 and 30 variants
-            actions[f'OPEN_SHORT_STRANGLE_DELTA_{delta}'] = i; i+=1
-
-        actions['OPEN_SHORT_IRON_FLY'] = i; i+=1
-        actions['OPEN_SHORT_IRON_CONDOR'] = i; i+=1
+        actions['OPEN_BULLISH_POSITION'] = i; i+=1
+        actions['OPEN_BEARISH_POSITION'] = i; i+=1
+        actions['OPEN_NEUTRAL_POSITION'] = i; i+=1
 
         for j in range(self._cfg.max_positions):
             actions[f'CLOSE_POSITION_{j}'] = i; i+=1
@@ -1228,15 +1211,22 @@ class OptionsZeroGameEnv(gym.Env):
         for j in range(self._cfg.max_positions):
             actions[f'HEDGE_PORTFOLIO_BY_ROLLING_LEG_{j}'] = i; i+=1
 
-        # <<< --- NEW: Add the six advanced strategies --- >>>
-        actions['OPEN_JADE_LIZARD'] = i; i += 1
-        actions['OPEN_REVERSE_JADE_LIZARD'] = i; i += 1
-        actions['OPEN_BIG_LIZARD'] = i; i += 1
-        actions['OPEN_REVERSE_BIG_LIZARD'] = i; i += 1
-        actions['OPEN_PUT_RATIO_SPREAD'] = i; i += 1
-        actions['OPEN_CALL_RATIO_SPREAD'] = i; i += 1
+        actions['RECENTER_VOLATILITY_POSITION'] = i; i+=1
+
+        actions['HEDGE_DELTA_WITH_ATM_OPTION'] = i; i+=1
+
+        # --- NEW: Strategy Morphing Actions ---
+        actions['CONVERT_TO_IRON_CONDOR'] = i; i+=1
+        actions['CONVERT_TO_IRON_FLY'] = i; i+=1
+        actions['CONVERT_TO_STRANGLE'] = i; i+=1
+        actions['CONVERT_TO_STRADDLE'] = i; i+=1
+        actions['CONVERT_TO_BULL_CALL_SPREAD'] = i; i+=1
+        actions['CONVERT_TO_BEAR_CALL_SPREAD'] = i; i+=1
+        actions['CONVERT_TO_BULL_PUT_SPREAD'] = i; i+=1
+        actions['CONVERT_TO_BEAR_PUT_SPREAD'] = i; i+=1
 
         actions['CLOSE_ALL'] = i
+
         return actions
         
     def _get_true_action_mask(self) -> np.ndarray:
@@ -1244,10 +1234,6 @@ class OptionsZeroGameEnv(gym.Env):
         Computes the correct action mask, applying all trading rules in priority order.
         """
         action_mask = np.zeros(self.action_space_size, dtype=np.int8)
-
-        # Rule 0: Forced strategy (Step 0 only)
-        if self._apply_forced_strategy(action_mask):
-            return action_mask
 
         # Rule 1: Liquidation period
         if self._apply_liquidation_period_rules(action_mask):
@@ -1261,16 +1247,6 @@ class OptionsZeroGameEnv(gym.Env):
         return self._get_empty_portfolio_mask()
 
     # ----------------- HELPER METHODS -----------------
-
-    def _apply_forced_strategy(self, action_mask: np.ndarray) -> bool:
-        """Handles Rule 0: Forced strategy for analysis."""
-        forced_strategy = self.forced_opening_strategy_name
-        if self.current_step == 0 and forced_strategy:
-            action_index = self.actions_to_indices.get(forced_strategy)
-            assert action_index is not None, f"Forced strategy '{forced_strategy}' is invalid."
-            action_mask[action_index] = 1
-            return True
-        return False
 
     def _apply_liquidation_period_rules(self, action_mask: np.ndarray) -> bool:
         """Handles Rule 1: Liquidation period logic."""
@@ -1423,8 +1399,8 @@ class OptionsZeroGameEnv(gym.Env):
         base_opening_mask = self._compute_base_opening_mask(atm_price, days_to_expiry)
         final_opening_mask = self._apply_slot_constraints(base_opening_mask)
 
-        # Apply opening curriculum at Step 0 (training only)
-        if self.is_training_mode and self.current_step == 0 and not self._cfg.disable_opening_curriculum:
+        # The curriculum should ONLY be applied during training, not evaluation or testing.
+        if self.current_step == 0 and self.is_training_mode and not self._cfg.disable_opening_curriculum:
             return self._apply_opening_curriculum(final_opening_mask)
 
         if self.current_step > 0:
@@ -1494,22 +1470,13 @@ class OptionsZeroGameEnv(gym.Env):
         for index, is_legal in enumerate(base_mask):
             if not is_legal:
                 continue
-            name = self.indices_to_actions[index]
-
-            # 1. We add a new, more specific check for our 3-leg strategies.
-            #    This must come BEFORE the generic 'SPREAD' check.
-            if 'JADE_LIZARD' in name or 'BIG_LIZARD' in name or 'RATIO_SPREAD' in name:
-                if available_slots >= 3:
-                    final_mask[index] = 1
-            if 'CONDOR' in name or 'FLY' in name:
-                if available_slots >= 4:
-                    final_mask[index] = 1
-            elif 'STRADDLE' in name or 'STRANGLE' in name or 'SPREAD' in name:
-                if available_slots >= 2:
-                    final_mask[index] = 1
-            elif 'ATM' in name:
-                if available_slots >= 1:
-                    final_mask[index] = 1
+            
+            # The logic must now recognize the new high-level intents.
+            # Any open action requires at least one slot. The resolver will handle
+            # the more specific checks (e.g., needing 4 slots for an Iron Condor).
+            if available_slots >= 1:
+                final_mask[index] = 1
+                
         return final_mask
 
     def _apply_opening_curriculum(self, final_mask: np.ndarray) -> np.ndarray:

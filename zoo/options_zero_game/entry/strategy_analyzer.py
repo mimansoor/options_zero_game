@@ -15,9 +15,37 @@ import zoo.options_zero_game.envs.log_replay_env
 # --- so the orchestrator can import them. This script does not call them directly. ---
 
 def get_valid_strategies() -> list:
-    temp_env_cfg = copy.deepcopy(main_config.env)
-    temp_env = zoo.options_zero_game.envs.options_zero_game_env.OptionsZeroGameEnv(cfg=temp_env_cfg)
-    return [name for name in temp_env.actions_to_indices if name.startswith('OPEN_')]
+    """
+    Returns a definitive, hardcoded list of all specific, low-level strategies
+    that can be individually analyzed. This is now decoupled from the agent's
+    high-level action space.
+    """
+    # <<< --- THE DEFINITIVE FIX IS HERE --- >>>
+    # This list is now the single source of truth for the strategy analyzer.
+    # It must contain all the specific strategies that the PortfolioManager's
+    # resolver knows how to open.
+    return [
+        # Bullish Strategies
+        'OPEN_BULL_PUT_SPREAD',
+        'OPEN_SHORT_PUT_ATM',
+        'OPEN_BULL_CALL_SPREAD',
+        # Bearish Strategies
+        'OPEN_BEAR_CALL_SPREAD',
+        'OPEN_SHORT_CALL_ATM',
+        'OPEN_BEAR_PUT_SPREAD',
+        # Neutral Strategies
+        'OPEN_SHORT_STRADDLE',
+        'OPEN_SHORT_STRANGLE_DELTA_25',
+        'OPEN_SHORT_STRANGLE_DELTA_30',
+        'OPEN_SHORT_IRON_CONDOR',
+        # Advanced Strategies (if they are in the resolver)
+        'OPEN_JADE_LIZARD',
+        'OPEN_REVERSE_JADE_LIZARD',
+        'OPEN_BIG_LIZARD',
+        'OPEN_REVERSE_BIG_LIZARD',
+        'OPEN_PUT_RATIO_SPREAD',
+        'OPEN_CALL_RATIO_SPREAD',
+    ]
 
 def calculate_statistics(results: list, strategy_name: str) -> dict:
     if not results: return {}
