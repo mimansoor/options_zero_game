@@ -88,7 +88,7 @@ class OptionsZeroGameEnv(gym.Env):
         stop_loss_multiple_of_cost=3.0, # NEW: Added stop loss multiple
         use_stop_loss=True,
         forced_opening_strategy_name=None,
-        disable_opening_curriculum=False,
+        disable_opening_curriculum=True,
 
         disable_spread_solver=False,
         
