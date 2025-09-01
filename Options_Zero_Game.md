@@ -1,14 +1,14 @@
-# ✨ Options-Zero-Game: A High-Fidelity Reinforcement Learning Environment for Autonomous Options Trading
+# ✨ Options-Zero-Game: A Hierarchical RL Environment for Autonomous Options Trading
 
-**Options-Zero-Game** is a modular, and feature-rich reinforcement learning environment designed for training an autonomous options trading agent. Built within the [LightZero](https://github.com/opendilab/LightZero) framework, it leverages the powerful **MuZero** algorithm to learn, plan, and navigate a complex and realistic options market without prior knowledge of its rules.
+**Options-Zero-Game** is a feature-rich reinforcement learning environment designed for training a high-level, autonomous options trading agent. Built within the [LightZero](https://github.com/opendilab/LightZero) framework, it leverages the powerful **MuZero** algorithm to learn, plan, and make strategic decisions in a complex and realistic options market.
 
-The environment is architected to be a state-of-the-art research platform, featuring a dynamic and stochastic market, a sophisticated action space with intelligent adjustments, and a rich, high-dimensional observation space augmented by a hierarchical **"Council of Experts"**—a suite of specialized, pre-trained neural networks that provide the agent with deep market insights.
+The core innovation of this architecture is its **hierarchical action space**. The RL agent does not execute trades directly; instead, it acts as a **strategic portfolio manager**. It analyzes the market using a sophisticated "Council of Experts" and decides on a high-level intent (e.g., `OPEN_BULLISH_POSITION`). A rule-based "Resolver" then takes this intent and executes the best-fit tactical trade (e.g., `OPEN_BULL_PUT_SPREAD`), freeing the agent to focus on mastering market dynamics and high-level strategy.
 
 ---
 
 ## 🏛️ Architectural Overview
 
-The environment is designed with a clean separation of concerns, managed by a central orchestrator that interacts with the LightZero RL framework. The core principle is that each component is an expert in its domain, from market physics to financial mathematics.
+The environment is built on a decoupled, hierarchical decision-making process. The MuZero agent forms a strategic opinion, which a tactical resolver then executes. This modularity allows for rapid experimentation with new trading strategies without retraining the core agent.
 
 ```mermaid
 graph TD
@@ -21,18 +21,21 @@ graph TD
         C & D --> F[RL Training & Evaluation Loop];
     end
 
-    F <--> G[OptionsZeroGameEnv];
-
-    subgraph Environment Core
-        G -- Manages --> H[PriceActionManager];
-        G -- Manages --> I[PortfolioManager];
-        G -- Manages --> J[MarketRulesManager];
-        G -- Manages --> K[BlackScholesManager];
+    subgraph Agent's Decision Process
+        F -- Chooses High-Level Intent --> G[Agent Action Space <br> e.g., OPEN_BULLISH_POSITION];
     end
 
-    H -- Uses --> L["Council of Experts" AI System];
+    subgraph Environment Core
+        G -- Sent to --> H{Action Resolver};
+        H -- Selects & Executes --> I[Specific Strategy <br> e.g., OPEN_SHORT_PUT_ATM];
+        I -- Modifies --> J[Portfolio & Market State];
+    end
+    
+    J -- Generates --> K[High-Dimensional Observation];
+    K -- Feeds into --> F;
 
     style G fill:#2a9d8f,stroke:#fff,stroke-width:2px
+    style H fill:#e76f51,stroke:#fff,stroke-width:2px
     style F fill:#264653,stroke:#fff,stroke-width:2px
 ```
 
@@ -40,38 +43,19 @@ graph TD
 
 ## 🌟 Key Features
 
-### High-Fidelity Environment
-*   **Modular Architecture**: The environment's logic is cleanly separated into specialized managers for price action, portfolio management, market rules, and Black-Scholes calculations, ensuring high maintainability and extensibility.
-*   **Dynamic & Stochastic Market Physics**:
-    *   **IV Regimes with Markov Chains**: The environment doesn't use a single IV skew. At the start of each episode, it selects a volatility regime (e.g., "Crisis (High Vol)", "Complacent") based on a stationary distribution derived from real market data, and the regime evolves from day to day according to a learned transition matrix.
-    *   **GARCH or Historical Price Paths**: The `PriceActionManager` can generate new, unique price paths using a GARCH model or create episodes from random slices of a decade's worth of historical ticker data.
-
-### Sophisticated & Intelligent Action Space
-The agent possesses a powerful set of approximatly 100 actions, including not just opening trades, but intelligently managing them.
-*   **Complex Openings**: Opens a wide variety of strategies, from naked calls/puts to delta-neutral strangles, iron condors, and advanced structures like Jade Lizards.
-*   **Risk-Based Adjustments**: A full suite of delta management actions that allow the agent to re-center its strategy (`RECENTER_VOLATILITY_POSITION`), roll a challenged leg to a more neutral strike (`HEDGE_PORTFOLIO_BY_ROLLING_LEG`), or add a new leg to neutralize delta (`HEDGE_DELTA_WITH_ATM_OPTION`).
-*   **Strategy Morphing**: A full suite of `CONVERT_TO_*` actions that allow the agent to dynamically transform its position's structure (e.g., Strangle → Iron Condor, Butterfly → Vertical Spread) to adapt to changing market conditions.
-
-### State-of-the-Art Hybrid AI System
-The MuZero agent is augmented by a **"Council of Experts"**, a hierarchical system of neural networks that provide a rich, abstract feature set. This allows the final model to learn from expert opinions rather than just raw price data.
-
-### Rich, Data-Driven Visualization
-A powerful, web-based replayer built in React that provides a deep analysis of each episode, including:
-*   An interactive P&L diagram with T+0 (current) and expiry curves.
-*   Standard deviation bands on the payoff chart to show the expected market range.
-*   A "Bias Meter" that synthesizes the agent's complex observation vector into a human-readable market bias.
-*   A **Real-World Re-Simulation** panel to dynamically change parameters like start price, lot size, and strike distance to see how P&L would have been affected.
-
-### Professional Analysis & Validation Suite
-*   **Strategy Analyzer**: A complete analysis pipeline (`run_full_analysis.py`) that runs thousands of simulations to produce a ranked dashboard of every strategy, including advanced metrics like **Sharpe Ratio, Sortino Ratio, Calmar Ratio, Max Drawdown, and two forms of Elo Ranking (Standard and PnL-Weighted)**.
-*   **Expert Evaluator**: Dedicated scripts (`unified_expert_evaluator.py`, `transformer_expert_trainer.py --mode eval`) to scientifically measure the predictive power of every expert model on unseen holdout data.
-*   **Robust Regression Test Suite**: A full suite of over 30 tests (`regression_suite.py`) to validate the environment's core mechanics and prevent regressions.
+*   **Hierarchical AI System**: The MuZero agent operates at a strategic level, choosing an abstract market view. A rule-based, tactical "Resolver" then selects and executes the most appropriate specific options strategy, simplifying the learning problem and enabling more robust, generalized policies.
+*   **High-Fidelity Environment**:
+    *   **Markov Chain Volatility Regimes**: The environment simulates realistic market shifts by transitioning between different volatility states (e.g., "Crisis," "Complacent") based on a model learned from a decade of VIX data.
+    *   **Stochastic Price Paths**: Generates unique price histories using a GARCH model or creates episodes from slices of real historical ticker data.
+*   **The "Council of Experts"**: A sophisticated deep learning pipeline that processes raw market data into a rich, high-dimensional state vector. This council of seven specialized neural networks provides the agent with deep, abstract insights into volatility, trend, momentum, and market cycles.
+*   **Data-Driven Visualization**: A powerful, web-based replayer built in React that provides a deep analysis of each episode, including an interactive P&L diagram, per-leg live IV, a market "Bias Meter," and a **Real-World Re-Simulation** panel to perform "what-if" analysis.
+*   **Professional Analysis & Validation Suite**: A complete backtesting pipeline (`run_full_analysis.py`) that simulates and ranks every low-level strategy based on advanced metrics like **Sharpe Ratio, Sortino Ratio, Calmar Ratio, and PnL-Weighted Elo Ranking**.
 
 ---
 
 ## 🧠 The "Council of Experts" AI System
 
-The core of the agent's intelligence comes from a hierarchical system where raw data is progressively transformed into abstract insights. The final Master Directional Transformer makes its decision by attending to the counsel of six specialist experts.
+The agent's market intelligence is derived from a hierarchical system where raw data is progressively transformed into abstract insights. The final Master Directional Transformer makes its decision by attending to the counsel of six specialist experts.
 
 ```mermaid
 graph TD
@@ -106,10 +90,6 @@ graph TD
     style F fill:#e76f51,stroke:#fff,stroke-width:2px
     style G fill:#f4a261,stroke:#fff,stroke-width:2px
 ```
-*   **Volatility Expert (Transformer)**: Analyzes a sequence of `[log_return, volatility, vol-of-vol, vol-autocorrelation]` to understand the market's risk profile.
-*   **Trend, Oscillator, & Deviation Experts (MLPs)**: Use classic quantitative features (MA Slopes, Stochastic %K, Z-Score, etc.) to provide signals on trend, momentum, and mean-reversion potential.
-*   **Cycle & Fractal Experts (MLPs)**: Use advanced statistical methods (Hilbert Transform, Hurst Exponent) to analyze the market's cyclical and fractal properties.
-*   **Pattern Expert (MLP)**: Analyzes a sequence of lagged returns to identify recurring price action motifs.
 
 ---
 
@@ -119,7 +99,7 @@ graph TD
 *   **Neural Networks**: PyTorch
 *   **Environment**: Gymnasium (formerly OpenAI Gym)
 *   **Data & Numerics**: Pandas, NumPy, Numba
-*   **Expert Models**: LightGBM, Scikit-learn, PyTorch (Transformers), `pandas_ta`, `hurst`
+*   **Expert Models**: PyTorch (Transformers), Scikit-learn, LightGBM
 *   **Frontend Visualizer**: React, Chart.js
 
 ---
@@ -129,7 +109,6 @@ graph TD
 Follow these steps from the project's root directory to train the agent and view the results.
 
 #### 1. Setup Python Environment
-It is highly recommended to use a virtual environment.
 ```bash
 python3 -m venv venv
 source venv/bin/activate
@@ -144,20 +123,23 @@ cd ../../../.. # Return to project root
 ```
 
 #### 3. Build the Historical Data Cache
-This script downloads ~10 years of daily data for ~1800 tickers. This only needs to be run once.
+This script downloads ~10 years of daily data. This only needs to be run once.
 ```bash
 python3 zoo/options_zero_game/data/cache_builder.py
 ```
 
-#### 4. Build the IV Regime Model
-This script analyzes historical VIX data to create the Markov Chain for IV regime transitions. Run once.
+#### 4. Build and Tune the IV Regime Model
+First, run the analyzer to learn from historical VIX data. Then, run the tuner to adjust the probabilities for a more balanced training experience.
 ```bash
+# Run once
 python3 zoo/options_zero_game/experts/iv_regime_analyzer.py
+
+# Optional but highly recommended
+python3 zoo/options_zero_game/experts/tune_iv_model.py
 ```
 
 #### 5. Train the "Council of Experts"
-You must train the experts in the correct order.
-
+You must train the experts in the correct order, as the Master Directional Transformer learns from the embeddings of the other six.
 ```bash
 # First, train the baseline Holy Trinity (for compatibility and feature generation)
 python3 zoo/options_zero_game/experts/holy_trinity_trainer.py
@@ -168,43 +150,38 @@ python3 zoo/options_zero_game/experts/transformer_expert_trainer.py --model_type
 # Third, train the five specialized MLP experts
 python3 zoo/options_zero_game/experts/unified_expert_trainer.py --expert trend
 python3 zoo/options_zero_game/experts/unified_expert_trainer.py --expert oscillator
-python3 zoo/options_zero_game/experts/unified_expert_trainer.py --expert deviation
-python3 zoo/options_zero_game/experts/unified_expert_trainer.py --expert cycle
-python3 zoo/options_zero_game/experts/unified_expert_trainer.py --expert pattern
+# ... (run for deviation, cycle, and pattern as well) ...
 
 # Finally, train the Master Directional Transformer using the council's insights
 python3 zoo/options_zero_game/experts/transformer_expert_trainer.py --model_type directional --epochs 10
 ```
 
 #### 6. Train the MuZero Agent
-This is the main training script. It includes automatic resumption logic.
+This is the main training script. It uses the new hierarchical curriculum and includes automatic resumption logic.
 ```bash
 # For a reproducible run with a fixed seed
 python3 -u zoo/options_zero_game/config/options_zero_game_muzero_config.py --seed 42
-
-# For a random seed
-python3 -u zoo/options_zero_game/config/options_zero_game_muzero_config.py --seed -1
 ```
 
 #### 7. Evaluate and Generate Replay Log
-After training, copy the best checkpoint (e.g., `ckpt_best.pth.tar`) to the `./best_ckpt/` directory. Then, run the evaluation script.
+After training, copy the best checkpoint to `./best_ckpt/`. Then, run the evaluation script.
 ```bash
-# Example: Let the agent choose its own move on SPY data
+# Let the agent choose its own high-level intent (e.g., OPEN_BULLISH_POSITION)
+# The resolver will then pick the specific trade.
 python3 -u zoo/options_zero_game/entry/options_zero_game_eval.py --agents_choice --symbol SPY
 
-# Example: Test the agent's management of a pre-configured Short Straddle
-python3 -u zoo/options_zero_game/entry/options_zero_game_eval.py --portfolio_setup_file my_straddle_setup.json
+# To test a specific low-level strategy, bypassing the resolver
+python3 -u zoo/options_zero_game/entry/options_zero_game_eval.py --strategy OPEN_SHORT_STRADDLE --symbol SPY
 ```
 
 #### 8. Build and Serve the Visualizer
-First, build the static React app.
 ```bash
+# Build the static React app (only need to do this once)
 cd zoo/options_zero_game/visualizer-ui/
 npm run build
 cd ../../../.. # Return to project root
-```
-Then, run the Python server to view the results.
-```bash
+
+# Run the Python server to view the results
 python3 zoo/options_zero_game/entry/visualizer_replayer.py
 ```
 Now, open your web browser to `http://<your-ip-address>:5001` to view the replay.
@@ -213,24 +190,19 @@ Now, open your web browser to `http://<your-ip-address>:5001` to view the replay
 
 ## 🔬 Advanced Usage & Analysis
 
-The project includes a powerful suite of scripts for analysis and testing.
-
-*   **Full Strategy Analysis**: Perform a deep statistical backtest on every strategy the agent knows, complete with advanced metrics and Elo rankings.
+*   **Full Strategy Analysis**: Perform a deep statistical backtest on every low-level strategy the resolver knows.
     ```bash
     # Run a fast, deterministic analysis with 50 episodes per strategy
     python3 zoo/options_zero_game/entry/run_full_analysis.py -n 50 --deterministic
     ```
 
-*   **Expert Model Evaluation**: Scientifically measure the predictive power of your trained expert models on unseen holdout data.
+*   **Expert Model Evaluation**: Scientifically measure the predictive power of your trained expert models.
     ```bash
     # Evaluate the final Master Directional Transformer
     python3 zoo/options_zero_game/experts/transformer_expert_trainer.py --model_type directional --mode eval
-
-    # Evaluate one of the MLP experts
-    python3 zoo/options_zero_game/experts/unified_expert_evaluator.py --expert trend
     ```
 
-*   **Regression Test Suite**: Run a full suite of over 30 tests to validate the environment's core mechanics and prevent regressions.
+*   **Regression Test Suite**: Run a full suite of tests to validate the environment's core mechanics.
     ```bash
     python3 zoo/options_zero_game/entry/regression_suite.py
     ```
@@ -240,11 +212,9 @@ The project includes a powerful suite of scripts for analysis and testing.
 ## 📚 Future Work
 
 This project provides a strong foundation for future research, including:
-
-*   **Minimum Variance Portfolio Optimization**: Implement the `portfolio_optimizer.py` script we've planned. This would use the data from the strategy analyzer to find the optimal capital allocation across all of the agent's learned strategies, creating a robust "meta-portfolio" based on Modern Portfolio Theory.
+*   **Advanced Resolver Logic**: Enhance the rule-based resolver with more sophisticated logic, such as a utility-based model that scores candidate strategies based on risk/reward and market conditions.
 *   **Stochastic MuZero**: Upgrade the agent to use the Stochastic MuZero algorithm to better handle the probabilistic nature of the market.
-*   **Hierarchical Reinforcement Learning (HRL)**: Implement a two-level agent where a "Master" agent chooses the overall strategy (e.g., "Sell Volatility") and a "Slave" agent manages the execution and adjustments.
-*   **Advanced Architectures**: Experiment with cutting-edge, long-sequence models like Mamba for the expert system.
+*   **Multi-Agent Systems**: Experiment with a two-agent HRL system where a "Master" agent (MuZero) selects the high-level intent and a "Slave" agent (e.g., a simpler DQN) learns the optimal execution tactic.
 
 ---
 
