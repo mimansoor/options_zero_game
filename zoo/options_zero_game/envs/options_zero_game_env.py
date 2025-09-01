@@ -284,10 +284,6 @@ class OptionsZeroGameEnv(gym.Env):
         self.np_random, seed = seeding.np_random(seed)
         random.seed(seed)
 
-        # We must also seed the global NumPy random number generator, as it is used
-        # by the IV regime selection logic (np.random.choice).
-        np.random.seed(seed)
-
         self.price_manager.np_random = self.np_random
         return [seed]
 

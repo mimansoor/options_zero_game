@@ -30,7 +30,7 @@ def run_full_analysis():
     REPORTS_DIR = "zoo/options_zero_game/visualizer-ui/build/reports"
     ANALYZER_SCRIPT_PATH = "zoo/options_zero_game/entry/strategy_analyzer.py"
     ANALYZER_RUN_DIR = 'eval/strategy_analyzer'
-    BEST_CKPT_DEST = "best_ckpt/ckpt_best.pth.tar"
+    BEST_CKPT_DEST = "strategy_eval_model/ckpt_best.pth.tar"
     EXPERIMENT_DIR = "experiments/options_zero_game_muzero_agent_v2.2-Final_ns50_upc2000_bs256"
     ELO_STATE_FILE = "zoo/options_zero_game/experts/elo_ratings.json"
 
