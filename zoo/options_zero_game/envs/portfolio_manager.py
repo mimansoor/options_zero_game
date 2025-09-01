@@ -639,7 +639,7 @@ class PortfolioManager:
 
         # --- High-Level Intent Resolution Logic ---
         candidate_actions = []
-        if intent_action_name == 'OPEN_BULLISH_POSITION':
+        if intent_or_specific_action == 'OPEN_BULLISH_POSITION':
             # <<< --- THE DEFINITIVE FIX (Part 1): Add the new bullish strategies --- >>>
             candidate_actions = [
                 # Standard Strategies
@@ -652,7 +652,7 @@ class PortfolioManager:
                 'OPEN_PUT_RATIO_SPREAD',
             ]
         
-        elif intent_action_name == 'OPEN_BEARISH_POSITION':
+        elif intent_or_specific_action == 'OPEN_BEARISH_POSITION':
             # <<< --- THE DEFINITIVE FIX (Part 2): Add the new bearish strategies --- >>>
             candidate_actions = [
                 # Standard Strategies
