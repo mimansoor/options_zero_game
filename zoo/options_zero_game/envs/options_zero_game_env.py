@@ -730,6 +730,7 @@ class OptionsZeroGameEnv(gym.Env):
             if new_strike is not None:
                 leg_to_roll = self.portfolio_manager.get_portfolio().iloc[leg_index]
                 leg_type = leg_to_roll['type']
+                leg_dir = leg_to_roll['direction']
                 other_legs_df = self.portfolio_manager.portfolio.drop(leg_index)
                 is_conflict = any(
                     (pos['strike_price'] == new_strike and pos['type'] == leg_type and pos['direction'] != leg_dir)
