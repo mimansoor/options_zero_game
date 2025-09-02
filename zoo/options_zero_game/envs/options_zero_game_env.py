@@ -56,7 +56,7 @@ class OptionsZeroGameEnv(gym.Env):
         
         # Options and Portfolio Config
         start_price=20000.0,
-        initial_cash=500000.0,
+        initial_cash=250000.0,
         lot_size=75,
         max_positions=4,
         strike_distance=50.0,
