@@ -707,24 +707,20 @@ class OptionsZeroGameEnv(gym.Env):
                     elif leg_type == 'put' and leg_dir == 'long': shift_dir = 'DOWN'
                     elif leg_type == 'put' and leg_dir == 'short': shift_dir = 'DOWN'
                 
-                if shift_dir:
-                    # Perform a direct legality check for the resolved action.
-                    # The only thing that makes a shift illegal is a strike conflict.
-                    delta = self._cfg.strike_distance if shift_dir == "UP" else -self._cfg.strike_distance
-                    new_strike = leg['strike_price'] + delta
-                    
-                    portfolio_df = self.portfolio_manager.portfolio.drop(leg_index)
-                    is_conflict = any(
-                        (pos['strike_price'] == new_strike and pos['type'] == leg_type)
-                        for _, pos in portfolio_df.iterrows()
-                    )
-                    
-                    # Only execute the shift if there is NO conflict.
-                    if not is_conflict:
-                        # We still need a "resolved" name to pass to the manager,
-                        # which expects a SHIFT_* action name.
-                        resolved_action_name = f"SHIFT_{shift_dir}_POS_{leg_index}"
-                        self.portfolio_manager.shift_position(resolved_action_name, self.price_manager.current_price, self.iv_bin_index, self.current_step)
+            if shift_dir:
+                delta = self._cfg.strike_distance if shift_dir == "UP" else -self._cfg.strike_distance
+                new_strike = leg['strike_price'] + delta
+                portfolio_df = self.portfolio_manager.portfolio.drop(leg_index)
+
+                # A conflict only occurs if a leg of the same type but OPPOSITE direction exists at the target.
+                is_conflict = any(
+                    (pos['strike_price'] == new_strike and pos['type'] == leg_type and pos['direction'] != leg_dir)
+                    for _, pos in portfolio_df.iterrows()
+                )
+
+                if not is_conflict:
+                    resolved_action_name = f"SHIFT_{shift_dir}_POS_{leg_index}"
+                    self.portfolio_manager.shift_position(resolved_action_name, self.price_manager.current_price, self.iv_bin_index, self.current_step)
 
         elif final_action_name.startswith('HEDGE_PORTFOLIO_BY_ROLLING_LEG_'):
             leg_index = int(final_action_name.split('_')[-1])
@@ -736,7 +732,7 @@ class OptionsZeroGameEnv(gym.Env):
                 leg_type = leg_to_roll['type']
                 other_legs_df = self.portfolio_manager.portfolio.drop(leg_index)
                 is_conflict = any(
-                    (pos['strike_price'] == new_strike and pos['type'] == leg_type)
+                    (pos['strike_price'] == new_strike and pos['type'] == leg_type and pos['direction'] != leg_dir)
                     for _, pos in other_legs_df.iterrows()
                 )
                 if not is_conflict:
