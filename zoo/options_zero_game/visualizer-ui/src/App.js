@@ -84,7 +84,7 @@ function MetricsDashboard({ stepData, lots, envDefaults }) { // <-- NEW: Added l
 
     // <<< --- THE DEFINITIVE FIX --- >>>
     // 1. Calculate the scaled initial cash based on the environment default and the user's "Lots" input.
-    const scaledInitialCash = (envDefaults.initial_cash || 500000) * (lots || 1);
+    const scaledInitialCash = (info.initial_cash || 250000) * (lots || 1);
 
     // 2. Calculate the percentage change against this stable, correct denominator.
     const pnlChangePct = scaledInitialCash ? ((info.eval_episode_return || 0) / scaledInitialCash) * 100 : 0;
@@ -441,7 +441,7 @@ function App() {
     const [lotSize, setLotSize] = useState('75');
     const [lots, setLots] = useState('1');
 
-    const envDefaults = useMemo(() => ({ startPrice: 20000, strikeDistance: 50, lotSize: 75 }), []);
+    const envDefaults = useMemo(() => ({ startPrice: 20000, strikeDistance: 50, lotSize: 75, initial_cash: 250000 }), []);
     const deNormParams = useMemo(() => ({
         startPrice: parseFloat(startPrice) || envDefaults.startPrice,
         strikeDistance: parseFloat(strikeDistance) || envDefaults.strikeDistance,

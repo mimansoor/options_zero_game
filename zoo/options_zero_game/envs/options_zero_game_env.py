@@ -892,6 +892,7 @@ class OptionsZeroGameEnv(gym.Env):
             'portfolio_stats': self.portfolio_manager.get_raw_portfolio_stats(self.price_manager.current_price, self.iv_bin_index),
             'total_steps_in_episode': self.total_steps,
             'market_regime': self.current_iv_regime_name,
+            'initial_cash': self._cfg.initial_cash,
             'termination_reason': termination_reason
         }
 
