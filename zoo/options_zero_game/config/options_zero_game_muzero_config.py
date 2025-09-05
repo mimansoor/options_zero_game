@@ -109,19 +109,18 @@ UNIFIED_REGIMES = [
 # A structured training plan that teaches the agent concepts in phases.
 # Each phase focuses on a core strategy for 2 million steps before moving to the next.
 TRAINING_CURRICULUM = {
-    # Phase 1: Learn how to be Bullish (4M steps)
-    0: 'OPEN_BULLISH_POSITION',
+    # Phase 1: Master being Bullish (4M steps)
+    0: 'DECIDE_BULLISH',
 
-    # Phase 2: Learn how to be Bearish (4M steps)
-    int(4e6): 'OPEN_BEARISH_POSITION',
+    # Phase 2: Master being Bearish (4M steps)
+    int(4e6): 'DECIDE_BEARISH',
 
-    # Phase 3: Learn how to be Neutral / Sell Volatility (4M steps)
-    int(8e6): 'OPEN_NEUTRAL_POSITION',
+    # Phase 3: Master being Neutral / Selling Volatility (4M steps)
+    int(8e6): 'DECIDE_NEUTRAL',
 
-    # Final Phase: Full Autonomy - Agent can choose any intent.
+    # Final Phase: Full Autonomy - Agent can choose any strategic intent.
     int(12e6): 'ALL'
 }
-
 
 # This class will "hide" the integer-keyed dictionary from EasyDict.
 class CurriculumHolder:
