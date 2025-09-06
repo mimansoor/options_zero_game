@@ -612,34 +612,23 @@ class OptionsZeroGameEnv(gym.Env):
 
     def _take_action_on_state(self, action: int):
         """
-        PART 1 of the step process. This version has a robust, unified pathway
-        for handling forced actions from the regression suite.
+        PART 1 of the step process. This method now acts as a simple dispatcher,
+        passing the agent's strategic intent to the PortfolioManager's tactical engine.
         """
-        # --- Step 0 Override for Custom Portfolio Setups (Unchanged) ---
+        # --- Step 0 Override for Custom Portfolio Setups (e.g., from JSON) ---
         if self.current_step == 0 and self.portfolio_to_setup_on_step_0:
-            # ... (this logic is unchanged) ...
-            return
-
-        # <<< --- THE DEFINITIVE, UNIFIED FIX IS HERE --- >>>
-        # --- PRIORITY 1: Handle Forced Actions for Testing ---
-        forced_strategy = self.forced_opening_strategy_name
-        if self.current_step == 0 and forced_strategy:
-            # If a test is forcing a specific strategy, we bypass ALL agent logic.
-            # We call the resolver directly with the specific, low-level action name.
-            was_opened, resolved_action = self.portfolio_manager.resolve_and_open_strategy(
-                forced_strategy, self.price_manager.current_price, self.iv_bin_index, 
-                self.current_step, self.episode_time_to_expiry, "N/A"
-            )
+            self._setup_initial_portfolio(self.portfolio_to_setup_on_step_0)
             self.last_action_info = {
-                'final_action_name': 'FORCED_TEST_ACTION',
-                'resolved_action_name': resolved_action,
-                'was_illegal_action': False, 'total_steps_in_episode': self.total_steps
+                'final_action': -1,
+                'final_action_name': 'SETUP_PORTFOLIO_FROM_FILE',
+                'resolved_action_name': 'SETUP_PORTFOLIO_FROM_FILE',
+                'total_steps_in_episode': self.total_steps,
+                'was_illegal_action': False
             }
             self.portfolio_manager.sort_portfolio()
-            return # End the process here.
+            return
 
-        # --- PRIORITY 2: Standard Agent-Driven Logic ---
-        # This code only runs if no action was forced by a test.
+        # 1. Determine the agent's final strategic intent.
         final_action, was_illegal_action = self._handle_action(action)
         agent_intent = self.indices_to_actions.get(final_action, 'INVALID')
 
@@ -650,14 +639,17 @@ class OptionsZeroGameEnv(gym.Env):
         meter = BiasMeter(current_obs_vector, self.OBS_IDX)
         volatility_bias = meter.volatility_bias
         
-        # 3. Call the Tactical Engine in the PortfolioManager.
+        # <<< --- THE DEFINITIVE FIX IS HERE --- >>>
+        # 3. Call the Tactical Engine in the PortfolioManager, now with all required arguments.
         resolved_action_details = self.portfolio_manager.manage_portfolio_based_on_intent(
             agent_intent=agent_intent,
             current_price=self.price_manager.current_price,
             iv_bin_index=self.iv_bin_index,
             current_step=self.current_step,
             days_to_expiry=days_to_expiry_float,
-            volatility_bias=volatility_bias
+            volatility_bias=volatility_bias,
+            current_day_index=self.current_day_index,
+            episode_time_to_expiry=self.episode_time_to_expiry
         )
 
         # 4. Prepare the comprehensive log entry.

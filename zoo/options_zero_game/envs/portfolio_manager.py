@@ -464,76 +464,6 @@ class PortfolioManager:
         except (ValueError, IndexError, KeyError) as e:
             print(f"Warning: Could not execute add_hedge action. Error: {e}")
 
-    def _open_best_available_vertical(self, action_name: str, current_price: float, iv_bin_index: int, current_step: int, days_to_expiry: float):
-        """
-        Public method to execute the opening of a vertical spread.
-        It first tries to find an ideal spread using the tiered R:R solver.
-        If that fails, it now robustly falls back to creating a fixed-width spread.
-        """
-        # --- 1. Parse Action Intent ---
-        parts = action_name.replace('OPEN_', '').split('_')
-        direction_name = '_'.join(parts[0:3]) # e.g., BULL_CALL_SPREAD
-        option_type = parts[1].lower()
-        is_credit_spread = 'BULL_PUT' in direction_name or 'BEAR_CALL' in direction_name
-
-        # --- 2. Attempt to Find the Ideal Spread using the Solver ---
-        found_legs = self._find_best_available_spread(
-            option_type, direction_name, current_price, iv_bin_index, days_to_expiry, is_credit_spread
-        )
-
-        # <<< --- THE DEFINITIVE FIX IS HERE: Implement a robust fallback --- >>>
-        if not found_legs:
-            # This block now runs if the intelligent solver fails to find a perfect R:R match.
-            # print(f"DEBUG: Tiered R:R solver failed for {action_name}. Using fixed-width fallback.")
-            
-            atm_strike = self.market_rules_manager.get_atm_price(current_price)
-            # Use a wide, robust default width that is guaranteed to be available.
-            wing_offset = self.strike_distance * 10 
-            
-            anchor_strike = 0
-            wing_strike = 0
-            anchor_dir = ''
-            wing_dir = ''
-
-            # This logic explicitly handles all four cases correctly.
-            if direction_name == 'BULL_CALL_SPREAD': # Debit, Bullish
-                anchor_strike, wing_strike = atm_strike, atm_strike + wing_offset
-                anchor_dir, wing_dir = 'long', 'short'
-            elif direction_name == 'BEAR_PUT_SPREAD': # Debit, Bearish
-                anchor_strike, wing_strike = atm_strike, atm_strike - wing_offset
-                anchor_dir, wing_dir = 'long', 'short'
-            elif direction_name == 'BEAR_CALL_SPREAD': # Credit, Bearish
-                anchor_strike, wing_strike = atm_strike, atm_strike + wing_offset
-                anchor_dir, wing_dir = 'short', 'long'
-            elif direction_name == 'BULL_PUT_SPREAD': # Credit, Bullish
-                anchor_strike, wing_strike = atm_strike, atm_strike - wing_offset
-                anchor_dir, wing_dir = 'short', 'long'
-
-            if wing_strike <= 0: return False # Failsafe for invalid strikes
-
-            fallback_legs_def = [
-                {'type': option_type, 'direction': anchor_dir, 'strike_price': anchor_strike},
-                {'type': option_type, 'direction': wing_dir, 'strike_price': wing_strike}
-            ]
-            for leg in fallback_legs_def: leg['days_to_expiry'] = days_to_expiry
-
-            # Price the fallback legs.
-            found_legs = self._price_legs(fallback_legs_def, current_price, iv_bin_index)
-
-        # --- 4. Finalize and Execute the Trade (This part is now universal) ---
-        if found_legs:
-            for leg in found_legs:
-                leg['entry_step'] = current_step
-
-            pnl_profile = self._calculate_universal_risk_profile(found_legs, self.realized_pnl, is_new_trade=True)
-            if pnl_profile['strategy_max_profit'] <= self.min_profit_hurdle: return False
-            pnl_profile['strategy_id'] = self.strategy_name_to_id.get(action_name, -1)
-            self._execute_trades(found_legs, pnl_profile)
-            return True
-        else:
-            # If even the fallback fails (which is highly unlikely), abort.
-            return False
-
     def update_mtm_water_marks(self, current_total_pnl: float):
         """
         Updates the high-water mark and low-water mark (max drawdown) for the
@@ -632,19 +562,81 @@ class PortfolioManager:
 
     def resolve_and_open_strategy(self, intent_or_specific_action: str, current_price: float, iv_bin_index: int, current_step: int, days_to_expiry: float, volatility_bias: str) -> Tuple[bool, str]:
         """
-        The "Resolver." Takes a high-level strategic intent from the agent
-        (or a specific forced action), selects the best concrete trade to execute,
-        and sets the portfolio's directional stance upon success.
-        
-        Returns a tuple of (was_opened_successfully, resolved_action_name).
+        The "Resolver." This definitive version uses a robust check to distinguish
+        between a high-level agent intent and a low-level forced action, ensuring
+        that evaluation overrides always work correctly.
         """
         
-        # --- Part 1: Handle Direct, Low-Level Strategy Execution (The Bypass) ---
-        # This is used by the regression suite and strategy analyzer.
-        if 'POSITION' not in intent_or_specific_action:
-            was_opened = self.open_strategy(intent_or_specific_action, current_price, iv_bin_index, current_step, days_to_expiry)
+        # <<< --- THE DEFINITIVE, ROBUST FIX IS HERE --- >>>
+
+        # 1. Define the explicit set of high-level intents the agent can have.
+        high_level_intents = {
+            'OPEN_BULLISH_POSITION',
+            'OPEN_BEARISH_POSITION',
+            'OPEN_NEUTRAL_POSITION'
+        }
+
+        # 2. Check if the incoming action is a high-level intent.
+        if intent_or_specific_action in high_level_intents:
+            # --- Part 2: High-Level Intent Resolution ---
+            candidate_actions = []
+            if intent_or_specific_action == 'OPEN_BULLISH_POSITION':
+                candidate_actions = [
+                    #'OPEN_BULL_PUT_SPREAD', 'OPEN_SHORT_PUT_ATM', 'OPEN_BULL_CALL_SPREAD',
+                    'OPEN_BIG_LIZARD', 'OPEN_JADE_LIZARD', 'OPEN_PUT_RATIO_SPREAD'
+                ]
+            elif intent_or_specific_action == 'OPEN_BEARISH_POSITION':
+                candidate_actions = [
+                    #'OPEN_BEAR_CALL_SPREAD', 'OPEN_SHORT_CALL_ATM', 'OPEN_BEAR_PUT_SPREAD',
+                    'OPEN_REVERSE_BIG_LIZARD', 'OPEN_REVERSE_JADE_LIZARD', 'OPEN_CALL_RATIO_SPREAD'
+                ]
+            elif intent_or_specific_action == 'OPEN_NEUTRAL_POSITION':
+                if "High" in volatility_bias:
+                    #candidate_actions = ['OPEN_SHORT_STRADDLE', 'OPEN_SHORT_STRANGLE_DELTA_25', 'OPEN_SHORT_STRANGLE_DELTA_30', 'OPEN_SHORT_IRON_CONDOR']
+                    candidate_actions = ['OPEN_SHORT_STRADDLE', 'OPEN_SHORT_STRANGLE_DELTA_25', 'OPEN_SHORT_STRANGLE_DELTA_30']
+                else:
+                    #candidate_actions = ['OPEN_SHORT_STRANGLE_DELTA_25', 'OPEN_SHORT_STRANGLE_DELTA_30', 'OPEN_SHORT_IRON_CONDOR']
+                    candidate_actions = ['OPEN_SHORT_STRANGLE_DELTA_25', 'OPEN_SHORT_STRANGLE_DELTA_30']
             
-            # If a specific strategy was forced, we infer its stance and set the state.
+            if not candidate_actions:
+                return False, "NONE"
+
+            # 1. Shuffle the candidate actions to ensure variety in the search.
+            self.np_random.shuffle(candidate_actions)
+
+            # 2. Loop through the candidates until we find a profitable one.
+            for selected_action in candidate_actions:
+                # a) Attempt to open the strategy. The open_strategy method will
+                #    internally perform the viability check (is max_profit > hurdle).
+                was_opened = self.open_strategy(
+                    selected_action, current_price, iv_bin_index, current_step, days_to_expiry
+                )
+                
+                # b) If it was successfully opened, it means the trade was viable.
+                #    We can now exit the loop and return the result.
+                if was_opened:
+                    #print(f"(INFO) Agent Intent: '{intent_or_specific_action}', Resolver chose viable action: '{selected_action}'")
+                    
+                    # c) Set the new portfolio stance based on the original intent.
+                    if 'BULLISH' in intent_or_specific_action: self.current_portfolio_stance = "BULLISH"
+                    elif 'BEARISH' in intent_or_specific_action: self.current_portfolio_stance = "BEARISH"
+                    elif 'NEUTRAL' in intent_or_specific_action: self.current_portfolio_stance = "NEUTRAL"
+                    
+                    return True, selected_action
+
+            # 3. If the loop completes and no viable strategy was found, return failure.
+            print(f"(WARNING) Agent Intent: '{intent_or_specific_action}', Resolver found NO VIABLE strategy from candidates: {candidate_actions}")
+            return False, "NONE (No Viable Options)"
+
+        else:
+            # --- Bypass Logic for Specific Forced Actions ---
+            # If the action is NOT a high-level intent, it must be a specific strategy
+            # from an eval script or a regression test. Execute it directly.
+            was_opened = self.open_strategy(
+                intent_or_specific_action, current_price, iv_bin_index, current_step, days_to_expiry
+            )
+            
+            # If the open was successful, infer and set the stance for the new position.
             if was_opened:
                 if 'BULL' in intent_or_specific_action or 'SHORT_PUT' in intent_or_specific_action or 'JADE' in intent_or_specific_action or 'BIG_LIZARD' in intent_or_specific_action or 'PUT_RATIO' in intent_or_specific_action:
                     self.current_portfolio_stance = "BULLISH"
@@ -655,87 +647,67 @@ class PortfolioManager:
 
             return was_opened, intent_or_specific_action
 
-        # --- Part 2: High-Level Intent Resolution ---
-        candidate_actions = []
-        new_stance = "FLAT" # Default stance
-
-        if intent_or_specific_action == 'OPEN_BULLISH_POSITION':
-            new_stance = "BULLISH"
-            candidate_actions = [
-                'OPEN_BULL_PUT_SPREAD', 'OPEN_SHORT_PUT_ATM', 'OPEN_BULL_CALL_SPREAD',
-                'OPEN_BIG_LIZARD', 'OPEN_JADE_LIZARD', 'OPEN_PUT_RATIO_SPREAD'
-            ]
-        elif intent_or_specific_action == 'OPEN_BEARISH_POSITION':
-            new_stance = "BEARISH"
-            candidate_actions = [
-                'OPEN_BEAR_CALL_SPREAD', 'OPEN_SHORT_CALL_ATM', 'OPEN_BEAR_PUT_SPREAD',
-                'OPEN_REVERSE_BIG_LIZARD', 'OPEN_REVERSE_JADE_LIZARD', 'OPEN_CALL_RATIO_SPREAD'
-            ]
-        elif intent_or_specific_action == 'OPEN_NEUTRAL_POSITION':
-            new_stance = "NEUTRAL"
-            if "High" in volatility_bias:
-                candidate_actions = ['OPEN_SHORT_STRADDLE', 'OPEN_SHORT_STRANGLE_DELTA_25', 'OPEN_SHORT_STRANGLE_DELTA_30', 'OPEN_SHORT_IRON_CONDOR']
-            else:
-                candidate_actions = ['OPEN_SHORT_STRANGLE_DELTA_25', 'OPEN_SHORT_STRANGLE_DELTA_30', 'OPEN_SHORT_IRON_CONDOR']
-        
-        if not candidate_actions:
-            return False, "NONE"
-
-        # The resolver's core logic: pick a random valid strategy that matches the intent.
-        selected_action = self.np_random.choice(candidate_actions)
-        
-        #print(f"(INFO) Agent Intent: '{intent_or_specific_action}', Resolver chose to execute: '{selected_action}'")
-
-        # Call the low-level executor.
-        was_opened = self.open_strategy(selected_action, current_price, iv_bin_index, current_step, days_to_expiry)
-        
-        # --- Part 3: Commit the New Stance to the State Variable on Success ---
-        if was_opened:
-            self.current_portfolio_stance = new_stance
-        
-        return was_opened, selected_action
-
-    def open_strategy(self, action_name: str, current_price: float, iv_bin_index: int, current_step: int, days_to_expiry: float):
-        """Routes any 'OPEN_' action to the correct specialized private method."""
-        if len(self.portfolio) >= self.max_positions: return False
-
-        disable_solver = self.cfg.get('disable_spread_solver', False)
-
-        # Route by most complex/specific keywords first to avoid misrouting.
-        
-        # 1. Most specific 3-leg strategies
-        if 'JADE_LIZARD' in action_name:
-            return self._open_jade_lizard(action_name, current_price, iv_bin_index, current_step, days_to_expiry)
-        elif 'BIG_LIZARD' in action_name:
-            return self._open_big_lizard(action_name, current_price, iv_bin_index, current_step, days_to_expiry)
-        elif 'RATIO_SPREAD' in action_name:
-            return self._open_ratio_spread(action_name, current_price, iv_bin_index, current_step, days_to_expiry)
-
-        # 2. Four-leg strategies
-        elif 'FLY' in action_name and 'IRON' not in action_name:
-            return self._open_butterfly(action_name, current_price, iv_bin_index, current_step, days_to_expiry)
-        elif 'IRON_CONDOR' in action_name:
-            return self._open_iron_condor(action_name, current_price, iv_bin_index, current_step, days_to_expiry)
-        elif 'IRON_FLY' in action_name:
-            return self._open_iron_fly(action_name, current_price, iv_bin_index, current_step, days_to_expiry)
-
-        # 3. Two-leg volatility strategies
-        elif 'STRANGLE' in action_name:
-            return self._open_strangle(action_name, current_price, iv_bin_index, current_step, days_to_expiry)
-        elif 'STRADDLE' in action_name:
-            return self._open_straddle(action_name, current_price, iv_bin_index, current_step, days_to_expiry)
-
-        # 4. Two-leg directional SPREADS (less specific, checked later)
-        elif 'SPREAD' in action_name and not disable_solver:
-            return self._open_best_available_vertical(action_name, current_price, iv_bin_index, current_step, days_to_expiry)
-
-        # 5. Single-leg strategies (least specific, checked last)
-        elif 'ATM' in action_name:
-            return self._open_single_leg(action_name, current_price, iv_bin_index, current_step, days_to_expiry)
-            
-        else:
-            print(f"Warning: Unrecognized action format in open_strategy: {action_name}")
+    def open_strategy(self, action_name: str, current_price: float, iv_bin_index: int, current_step: int, days_to_expiry: float) -> bool:
+        """
+        The definitive low-level executor for ALL new trades. It gets the proposed
+        legs from a helper, performs a final, holistic viability check, and then
+        executes the trade if it is viable.
+        """
+        if len(self.portfolio) >= self.max_positions:
             return False
+
+        # --- Part 1: Get the leg definitions from the appropriate helper ---
+        legs_def = None
+        
+        # This router calls the new helper functions.
+        if 'JADE_LIZARD' in action_name:
+            legs_def = self._get_jade_lizard_legs(action_name, current_price, iv_bin_index, days_to_expiry)
+        elif 'BIG_LIZARD' in action_name:
+            legs_def = self._get_big_lizard_legs(action_name, current_price, iv_bin_index, days_to_expiry)
+        elif 'RATIO_SPREAD' in action_name:
+            legs_def = self._get_ratio_spread_legs(action_name, current_price, iv_bin_index, days_to_expiry)
+        elif 'SPREAD' in action_name:
+            legs_def = self._get_vertical_spread_legs(action_name, current_price, iv_bin_index, days_to_expiry)
+        elif 'IRON_CONDOR' in action_name:
+            legs_def = self._get_iron_condor_legs(action_name, current_price, iv_bin_index, days_to_expiry)
+        elif 'STRANGLE' in action_name:
+            legs_def = self._get_strangle_legs(action_name, current_price, iv_bin_index, days_to_expiry)
+        elif 'STRADDLE' in action_name:
+            legs_def = self._get_straddle_legs(action_name, current_price, days_to_expiry)
+        elif 'ATM' in action_name:
+            legs_def = self._get_single_leg_legs(action_name, current_price, days_to_expiry)
+
+        if not legs_def:
+            return False # Helper couldn't define the legs.
+
+        # Price the legs to get their entry premium.
+        for leg in legs_def:
+            leg['entry_step'] = current_step
+        priced_legs = self._price_legs(legs_def, current_price, iv_bin_index, check_short_rule=True)
+        if not priced_legs:
+            return False
+
+        # --- Part 2: The Definitive, Holistic Viability Check ---
+        pnl_profile = self._calculate_universal_risk_profile(priced_legs, 0.0, is_new_trade=True)
+        
+        # 1. Start with the base hurdle (opportunity cost).
+        minimum_acceptable_profit = self.min_profit_hurdle
+        
+        # 2. If there's a realized loss, the new trade MUST have the potential to overcome it.
+        if self.realized_pnl < 0:
+            minimum_acceptable_profit = max(self.min_profit_hurdle, abs(self.realized_pnl))
+
+        # 3. The final check against the strategy's standalone potential profit.
+        if pnl_profile['strategy_max_profit'] <= minimum_acceptable_profit:
+            return False # Reject the trade if it's not sufficiently profitable.
+
+        # --- Part 3: If viable, execute the trade ---
+        # The PnL profile passed to execute must use the true, current realized_pnl.
+        final_pnl_profile = self._calculate_universal_risk_profile(priced_legs, self.realized_pnl, is_new_trade=True)
+        final_pnl_profile['strategy_id'] = self.strategy_name_to_id.get(action_name, -1)
+        self._execute_trades(priced_legs, final_pnl_profile)
+        
+        return True
 
     def get_positions_state(self, vec: np.ndarray, start_idx: int, state_size: int, pos_idx_map: Dict, current_price: float, iv_bin_index: int, current_step: int, total_steps: int):
         """Fills the provided numpy vector `vec` with the detailed state of each open position."""
@@ -864,6 +836,48 @@ class PortfolioManager:
             # If no legs remain from the target strategy, the portfolio is just the untouched ones.
             self.portfolio = untouched_strategies_df.copy().reset_index(drop=True)
 
+    def _find_and_validate_improvement_roll(self, current_price: float, iv_bin_index: int, days_to_expiry: float) -> Tuple[int, float] or None:
+        """
+        Finds a far OTM short leg and calculates a potential roll that would
+        increase the position's max profit. Returns (leg_index, new_strike) if valid.
+        """
+        if self.portfolio.empty: return None
+
+        current_pnl_profile = self._calculate_universal_risk_profile(self.portfolio.to_dict('records'), self.realized_pnl)
+        current_max_profit = current_pnl_profile.get('strategy_max_profit', 0)
+
+        # Iterate through each leg to find a candidate for rolling
+        for i, leg in self.portfolio.iterrows():
+            # Condition 1: Must be a short leg.
+            if leg['direction'] != 'short': continue
+
+            # Condition 2: Must be "far" OTM. We define this as having a low delta.
+            greeks = self.bs_manager.get_all_greeks_and_price(current_price, leg['strike_price'], days_to_expiry, self.iv_calculator(0, leg['type']), leg['type'] == 'call')
+            if abs(greeks['delta']) > 0.15: # Not far enough OTM (delta > 15)
+                continue
+
+            # This leg is a candidate. Let's find a new strike for it at ~35 delta.
+            target_delta = 0.25 if leg['type'] == 'call' else -0.25
+            new_strike = self._find_strike_for_delta(target_delta, leg['type'], current_price, iv_bin_index, days_to_expiry)
+            
+            if new_strike is None: continue
+
+            # --- "What-If" Analysis: Would this roll actually improve the position? ---
+            hypothetical_legs = self.portfolio.drop(i).to_dict('records')
+            new_leg_def = {'type': leg['type'], 'direction': 'short', 'strike_price': new_strike, 'days_to_expiry': days_to_expiry}
+            priced_new_leg = self._price_legs([new_leg_def], current_price, iv_bin_index)
+            if not priced_new_leg: continue
+
+            hypothetical_portfolio = hypothetical_legs + priced_new_leg
+            new_pnl_profile = self._calculate_universal_risk_profile(hypothetical_portfolio, self.realized_pnl)
+            new_max_profit = new_pnl_profile.get('strategy_max_profit', 0)
+
+            # Your crucial condition: only accept the roll if it increases max profit.
+            if new_max_profit > current_max_profit:
+                return i, new_strike # Return the index of the leg to roll and the new target strike
+
+        return None # No profitable roll was found
+
     def _identify_strategy_from_legs(self, legs_df: pd.DataFrame) -> str:
         """
         A definitive, intelligent helper that identifies the name of a strategy
@@ -980,187 +994,212 @@ class PortfolioManager:
         return self._sanitize_dict(payoff_dict)
 
     # --- Private Methods ---
-    def _open_jade_lizard(self, action_name: str, current_price: float, iv_bin_index: int, current_step: int, days_to_expiry: float):
-        """Opens a 3-leg Jade Lizard or Reverse Jade Lizard with a robust fallback for the spread component."""
-        if len(self.portfolio) > self.max_positions - 3: return False
+    def _get_single_leg_legs(self, action_name: str, current_price: float, days_to_expiry: float) -> List[Dict] or None:
+        try:
+            parts = action_name.split('_')
+            direction, option_type = parts[1].lower(), parts[2].lower()
+            strike_price = self.market_rules_manager.get_atm_price(current_price)
+            return [{'type': option_type, 'direction': direction, 'strike_price': strike_price, 'days_to_expiry': days_to_expiry}]
+        except:
+            return None
 
-        is_reverse = 'REVERSE' in action_name
+    def _get_straddle_legs(self, action_name: str, current_price: float, days_to_expiry: float) -> List[Dict] or None:
+        direction = 'long' if 'LONG' in action_name else 'short'
+        atm_price = self.market_rules_manager.get_atm_price(current_price)
+        return [
+            {'type': 'call', 'direction': direction, 'strike_price': atm_price, 'days_to_expiry': days_to_expiry},
+            {'type': 'put', 'direction': direction, 'strike_price': atm_price, 'days_to_expiry': days_to_expiry}
+        ]
+
+    def _get_strangle_legs(self, action_name: str, current_price: float, iv_bin_index: int, days_to_expiry: float) -> List[Dict] or None:
+        direction = 'long' if 'LONG' in action_name else 'short'
+        try:
+            target_delta_int = int(action_name.split('_')[-1])
+            delta = target_delta_int / 100.0
+            strike_call = self._find_strike_for_delta(delta, 'call', current_price, iv_bin_index, days_to_expiry)
+            strike_put = self._find_strike_for_delta(-delta, 'put', current_price, iv_bin_index, days_to_expiry)
+            if strike_call and strike_put and strike_put < strike_call:
+                return [
+                    {'type': 'call', 'direction': direction, 'strike_price': strike_call, 'days_to_expiry': days_to_expiry},
+                    {'type': 'put', 'direction': direction, 'strike_price': strike_put, 'days_to_expiry': days_to_expiry}
+                ]
+        except:
+            pass
+        return None
+
+    def _get_iron_condor_legs(self, action_name: str, current_price: float, iv_bin_index: int, days_to_expiry: float) -> List[Dict] or None:
+        # For simplicity, we'll use the robust fixed-width fallback logic here.
+        # The tiered delta search can be refactored into this helper if desired.
+        atm_price = self.market_rules_manager.get_atm_price(current_price)
+        body_direction = 'short'
+        wing_direction = 'long'
         
-        # 1. Define the naked leg
+        body_strike_put = atm_price - self.strike_distance
+        body_strike_call = atm_price + self.strike_distance
+        wing_strike_put = body_strike_put - (10 * self.strike_distance)
+        wing_strike_call = body_strike_call + (10 * self.strike_distance)
+
+        if wing_strike_put <= 0: return None
+
+        return [
+            {'type': 'put', 'direction': body_direction, 'strike_price': body_strike_put, 'days_to_expiry': days_to_expiry},
+            {'type': 'call', 'direction': body_direction, 'strike_price': body_strike_call, 'days_to_expiry': days_to_expiry},
+            {'type': 'put', 'direction': wing_direction, 'strike_price': wing_strike_put, 'days_to_expiry': days_to_expiry},
+            {'type': 'call', 'direction': wing_direction, 'strike_price': wing_strike_call, 'days_to_expiry': days_to_expiry}
+        ]
+
+    def _get_vertical_spread_legs(self, action_name: str, current_price: float, iv_bin_index: int, days_to_expiry: float) -> List[Dict] or None:
+        # This contains the logic from the old _open_best_available_vertical
+        parts = action_name.replace('OPEN_', '').split('_')
+        direction_name = '_'.join(parts[0:3])
+        option_type = parts[1].lower()
+        is_credit_spread = 'BULL_PUT' in direction_name or 'BEAR_CALL' in direction_name
+
+        found_legs = self._find_best_available_spread(option_type, direction_name, current_price, iv_bin_index, days_to_expiry, is_credit_spread)
+        
+        # Return the definitions, without pricing, for the main function to handle.
+        if found_legs:
+             for leg in found_legs: leg['days_to_expiry'] = days_to_expiry
+             return found_legs
+        
+        return None # Fallback if no spread is found
+
+    def _get_jade_lizard_legs(self, action_name: str, current_price: float, iv_bin_index: int, days_to_expiry: float) -> List[Dict] or None:
+        """Defines the legs for a Jade Lizard or Reverse Jade Lizard."""
+        is_reverse = 'REVERSE' in action_name
+
         naked_leg_type = 'call' if is_reverse else 'put'
         naked_leg_delta = 0.20 if naked_leg_type == 'call' else -0.20
         naked_strike = self._find_strike_for_delta(naked_leg_delta, naked_leg_type, current_price, iv_bin_index, days_to_expiry)
-        if naked_strike is None: return False
+        if naked_strike is None: return None
 
-        naked_leg_def = {'type': naked_leg_type, 'direction': 'short', 'strike_price': naked_strike}
+        naked_leg_def = {'type': naked_leg_type, 'direction': 'short', 'strike_price': naked_strike, 'days_to_expiry': days_to_expiry}
 
-        # 2. Attempt to define the spread using the ideal R:R solver
         spread_type = 'put' if is_reverse else 'call'
         spread_direction_name = 'BULL_PUT_SPREAD' if is_reverse else 'BEAR_CALL_SPREAD'
-        
+
         spread_legs_def = self._find_best_available_spread(spread_type, spread_direction_name, current_price, iv_bin_index, days_to_expiry, is_credit_spread=True)
-        
-        # <<< --- THE DEFINITIVE FIX IS HERE: Implement a robust fallback --- >>>
+
         if not spread_legs_def:
-            # If the ideal solver fails, we construct a simple, fixed-width credit spread
-            # based on the strategy's original delta definition.
-            
-            # Find the short leg of the spread at ~35 delta.
             short_leg_delta = -0.35 if spread_type == 'put' else 0.35
             short_strike = self._find_strike_for_delta(short_leg_delta, spread_type, current_price, iv_bin_index, days_to_expiry)
-            
-            if short_strike is None: return False # Abort if we can't even find the anchor leg.
-            
-            # Create a simple 2-strike wide spread for robustness.
+            if short_strike is None: return None
+
             wing_width = self.strike_distance * 2
             long_strike = short_strike - wing_width if spread_type == 'put' else short_strike + wing_width
-            if long_strike <= 0: return False # Failsafe for invalid strikes
-            
+            if long_strike <= 0: return None
+
             spread_legs_def = [
                 {'type': spread_type, 'direction': 'short', 'strike_price': short_strike},
                 {'type': spread_type, 'direction': 'long', 'strike_price': long_strike}
             ]
-        # --- End of Fix ---
-            
-        # 3. Assemble, price, and execute
-        final_legs_def = [naked_leg_def] + spread_legs_def
-        for leg in final_legs_def:
-            leg.update({'entry_step': current_step, 'days_to_expiry': days_to_expiry})
-        
-        priced_legs = self._price_legs(final_legs_def, current_price, iv_bin_index)
-        if not priced_legs: return False
 
-        pnl_profile = self._calculate_universal_risk_profile(priced_legs, self.realized_pnl, is_new_trade=True)
-        # The strategy is now rejected if its max profit is not above our dynamic hurdle rate.
-        if pnl_profile['strategy_max_profit'] <= self.min_profit_hurdle: return False
-        pnl_profile['strategy_id'] = self.strategy_name_to_id.get(action_name, -1)
-        self._execute_trades(priced_legs, pnl_profile)
-        return True
+        for leg in spread_legs_def: leg['days_to_expiry'] = days_to_expiry
 
-    def _open_big_lizard(self, action_name: str, current_price: float, iv_bin_index: int, current_step: int, days_to_expiry: float):
-        """Opens a 3-leg Big Lizard or Reverse Big Lizard."""
-        if len(self.portfolio) > self.max_positions - 3: return False
+        return [naked_leg_def] + spread_legs_def
 
+    def _get_big_lizard_legs(self, action_name: str, current_price: float, iv_bin_index: int, days_to_expiry: float) -> List[Dict] or None:
+        """Defines the legs for a Big Lizard or Reverse Big Lizard."""
         is_reverse = 'REVERSE' in action_name
 
-        # 1. Define the Strangle component based on delta
         strangle_put_delta = -0.55 if is_reverse else -0.45
         strangle_call_delta = 0.45 if is_reverse else 0.55
 
         strike_put = self._find_strike_for_delta(strangle_put_delta, 'put', current_price, iv_bin_index, days_to_expiry)
         strike_call = self._find_strike_for_delta(strangle_call_delta, 'call', current_price, iv_bin_index, days_to_expiry)
-        if strike_put is None or strike_call is None: return False
-        
+        if strike_put is None or strike_call is None: return None
+
         strangle_legs_def = [
-            {'type': 'put', 'direction': 'short', 'strike_price': strike_put},
-            {'type': 'call', 'direction': 'short', 'strike_price': strike_call}
+            {'type': 'put', 'direction': 'short', 'strike_price': strike_put, 'days_to_expiry': days_to_expiry},
+            {'type': 'call', 'direction': 'short', 'strike_price': strike_call, 'days_to_expiry': days_to_expiry}
         ]
-        
-        # 2. Define the long hedge leg
+
         hedge_leg_type = 'put' if is_reverse else 'call'
         hedge_leg_delta = -0.45 if is_reverse else 0.45
         hedge_strike = self._find_strike_for_delta(hedge_leg_delta, hedge_leg_type, current_price, iv_bin_index, days_to_expiry)
-        if hedge_strike is None: return False
+        if hedge_strike is None: return None
 
-        hedge_leg_def = {'type': hedge_leg_type, 'direction': 'long', 'strike_price': hedge_strike}
+        hedge_leg_def = {'type': hedge_leg_type, 'direction': 'long', 'strike_price': hedge_strike, 'days_to_expiry': days_to_expiry}
 
-        # 3. Assemble, price, and execute
-        final_legs_def = strangle_legs_def + [hedge_leg_def]
-        for leg in final_legs_def:
-            leg.update({'entry_step': current_step, 'days_to_expiry': days_to_expiry})
-            
-        priced_legs = self._price_legs(final_legs_def, current_price, iv_bin_index, check_short_rule=True)
-        if not priced_legs: return False
-            
-        pnl_profile = self._calculate_universal_risk_profile(priced_legs, self.realized_pnl, is_new_trade=True)
-        if pnl_profile['strategy_max_profit'] <= self.min_profit_hurdle: return False
-        pnl_profile['strategy_id'] = self.strategy_name_to_id.get(action_name, -1)
-        self._execute_trades(priced_legs, pnl_profile)
-        return True
+        return strangle_legs_def + [hedge_leg_def]
 
-    def _open_ratio_spread(self, action_name: str, current_price: float, iv_bin_index: int, current_step: int, days_to_expiry: float):
-        """Opens a 1x2 ratio spread (1 long, 2 short)."""
-        if len(self.portfolio) > self.max_positions - 3: return False
-        
+    def _get_ratio_spread_legs(self, action_name: str, current_price: float, iv_bin_index: int, days_to_expiry: float) -> List[Dict] or None:
+        """Defines the legs for a 1x2 Ratio Spread."""
         option_type = 'put' if 'PUT' in action_name else 'call'
 
-        # 1. Find the two short legs @ 20 delta
         short_delta = -0.20 if option_type == 'put' else 0.20
         short_strike = self._find_strike_for_delta(short_delta, option_type, current_price, iv_bin_index, days_to_expiry)
-        if short_strike is None: return False
-        
-        # 2. Find the one long leg @ 30-35 delta
+        if short_strike is None: return None
+
         long_delta_range = [-0.30, -0.35] if option_type == 'put' else [0.30, 0.35]
         long_strike = self._find_strike_from_delta_list(long_delta_range, option_type, current_price, iv_bin_index, days_to_expiry)
-        if long_strike is None: return False
+        if long_strike is None: return None
 
-        # 3. Assemble the 3 legs (with two identical short legs)
-        final_legs_def = [
-            {'type': option_type, 'direction': 'short', 'strike_price': short_strike},
-            {'type': option_type, 'direction': 'short', 'strike_price': short_strike},
-            {'type': option_type, 'direction': 'long', 'strike_price': long_strike}
+        return [
+            {'type': option_type, 'direction': 'short', 'strike_price': short_strike, 'days_to_expiry': days_to_expiry},
+            {'type': option_type, 'direction': 'short', 'strike_price': short_strike, 'days_to_expiry': days_to_expiry},
+            {'type': option_type, 'direction': 'long', 'strike_price': long_strike, 'days_to_expiry': days_to_expiry}
         ]
-        
-        for leg in final_legs_def:
-            leg.update({'entry_step': current_step, 'days_to_expiry': days_to_expiry})
-            
-        priced_legs = self._price_legs(final_legs_def, current_price, iv_bin_index, check_short_rule=True)
-        if not priced_legs: return False
-            
-        pnl_profile = self._calculate_universal_risk_profile(priced_legs, self.realized_pnl, is_new_trade=True)
-        if pnl_profile['strategy_max_profit'] <= self.min_profit_hurdle: return False
-        pnl_profile['strategy_id'] = self.strategy_name_to_id.get(action_name, -1)
-        self._execute_trades(priced_legs, pnl_profile)
-        return True
 
     def _find_portfolio_neutral_strike(self, leg_index: int, current_price: float, iv_bin_index: int) -> float or None:
         """
-        A powerful solver that finds the optimal new strike for a specific leg that
-        will bring the entire portfolio's net delta as close to zero as possible.
-        MODIFIED: Now searches in a window around the leg's ORIGINAL strike price.
+        A powerful, profit-aware solver that finds the optimal new strike for a leg.
+        It seeks to bring the portfolio's delta closer to zero WITHOUT turning
+        the position into a guaranteed loser.
         """
         if not (0 <= leg_index < len(self.portfolio)): return None
 
         leg_to_roll = self.portfolio.iloc[leg_index]
         other_legs = self.portfolio.drop(leg_to_roll.name).to_dict('records')
         
-        best_strike = None
-        min_abs_portfolio_delta = abs(self.get_raw_portfolio_stats(current_price, iv_bin_index)['delta'])
+        # --- Get the current state as a baseline ---
+        current_greeks = self.get_raw_portfolio_stats(current_price, iv_bin_index)
+        current_abs_delta = abs(current_greeks['delta'])
         
-        # <<< --- THE DEFINITIVE FIX IS HERE --- >>>
-        # 1. The search is now centered on the leg's original strike, not the ATM price.
-        original_strike = leg_to_roll['strike_price']
-        search_width = self.hedge_roll_search_width # e.g., 10 strikes
-        
-        # 2. Iterate through a window of offsets from the original strike.
-        for offset in range(-search_width, search_width + 1):
-            if offset == 0: continue # Skip the current strike
+        # We need the pre-brokerage P&L profile for a fair comparison
+        current_pnl_profile = self._calculate_universal_risk_profile(self.portfolio.to_dict('records'), self.realized_pnl)
+        current_max_profit = current_pnl_profile.get('strategy_max_profit', 0)
 
+        best_strike = None
+        best_score = -float('inf') # We will now maximize a score, not just minimize delta
+
+        original_strike = leg_to_roll['strike_price']
+        search_width = self.hedge_roll_search_width
+        
+        for offset in range(-search_width, search_width + 1):
+            if offset == 0: continue
             candidate_strike = original_strike + (offset * self.strike_distance)
             if candidate_strike <= 0: continue
 
-            # ... (the rest of the validation and delta calculation logic is unchanged) ...
-            candidate_leg = leg_to_roll.to_dict()
-            candidate_leg['strike_price'] = candidate_strike
+            # --- "What-If" Analysis for each candidate roll ---
+            candidate_leg_def = leg_to_roll.to_dict()
+            candidate_leg_def['strike_price'] = candidate_strike
             
-            # This check for premium is still a good safety rail
-            if candidate_leg['direction'] == 'short':
-                is_call = candidate_leg['type'] == 'call'
-                # For an accurate premium check, we need to calculate the offset from ATM for the *new* strike
-                atm_price = self.market_rules_manager.get_atm_price(current_price)
-                new_offset_from_atm = round((candidate_strike - atm_price) / self.strike_distance)
-                vol = self.iv_calculator(new_offset_from_atm, candidate_leg['type'])
-                greeks_single_leg = self.bs_manager.get_all_greeks_and_price(current_price, candidate_strike, candidate_leg['days_to_expiry'], vol, is_call)
-                premium = self.bs_manager.get_price_with_spread(greeks_single_leg['price'], is_buy=False, bid_ask_spread_pct=self.bid_ask_spread_pct)
-                if premium < self.close_short_leg_on_profit_threshold:
-                    continue
+            # 1. Price the new portfolio state
+            priced_candidate_leg = self._price_legs([candidate_leg_def], current_price, iv_bin_index)
+            if not priced_candidate_leg: continue
+            
+            hypothetical_portfolio_legs = other_legs + priced_candidate_leg
 
-            hypothetical_portfolio_legs = other_legs + [candidate_leg]
-            greeks = self.get_raw_greeks_for_legs(hypothetical_portfolio_legs, current_price, iv_bin_index)
+            # 2. Calculate the new Greeks and P&L Profile
+            new_greeks = self.get_raw_greeks_for_legs(hypothetical_portfolio_legs, current_price, iv_bin_index)
+            new_abs_delta = abs(new_greeks['delta'])
             
-            if abs(greeks['delta']) < min_abs_portfolio_delta:
-                min_abs_portfolio_delta = abs(greeks['delta'])
-                best_strike = candidate_strike
+            # The new profile must account for the brokerage of the roll (2 legs)
+            roll_brokerage = 2 * self.brokerage_per_leg
+            new_pnl_profile = self._calculate_universal_risk_profile(hypothetical_portfolio_legs, self.realized_pnl - roll_brokerage)
+            new_max_profit = new_pnl_profile.get('strategy_max_profit', -float('inf'))
+
+            # 3. Only consider rolls that are an improvement in BOTH dimensions.
+            if new_abs_delta < current_abs_delta and new_max_profit > 0:
+                
+                # 4. Score the valid roll. A simple score could be the new max profit.
+                #    A more advanced score could be a combination of profit and delta reduction.
+                score = new_max_profit - (new_abs_delta * 10) # Example: Prioritize profit, penalize delta
+                
+                if score > best_score:
+                    best_score = score
+                    best_strike = candidate_strike
         
         return best_strike
 
@@ -1700,98 +1739,6 @@ class PortfolioManager:
         
         return self._sanitize_dict(raw_profile)
 
-    def _open_single_leg(self, action_name: str, current_price: float, iv_bin_index: int, current_step: int, days_to_expiry: float):
-        if len(self.portfolio) >= self.max_positions: return False
-        
-        # We replace the old, faulty parser with the new, simplified version
-        # that correctly handles the "..._ATM" action format.
-        try:
-            parts = action_name.split('_')
-            direction, option_type = parts[1].lower(), parts[2].lower()
-            # Since the action name is now just "_ATM", the offset is always 0.
-            offset = 0
-        except (ValueError, IndexError):
-            print(f"Warning: Could not parse single leg action name: {action_name}")
-            return False
-
-        strike_price = self.market_rules_manager.get_atm_price(current_price) + (offset * self.strike_distance)
-        
-        legs = [{'type': option_type, 'direction': direction, 'strike_price': strike_price, 'entry_step': current_step, 'days_to_expiry': days_to_expiry}]
-        priced_legs = self._price_legs(legs, current_price, iv_bin_index, check_short_rule=True)
-        
-        if not priced_legs: return False
-
-        pnl_profile = self._calculate_universal_risk_profile(priced_legs, self.realized_pnl, is_new_trade=True)
-        if pnl_profile['strategy_max_profit'] <= self.min_profit_hurdle: return False
-        
-        # The strategy_id for a naked leg is its internal name, e.g., "SHORT_CALL"
-        internal_strategy_name = f"{direction.upper()}_{option_type.upper()}"
-        strategy_id = self.strategy_name_to_id.get(internal_strategy_name)
-        assert strategy_id is not None, f"Could not find strategy_id for naked leg: {internal_strategy_name}"
-        pnl_profile['strategy_id'] = strategy_id
-
-        self._execute_trades(priced_legs, pnl_profile)
-        return True
-
-    def _open_straddle(self, action_name: str, current_price: float, iv_bin_index: int, current_step: int, days_to_expiry: float):
-        # --- Defensive Assertion ---
-        assert len(self.portfolio) <= self.max_positions - 2, "Illegal attempt to open a straddle when there are less than two positions available."
-        if len(self.portfolio) > self.max_positions - 2: return False
-        direction = 'long' if 'LONG' in action_name else 'short'
-        atm_price = self.market_rules_manager.get_atm_price(current_price)
-        legs = [{'type': 'call', 'direction': direction, 'strike_price': atm_price, 'entry_step': current_step, 'days_to_expiry': days_to_expiry},
-                {'type': 'put', 'direction': direction, 'strike_price': atm_price, 'entry_step': current_step, 'days_to_expiry': days_to_expiry}]
-        legs = self._price_legs(legs, current_price, iv_bin_index)
-        pnl  = self._calculate_universal_risk_profile(legs, self.realized_pnl, is_new_trade=True)
-        if pnl['strategy_max_profit'] <= self.min_profit_hurdle: return False
-        # 3. Now get the strategy ID.
-        pnl['strategy_id'] = self.strategy_name_to_id.get(action_name, -1)
-        self._execute_trades(legs, pnl)
-        return True
-
-    def _open_strangle(self, action_name: str, current_price: float, iv_bin_index: int, current_step: int, days_to_expiry: float):
-        """
-        Opens a two-leg strangle. This is a smart dispatcher that can handle
-        both modern delta-based strangles and legacy fixed-width strangles.
-        """
-        if len(self.portfolio) > self.max_positions - 2: return False
-        
-        parts = action_name.split('_')
-        direction = parts[1].lower()
-        legs = []
-
-        # --- Dispatcher Logic ---
-        if 'DELTA' in action_name:
-            # --- INTELLIGENT, DELTA-BASED LOGIC ---
-            try:
-                target_delta_int = int(parts[4])
-            except (ValueError, IndexError): return False # Invalid format
-
-            all_deltas = [15, 20, 25, 30]
-            start_index = all_deltas.index(target_delta_int) if target_delta_int in all_deltas else 0
-            delta_search_list = [d / 100.0 for d in all_deltas[start_index:]]
-
-            strike_call = self._find_strike_from_delta_list(delta_search_list, 'call', current_price, iv_bin_index, days_to_expiry)
-            strike_put = self._find_strike_from_delta_list([-d for d in delta_search_list], 'put', current_price, iv_bin_index, days_to_expiry)
-            
-            if strike_call and strike_put and strike_put < strike_call:
-                legs = [{'type': 'call', 'direction': direction, 'strike_price': strike_call},
-                        {'type': 'put', 'direction': direction, 'strike_price': strike_put}]
-            else:
-                return False # Fallback if no valid delta strikes are found
-       
-        # --- Finalize the Trade (common to both logic paths) ---
-        for leg in legs:
-            leg['entry_step'] = current_step
-            leg['days_to_expiry'] = days_to_expiry
-        
-        priced_legs = self._price_legs(legs, current_price, iv_bin_index)
-        pnl_profile = self._calculate_universal_risk_profile(priced_legs, self.realized_pnl, is_new_trade=True)
-        if pnl_profile['strategy_max_profit'] <= self.min_profit_hurdle: return False
-        pnl_profile['strategy_id'] = self.strategy_name_to_id.get(action_name, -1)
-        self._execute_trades(priced_legs, pnl_profile)
-        return True
-
     def _find_strike_from_delta_list(
         self, target_deltas: List[float], option_type: str,
         current_price: float, iv_bin_index: int, days_to_expiry: float
@@ -1844,163 +1791,6 @@ class PortfolioManager:
             return best_strike
         else:
             return None # Signal that no acceptable strike was found
-
-    def _open_iron_condor(self, action_name: str, current_price: float, iv_bin_index: int, current_step: int, days_to_expiry: float):
-        """
-        Opens a SHORT Iron Condor using a tiered search for delta strikes (e.g., 30/15, then 35/20).
-        If no dynamic strikes are valid, it falls back to a fixed-width condor.
-        """
-        if len(self.portfolio) > self.max_positions - 4: return True
-        
-        direction = 'long' if 'LONG' in action_name else 'short'
-        legs = []
-
-        if direction == 'short':
-            # --- THE NEW TIERED SEARCH LOGIC ---
-            # 1. Define the prioritized list of delta combinations to try.
-            delta_tiers = [
-                {'short': 20, 'long': 15}, # Tier 1: Most conservative
-                {'short': 25, 'long': 20}, # Tier 2
-                {'short': 30, 'long': 15}, # Tier 3
-                {'short': 30, 'long': 25}, # Tier 4
-                {'short': 35, 'long': 20}, # Tier 5: Most aggressive
-            ]
-
-            for tier in delta_tiers:
-                # print(f"DEBUG: Attempting Iron Condor tier {tier['short']}/{tier['long']}") # Optional for debugging
-                short_delta = tier['short'] / 100.0
-                long_delta = tier['long'] / 100.0
-                
-                # 2. Attempt to find all four strikes for the current tier.
-                strike_short_put = self._find_strike_for_delta(-short_delta, 'put', current_price, iv_bin_index, days_to_expiry)
-                strike_short_call = self._find_strike_for_delta(short_delta, 'call', current_price, iv_bin_index, days_to_expiry)
-                strike_long_put = self._find_strike_for_delta(-long_delta, 'put', current_price, iv_bin_index, days_to_expiry)
-                strike_long_call = self._find_strike_for_delta(long_delta, 'call', current_price, iv_bin_index, days_to_expiry)
-
-                # 3. Run the robust guard rail on the results of this tier.
-                all_strikes_found = all(s is not None for s in [strike_long_put, strike_short_put, strike_short_call, strike_long_call])
-                if all_strikes_found and (strike_long_put < strike_short_put < strike_short_call < strike_long_call):
-                    # 4. If this tier is successful, build the legs and BREAK the loop.
-                    legs = [
-                        {'type': 'put', 'direction': 'short', 'strike_price': strike_short_put, 'days_to_expiry': days_to_expiry},
-                        {'type': 'call', 'direction': 'short', 'strike_price': strike_short_call, 'days_to_expiry': days_to_expiry},
-                        {'type': 'put', 'direction': 'long', 'strike_price': strike_long_put, 'days_to_expiry': days_to_expiry},
-                        {'type': 'call', 'direction': 'long', 'strike_price': strike_long_call, 'days_to_expiry': days_to_expiry}
-                    ]
-                    #print(f"DEBUG: Successfully found strikes for tier {tier['short']}/{tier['long']}.")
-                    break # Exit the loop as we have found a valid strategy
-            
-            if not legs:
-                 print(f"Warning: All dynamic delta tiers for Iron Condor failed. Falling back to fixed-width.")
-
-        # --- Fallback Logic ---
-        # This block is now triggered for a LONG condor OR if all dynamic tiers failed for a SHORT condor.
-        if not legs:
-            atm_price = self.market_rules_manager.get_atm_price(current_price)
-            body_direction = 'long' if direction == 'long' else 'short'
-            wing_direction = 'short' if direction == 'long' else 'long'
-            
-            legs = [
-                {'type': 'put', 'direction': body_direction, 'strike_price': atm_price - self.strike_distance, 'days_to_expiry': days_to_expiry},
-                {'type': 'call', 'direction': body_direction, 'strike_price': atm_price + self.strike_distance, 'days_to_expiry': days_to_expiry},
-                {'type': 'put', 'direction': wing_direction, 'strike_price': atm_price - (2 * self.strike_distance), 'days_to_expiry': days_to_expiry},
-                {'type': 'call', 'direction': wing_direction, 'strike_price': atm_price + (2 * self.strike_distance), 'days_to_expiry': days_to_expiry}
-            ]
-
-        # --- Finalize the Trade (Unchanged) ---
-        for leg in legs:
-            leg['entry_step'] = current_step
-        
-        legs = self._price_legs(legs, current_price, iv_bin_index)
-        pnl  = self._calculate_universal_risk_profile(legs, self.realized_pnl, is_new_trade=True)
-        # If the theoretical max profit of the strategy is negative, it's a guaranteed loser. Do not open it.
-        if pnl['strategy_max_profit'] <= self.min_profit_hurdle: return False
-        pnl['strategy_id'] = self.strategy_name_to_id.get(action_name, -1)
-        self._execute_trades(legs, pnl)
-        return True
-
-    def _open_iron_fly(self, action_name: str, current_price: float, iv_bin_index: int, current_step: int, days_to_expiry: float):
-        """
-        Opens an Iron Fly with a tiered, dynamic search for the optimal wing width.
-        - SHORT Iron Fly (credit): Tries to set wings based on premium, then walks inward to find a valid width.
-        - LONG Iron Fly (debit): Uses a fixed width.
-        """
-        if len(self.portfolio) > self.max_positions - 4: return False
-        
-        direction = 'long' if 'LONG' in action_name else 'short'
-        atm_price = self.market_rules_manager.get_atm_price(current_price)
-        legs = []
-
-        if direction == 'short':
-            # --- THE NEW TIERED SEARCH LOGIC ---
-            
-            # 1. First, define and price the body to get the net credit.
-            body_legs = [
-                {'type': 'call', 'direction': 'short', 'strike_price': atm_price, 'days_to_expiry': days_to_expiry},
-                {'type': 'put', 'direction': 'short', 'strike_price': atm_price, 'days_to_expiry': days_to_expiry}
-            ]
-            body_legs = self._price_legs(body_legs, current_price, iv_bin_index)
-            net_credit_received = body_legs[0]['entry_premium'] + body_legs[1]['entry_premium']
-            
-            # 2. Define the search boundaries for the wing width.
-            ideal_width = round(net_credit_received / self.strike_distance) * self.strike_distance
-            MAX_SENSIBLE_WIDTH = 22 * self.strike_distance
-            MIN_SENSIBLE_WIDTH = 5 * self.strike_distance
-
-            # 3. Create a prioritized list of widths to try, walking inward from the ideal/max.
-            start_width = min(ideal_width, MAX_SENSIBLE_WIDTH)
-            
-            # Convert to integer multipliers for a clean loop
-            start_multiplier = int(start_width / self.strike_distance)
-            end_multiplier = int(MIN_SENSIBLE_WIDTH / self.strike_distance)
-
-            # 4. Loop from the widest sensible width down to the narrowest.
-            for width_multiplier in range(start_multiplier, end_multiplier - 1, -1):
-                wing_width = width_multiplier * self.strike_distance
-                
-                # The loop itself is the guard rail. We know the width is valid.
-                strike_long_put = atm_price - wing_width
-                strike_long_call = atm_price + wing_width
-                
-                wing_legs = [
-                    {'type': 'put', 'direction': 'long', 'strike_price': strike_long_put, 'days_to_expiry': days_to_expiry},
-                    {'type': 'call', 'direction': 'long', 'strike_price': strike_long_call, 'days_to_expiry': days_to_expiry}
-                ]
-                
-                # Assemble the full strategy and break the loop on the first success.
-                legs = body_legs + wing_legs
-                # print(f"DEBUG: Found valid Iron Fly width: {wing_width}") # Optional for debugging
-                break # We found the best possible fit, so we exit.
-            
-            if not legs:
-                print(f"Warning: All dynamic wing widths for Iron Fly were out of bounds. Falling back to fixed-width.")
-
-        # --- Fallback Logic for LONG fly or if the tiered search failed ---
-        if not legs:
-            body_direction = 'long' if direction == 'long' else 'short'
-            wing_direction = 'short' if direction == 'long' else 'long'
-            wing_width = self.strike_distance # Safe, fixed 1-strike width
-            
-            strike_long_put = atm_price - wing_width
-            strike_long_call = atm_price + wing_width
-
-            legs = [
-                {'type': 'call', 'direction': body_direction, 'strike_price': atm_price, 'days_to_expiry': days_to_expiry},
-                {'type': 'put', 'direction': body_direction, 'strike_price': atm_price, 'days_to_expiry': days_to_expiry},
-                {'type': 'call', 'direction': wing_direction, 'strike_price': strike_long_call, 'days_to_expiry': days_to_expiry},
-                {'type': 'put', 'direction': wing_direction, 'strike_price': strike_long_put, 'days_to_expiry': days_to_expiry}
-            ]
-        
-        # --- Finalize the Trade (Unchanged) ---
-        for leg in legs:
-            leg['entry_step'] = current_step
-        
-        legs = self._price_legs(legs, current_price, iv_bin_index)
-        pnl  = self._calculate_universal_risk_profile(legs, self.realized_pnl, is_new_trade=True)
-        if pnl['strategy_max_profit'] <= self.min_profit_hurdle: return False
-        pnl['strategy_id'] = self.strategy_name_to_id.get(action_name, -1)
-        self._execute_trades(legs, pnl)
-        return True
 
     def _find_best_available_spread(
         self, option_type: str, direction_name: str,
@@ -2055,103 +1845,6 @@ class PortfolioManager:
                     return priced_legs
 
         return None
-
-    def _open_butterfly(self, action_name: str, current_price: float, iv_bin_index: int, current_step: int, days_to_expiry: float) -> bool:
-        """
-        Opens a three-strike butterfly with a dynamic width.
-        This version uses separate, correct logic for LONG (debit, seeks target cost)
-        and SHORT (credit, seeks max profitable credit) butterflies.
-        """
-        if len(self.portfolio) > self.max_positions - 4:
-            return False
-
-        parts = action_name.split('_')
-        direction, option_type = parts[1].lower(), parts[2].lower()
-        atm_price = self.market_rules_manager.get_atm_price(current_price)
-
-        # --- Define Body and Wing Directions ---
-        wing_direction = 'long' if direction == 'long' else 'short'
-        body_direction = 'short' if direction == 'long' else 'long'
-        body_legs_def = [
-            {'type': option_type, 'direction': body_direction, 'strike_price': atm_price},
-            {'type': option_type, 'direction': body_direction, 'strike_price': atm_price}
-        ]
-
-        best_legs_found = None
-        max_search_width = 20
-        min_search_width_multiplier = 2
-        
-        if direction == 'long': # --- Logic for LONG (DEBIT) butterflies ---
-            smallest_cost_diff = float('inf')
-            target_cost = atm_price * self.butterfly_target_cost_pct
-            
-            for i in range(min_search_width_multiplier, max_search_width + 1):
-                wing_width = i * self.strike_distance
-                strike_lower, strike_upper = atm_price - wing_width, atm_price + wing_width
-                if strike_lower <= 0: continue
-
-                wing_legs_def = [{'type': option_type, 'direction': wing_direction, 'strike_price': strike_lower}, {'type': option_type, 'direction': wing_direction, 'strike_price': strike_upper}]
-                candidate_legs_def = body_legs_def + wing_legs_def
-                for leg in candidate_legs_def: leg['days_to_expiry'] = days_to_expiry
-                
-                priced_legs = self._price_legs(candidate_legs_def, current_price, iv_bin_index)
-                if not priced_legs: continue
-
-                # For a debit trade, check that it's actually a debit.
-                net_premium = sum(leg['entry_premium'] * (1 if leg['direction'] == 'long' else -1) for leg in priced_legs)
-                if net_premium <= 0: continue
-                
-                # Check if this trade is viable after commissions.
-                pnl_profile = self._calculate_universal_risk_profile(priced_legs, 0.0, is_new_trade=True)
-                if pnl_profile['strategy_max_profit'] <= self.min_profit_hurdle:
-                    continue
-
-                # If viable, check if it's the best fit for our target cost.
-                cost_diff = abs(net_premium - target_cost)
-                if cost_diff < smallest_cost_diff:
-                    smallest_cost_diff = cost_diff
-                    best_legs_found = priced_legs
-        
-        else: # --- New, Correct Logic for SHORT (CREDIT) butterflies ---
-            highest_net_credit = 0
-            
-            for i in range(min_search_width_multiplier, max_search_width + 1):
-                wing_width = i * self.strike_distance
-                strike_lower, strike_upper = atm_price - wing_width, atm_price + wing_width
-                if strike_lower <= 0: continue
-
-                wing_legs_def = [{'type': option_type, 'direction': wing_direction, 'strike_price': strike_lower}, {'type': option_type, 'direction': wing_direction, 'strike_price': strike_upper}]
-                candidate_legs_def = body_legs_def + wing_legs_def
-                for leg in candidate_legs_def: leg['days_to_expiry'] = days_to_expiry
-                
-                priced_legs = self._price_legs(candidate_legs_def, current_price, iv_bin_index)
-                if not priced_legs: continue
-
-                # For a credit trade, check that it's actually a credit.
-                net_premium = sum(leg['entry_premium'] * (1 if leg['direction'] == 'long' else -1) for leg in priced_legs)
-                if net_premium >= 0: continue
-
-                # Check if the trade is viable after commissions.
-                pnl_profile = self._calculate_universal_risk_profile(priced_legs, 0.0, is_new_trade=True)
-                if pnl_profile['strategy_max_profit'] <= self.min_profit_hurdle:
-                    continue 
-
-                # If viable, check if it's the most credit we can receive.
-                net_credit = abs(net_premium)
-                if net_credit > highest_net_credit:
-                    highest_net_credit = net_credit
-                    best_legs_found = priced_legs
-
-        # --- Finalize the Trade ---
-        if best_legs_found:
-            for leg in best_legs_found: leg['entry_step'] = current_step
-            # We must recalculate the final PnL profile with the true realized PnL
-            final_pnl_profile = self._calculate_universal_risk_profile(best_legs_found, self.realized_pnl, is_new_trade=True)
-            final_pnl_profile['strategy_id'] = self.strategy_name_to_id.get(action_name, -1)
-            self._execute_trades(best_legs_found, final_pnl_profile)
-            return True
-        else:
-            return False
 
     def convert_to_iron_condor(self, current_price: float, iv_bin_index: int, current_step: int):
         """Adds long wings to a short strangle using the atomic transformation pattern."""
@@ -2476,119 +2169,252 @@ class PortfolioManager:
         print(debug_df.to_string())
         print("="*120 + "\n")
 
-    def manage_portfolio_based_on_intent(self, agent_intent: str, current_price: float, iv_bin_index: int, current_step: int, days_to_expiry: float, volatility_bias: str) -> str:
+    def manage_portfolio_based_on_intent(self, agent_intent: str, current_price: float, iv_bin_index: int, 
+                                         current_step: int, days_to_expiry: float, volatility_bias: str, 
+                                         current_day_index: int, episode_time_to_expiry: int) -> str:
         """
-        The Tactical Engine. Receives agent intent and executes the best tactical move.
-        Returns a string detailing the action taken for logging.
+        The Tactical Engine. This version includes a critical override to always
+        obey a CLOSE_ALL command during the final liquidation period.
         """
-        # <<< --- THE DEFINITIVE, CLEANER LOGIC --- >>>
-        
-        # --- Handle HOLD and CLOSE_ALL intents first, as they are simplest ---
-        if agent_intent == 'HOLD':
-            return "HOLD"
         
         if agent_intent == 'DECIDE_CLOSE_ALL':
-            if not self.portfolio.empty:
-                self.close_all_positions(current_price, iv_bin_index, current_step)
-                return "CLOSE_ALL"
-            else:
+            if self.portfolio.empty:
                 return "HOLD (Portfolio Empty)"
+            
+            # 1. Determine if we are in the mandatory liquidation period.
+            days_before_liquidation = self.cfg.get('days_before_liquidation', 1)
+            is_liquidation_period = current_day_index >= (episode_time_to_expiry - days_before_liquidation)
 
-        # --- If the intent is to open a position ---
+            # 2. If it's the liquidation period, we MUST obey the close command.
+            if is_liquidation_period:
+                self.close_all_positions(current_price, iv_bin_index, current_step)
+                return "CLOSE_ALL (Forced Liquidation)"
+            else:
+                # 3. If NOT in liquidation, then apply the standard "let winners run" logic.
+                if self._is_position_safely_itm(current_price):
+                    return "HOLD (Override: Let Winner Run)"
+                else:
+                    self.close_all_positions(current_price, iv_bin_index, current_step)
+                    return "CLOSE_ALL"
+       
+        # --- The rest of the logic is now streamlined ---
+        if agent_intent == 'HOLD':
+            return "HOLD"
+
         if self.portfolio.empty:
-            open_intent = agent_intent.replace('DECIDE_', 'OPEN_') + '_POSITION'
-            was_opened, resolved_action = self.resolve_and_open_strategy(
-                open_intent, current_price, iv_bin_index, current_step, days_to_expiry, volatility_bias
-            )
-            return resolved_action if was_opened else "HOLD (Resolver Failed)"
+            if 'DECIDE' in agent_intent:
+                open_intent = agent_intent.replace('DECIDE_', 'OPEN_') + '_POSITION'
+                was_opened, resolved_action = self.resolve_and_open_strategy(
+                    open_intent, current_price, iv_bin_index, current_step, days_to_expiry, volatility_bias
+                )
+                return resolved_action if was_opened else "HOLD (Resolver Failed)"
+            else:
+                return "HOLD (No Action)"
 
         # --- If portfolio is active and intent is directional ---
         current_stance = self.current_portfolio_stance
         agent_view = agent_intent.replace('DECIDE_', '')
 
-        if agent_view == current_stance:
-            return self._manage_active_position(current_price, iv_bin_index, current_step)
-        else:
+       # 1. Define what constitutes a true "view reversal".
+        is_complete_reversal = \
+            (current_stance == "BULLISH" and agent_view == "BEARISH") or \
+            (current_stance == "BEARISH" and agent_view == "BULLISH")
+
+        # --- Case 1: The agent's view has completely flipped. ---
+        if is_complete_reversal:
+            # In this case, we MUST handle the reversal, as the old position is now wrong.
             return self._handle_view_reversal(
-                agent_intent, 
-                current_price, 
-                iv_bin_index, 
-                current_step, 
-                days_to_expiry, 
-                volatility_bias
+                agent_intent, current_price, iv_bin_index, 
+                current_step, days_to_expiry, volatility_bias
+            )
+        
+        # --- Case 2: The agent's view has NOT flipped (it's consistent or has shifted to neutral). ---
+        else:
+            # The default action is to manage the existing position for risk,
+            # which includes our "let winners run" and proactive improvement logic.
+            # This correctly handles the "BULLISH -> NEUTRAL" case by maintaining the position.
+            return self._manage_active_position(
+                current_price, iv_bin_index, current_step, days_to_expiry
             )
 
-    def _manage_active_position(self, current_price: float, iv_bin_index: int, current_step: int) -> str:
-        """Rule-based logic for managing a position when the agent's view is consistent."""
+    def _manage_active_position(self, current_price: float, iv_bin_index: int, current_step: int, days_to_expiry: float) -> str:
+        """
+        Sophisticated, intent-aware logic for managing a position when the
+        agent's view is consistent with the current stance.
+        """
+        # --- PRIORITY 1: Proactively manage clear winners ---
+        if self._is_position_safely_itm(current_price):
+            roll_info = self._find_and_validate_improvement_roll(current_price, iv_bin_index, days_to_expiry)
+            if roll_info is not None:
+                leg_index, new_strike = roll_info
+                original_strike = self.portfolio.iloc[leg_index]['strike_price']
+                shift_dir = "UP" if new_strike > original_strike else "DOWN"
+                self.shift_position(f"SHIFT_{shift_dir}_POS_{leg_index}", current_price, iv_bin_index, current_step)
+                return f"MANAGE_WINNER: ROLL_LEG_{leg_index}"
+            else:
+                return "HOLD (Let Winner Run)"
+
+        # --- PRIORITY 2: Manage for risk/drift if not a clear winner ---
         greeks = self.get_portfolio_greeks(current_price, iv_bin_index)
         delta_threshold = self.cfg.get('delta_neutral_threshold', 0.1)
-
-        # If position is delta-imbalanced, the highest priority is to hedge.
         if abs(greeks['delta_norm']) > delta_threshold:
-            # Find the best leg to roll to neutralize delta.
-            best_leg_to_roll = self._find_best_leg_to_hedge_delta()
-            if best_leg_to_roll is not None:
-                self.hedge_portfolio_by_rolling_leg(best_leg_to_roll, current_price, iv_bin_index, current_step)
-                return f"RISK_MGMT: HEDGE_ROLL_LEG_{best_leg_to_roll}"
-        
-        # If delta is fine, the default action is to hold and collect theta.
+            
+            # 1. First, try to find the un-challenged leg to roll. This is the best move.
+            leg_to_recenter_idx = self._find_unchallenged_leg_to_recenter(current_price)
+            
+            if leg_to_recenter_idx is not None:
+                # 2. If we found one, execute the shift to ATM.
+                self.shift_to_atm(f"SHIFT_TO_ATM_{leg_to_recenter_idx}", current_price, iv_bin_index, current_step)
+                return f"RISK_MGMT: RECENTER_LEG_{leg_to_recenter_idx}"
+            else:
+                # 3. If BOTH legs are challenged (a worst-case scenario), then fall back
+                #    to the original delta hedge as a last-ditch effort to save the position.
+                best_leg_to_hedge = self._find_best_leg_to_hedge_delta(current_price, iv_bin_index)
+                if best_leg_to_hedge is not None:
+                    self.hedge_portfolio_by_rolling_leg(best_leg_to_hedge, current_price, iv_bin_index, current_step)
+                    return f"RISK_MGMT: HEDGE_ROLL_LEG_{best_leg_to_hedge}"
+
+        # --- PRIORITY 3: If the position is safe and delta is on target, hold. ---
         return "HOLD (Maintain Position)"
 
     def _handle_view_reversal(self, new_intent: str, current_price: float, iv_bin_index: int, current_step: int, days_to_expiry: float, volatility_bias: str) -> str:
         """
         Sophisticated, intent-aware rules for when the agent's view contradicts the current position.
-        This version includes a configurable loss-acceptance threshold.
+        This definitive version implements a professional risk-management cascade.
         """
-
-        # --- PRIORITY 1: Check if the position is a safe winner ---
-        if self._is_position_safely_itm(current_price):
-            # If the position is deep in-the-money, override any reversal/morph
-            # decision and simply hold. This prevents over-management of winners.
-            return "HOLD (Let Winner Run)"
-
+        # --- 1. Get Current State ---
         pnl_verification = self.get_pnl_verification(current_price, iv_bin_index)
         unrealized_pnl = pnl_verification['unrealized_pnl']
         is_challenged = self._is_position_challenged(current_price)
-
-        # 1. Calculate the loss acceptance threshold in dollars.
-        #    This is based on the initial premium paid or credit received for the trade.
         initial_risk = abs(self.initial_net_premium)
         loss_acceptance_threshold = -initial_risk * self.cfg.get('morph_loss_acceptance_multiple', 0.5)
 
-        # 2. The new condition: The engine will attempt to "morph" the position if it is either
-        #    profitable (pnl > 0) OR if its loss is within our acceptable tolerance.
+        # --- 2. The Risk Management Cascade ---
+
+        # --- PRIORITY 1: Check if the position is a safe, deep-in-the-money winner. ---
+        if self._is_position_safely_itm(current_price):
+            # If so, override any other decision and let the winner run.
+            return "HOLD (Override: Let Winner Run)"
+
+        # --- PRIORITY 2: Check if the position is manageable (i.e., not a clear winner, but not in immediate danger). ---
         if unrealized_pnl >= loss_acceptance_threshold and not is_challenged:
+            # The position is healthy enough to "morph." Choose a morphing action
+            # that aligns with the agent's new strategic intent.
+            resolved_action_name = "HOLD (Morph Failed)" # Default if no action is taken
             
-            # --- The "morph" logic (which we fixed previously) remains unchanged ---
-            resolved_action_name = "HOLD (Morph Failed)"
             if new_intent == 'DECIDE_BULLISH':
                 leg_to_shift_idx = self._find_best_leg_for_delta_shift(increase=True)
                 if leg_to_shift_idx is not None:
                     self._execute_delta_shift(leg_to_shift_idx, increase=True, current_price=current_price, iv_bin_index=iv_bin_index, current_step=current_step)
                     resolved_action_name = f"MORPH: INCREASE_DELTA_LEG_{leg_to_shift_idx}"
+            
             elif new_intent == 'DECIDE_BEARISH':
                 leg_to_shift_idx = self._find_best_leg_for_delta_shift(increase=False)
                 if leg_to_shift_idx is not None:
                     self._execute_delta_shift(leg_to_shift_idx, increase=False, current_price=current_price, iv_bin_index=iv_bin_index, current_step=current_step)
                     resolved_action_name = f"MORPH: DECREASE_DELTA_LEG_{leg_to_shift_idx}"
+            
             elif new_intent == 'DECIDE_NEUTRAL':
-                # If our goal is to become neutral, the correct morph from a directional
-                # spread is to convert it into an Iron Condor.
+                # The most logical "morph" from a directional to a neutral stance.
                 resolved_action_name = self._morph_spread_to_condor(current_price, iv_bin_index, current_step, days_to_expiry)
 
             return resolved_action_name
 
-        # --- Default case: The position is losing BEYOND our tolerance OR it is challenged. ---
-        # The best move is to cut losses and reverse. This logic is unchanged.
-        self.close_all_positions(current_price, iv_bin_index, current_step)
+        # --- PRIORITY 3 (Default Case): The position is a clear loser or is challenged. ---
+        # The position must be closed. We use the "look before you leap" pattern.
+        
+        # a) First, search for a viable escape route (a good new trade to enter).
         open_intent = new_intent.replace('DECIDE_', 'OPEN_') + '_POSITION'
-        was_opened, resolved_action = self.resolve_and_open_strategy(
-            open_intent, current_price, iv_bin_index, current_step, days_to_expiry, volatility_bias
+        viable_new_strategy = self._find_viable_strategy_for_intent(
+            open_intent, current_price, iv_bin_index, days_to_expiry, volatility_bias
         )
-        if was_opened:
-            return f"REVERSE: CLOSE_ALL & OPEN {resolved_action}"
+        
+        # b) ALWAYS close the current bad position. This is the top priority.
+        self.close_all_positions(current_price, iv_bin_index, current_step)
+
+        # c) Only if a viable escape route was found, open the new trade.
+        if viable_new_strategy:
+            self.open_strategy(viable_new_strategy, current_price, iv_bin_index, current_step, days_to_expiry)
+            return f"REVERSE: CLOSE_ALL & OPEN {viable_new_strategy}"
         else:
-            return "REVERSE: CLOSE_ALL (Open Failed)"
+            # If no good trade is available, the safest action is to stay in cash.
+            return "REVERSE: CLOSE_ALL (No Viable Re-entry)"
+
+    def _find_viable_strategy_for_intent(self, intent: str, current_price: float, iv_bin_index: int, days_to_expiry: float, volatility_bias: str) -> str or None:
+        """
+        Searches for a specific, low-level strategy that matches a high-level
+        intent and is viable (i.e., has a positive theoretical max profit after costs).
+        Returns the name of the first viable strategy found, or None.
+        """
+        candidate_actions = []
+        if intent == 'OPEN_BULLISH_POSITION':
+            candidate_actions = ['OPEN_BULL_PUT_SPREAD', 'OPEN_SHORT_PUT_ATM', 'OPEN_BULL_CALL_SPREAD', 'OPEN_JADE_LIZARD', 'OPEN_BIG_LIZARD', 'OPEN_PUT_RATIO_SPREAD']
+        elif intent == 'OPEN_BEARISH_POSITION':
+            candidate_actions = ['OPEN_BEAR_CALL_SPREAD', 'OPEN_SHORT_CALL_ATM', 'OPEN_BEAR_PUT_SPREAD', 'OPEN_REVERSE_JADE_LIZARD', 'OPEN_REVERSE_BIG_LIZARD', 'OPEN_CALL_RATIO_SPREAD']
+        elif intent == 'OPEN_NEUTRAL_POSITION':
+            candidate_actions = ['OPEN_SHORT_STRADDLE', 'OPEN_SHORT_STRANGLE_DELTA_25', 'OPEN_SHORT_STRANGLE_DELTA_30', 'OPEN_SHORT_IRON_CONDOR']
+        
+        if not candidate_actions:
+            return None
+
+        self.np_random.shuffle(candidate_actions)
+
+        for action_name in candidate_actions:
+            # --- "What-If" Analysis ---
+            # Use the new router helper to get the leg definitions for the candidate strategy.
+            legs_def = self._get_legs_for_strategy(action_name, current_price, iv_bin_index, days_to_expiry)
+            if not legs_def: continue
+            
+            # This is a temporary pricing step; it doesn't affect the real portfolio.
+            priced_legs = self._price_legs(legs_def, current_price, iv_bin_index)
+            if not priced_legs: continue
+
+            # Check the viability of this hypothetical trade.
+            pnl_profile = self._calculate_universal_risk_profile(priced_legs, 0.0, is_new_trade=True)
+            
+            # Use a simple but effective check: is the standalone profit potential positive?
+            if pnl_profile['strategy_max_profit'] > 0:
+                return action_name # Success! We found a viable strategy.
+
+        return None # If the loop completes, no viable strategies were found.
+
+    def _get_legs_for_strategy(self, action_name: str, current_price: float, iv_bin_index: int, days_to_expiry: float) -> List[Dict] or None:
+        """A simple router that calls the correct _get_*_legs helper based on the action name."""
+        if 'JADE_LIZARD' in action_name:
+            return self._get_jade_lizard_legs(action_name, current_price, iv_bin_index, days_to_expiry)
+        elif 'BIG_LIZARD' in action_name:
+            return self._get_big_lizard_legs(action_name, current_price, iv_bin_index, days_to_expiry)
+        elif 'RATIO_SPREAD' in action_name:
+            return self._get_ratio_spread_legs(action_name, current_price, iv_bin_index, days_to_expiry)
+        elif 'SPREAD' in action_name:
+            return self._get_vertical_spread_legs(action_name, current_price, iv_bin_index, days_to_expiry)
+        elif 'IRON_CONDOR' in action_name:
+            return self._get_iron_condor_legs(action_name, current_price, iv_bin_index, days_to_expiry)
+        elif 'STRANGLE' in action_name:
+            return self._get_strangle_legs(action_name, current_price, iv_bin_index, days_to_expiry)
+        elif 'STRADDLE' in action_name:
+            return self._get_straddle_legs(action_name, current_price, days_to_expiry)
+        elif 'ATM' in action_name:
+            return self._get_single_leg_legs(action_name, current_price, days_to_expiry)
+        return None
+
+    def _find_unchallenged_leg_to_recenter(self, current_price: float) -> int or None:
+        """
+        Finds the index of a short leg that is NOT currently challenged, making it
+        the ideal candidate for a defensive roll to re-center the position.
+        """
+        if self.portfolio.empty: return None
+        
+        for i, leg in self.portfolio.iterrows():
+            if leg['direction'] == 'short':
+                is_challenged = False
+                if leg['type'] == 'call' and current_price > leg['strike_price']: is_challenged = True
+                if leg['type'] == 'put' and current_price < leg['strike_price']: is_challenged = True
+                
+                if not is_challenged:
+                    return i # Return the index of the first un-challenged short leg found
+        
+        return None # No suitable leg was found
 
     def _is_position_safely_itm(self, current_price: float) -> bool:
         """
@@ -2735,11 +2561,50 @@ class PortfolioManager:
                 if leg['type'] == 'put' and current_price < leg['strike_price']: return True
         return False
 
-    def _find_best_leg_to_hedge_delta(self) -> int or None:
-        """A simple helper to find the most effective leg to roll for a delta hedge."""
-        if self.portfolio.empty: return None
-        # A more advanced version could score each leg. For now, we find the first eligible leg.
+    def _find_best_leg_to_hedge_delta(self, current_price: float, iv_bin_index: int) -> int or None:
+        """
+        A smart solver that iterates through all legs in the portfolio to find the
+        single best leg to roll for a delta hedge. It chooses the roll that results
+        in the highest-scoring (most profitable and most neutral) outcome.
+        """
+        if self.portfolio.empty:
+            return None
+
+        best_leg_to_roll = None
+        best_overall_score = -float('inf')
+
+        # --- "What-If" Analysis Loop ---
+        # Iterate through every leg as a potential candidate for rolling.
         for i in range(len(self.portfolio)):
-            # Add logic here to find the best candidate, e.g., the one most OTM
-            return i
-        return None
+
+            # 1. For each leg, call the existing solver to find the best *potential* new strike.
+            #    This inner solver already performs the profit-aware check for us.
+            potential_new_strike = self._find_portfolio_neutral_strike(i, current_price, iv_bin_index)
+
+            if potential_new_strike is not None:
+                # 2. If a valid roll was found for this leg, we need to score it.
+                #    We re-create the hypothetical portfolio to get its final stats.
+                leg_to_roll = self.portfolio.iloc[i]
+                other_legs = self.portfolio.drop(i).to_dict('records')
+
+                new_leg_def = leg_to_roll.to_dict()
+                new_leg_def['strike_price'] = potential_new_strike
+                priced_new_leg = self._price_legs([new_leg_def], current_price, iv_bin_index)
+
+                hypothetical_portfolio_legs = other_legs + priced_new_leg
+
+                # 3. Get the stats and score for this potential outcome.
+                new_greeks = self.get_raw_greeks_for_legs(hypothetical_portfolio_legs, current_price, iv_bin_index)
+                new_pnl_profile = self._calculate_universal_risk_profile(hypothetical_portfolio_legs, self.realized_pnl)
+                new_max_profit = new_pnl_profile.get('strategy_max_profit', -float('inf'))
+
+                # Use the same scoring as the inner solver.
+                score = new_max_profit - (abs(new_greeks['delta']) * 10)
+
+                # 4. If this leg's outcome is the best we've seen so far, store it.
+                if score > best_overall_score:
+                    best_overall_score = score
+                    best_leg_to_roll = i
+
+        return best_leg_to_roll
+
