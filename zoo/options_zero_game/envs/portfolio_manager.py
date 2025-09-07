@@ -838,47 +838,90 @@ class PortfolioManager:
             # If no legs remain from the target strategy, the portfolio is just the untouched ones.
             self.portfolio = untouched_strategies_df.copy().reset_index(drop=True)
 
-    def _find_and_validate_improvement_roll(self, current_price: float, iv_bin_index: int, days_to_expiry: float) -> Tuple[int, float] or None:
-        """
-        Finds a far OTM short leg and calculates a potential roll that would
-        increase the position's max profit. Returns (leg_index, new_strike) if valid.
-        """
-        if self.portfolio.empty: return None
+# In zoo/options_zero_game/envs/portfolio_manager.py
 
+    def _find_and_validate_improvement_roll(self, current_price: float, iv_bin_index: int, days_to_expiry: float, current_stance: str) -> Tuple[int, float] or None:
+        """
+        A definitive, "stance-aware" solver that finds the best possible proactive
+        adjustment for a winning position. It iterates through all short legs and
+        finds the roll that most improves the max profit WITHOUT violating the
+        portfolio's intended directional bias.
+        
+        Returns a tuple of (best_leg_index_to_roll, best_new_strike) or None if no
+        profitable, stance-preserving roll is found.
+        """
+        # --- 1. Guard Clauses ---
+        if self.portfolio.empty or current_stance not in ["BULLISH", "BEARISH"]:
+            return None
+
+        # --- 2. Establish Baseline Performance ---
         current_pnl_profile = self._calculate_universal_risk_profile(self.portfolio.to_dict('records'), self.realized_pnl)
         current_max_profit = current_pnl_profile.get('strategy_max_profit', 0)
 
-        # Iterate through each leg to find a candidate for rolling
-        for i, leg in self.portfolio.iterrows():
-            # Condition 1: Must be a short leg.
-            if leg['direction'] != 'short': continue
+        best_leg_to_roll_idx = None
+        best_new_strike = None
+        best_score = -float('inf') # We will maximize a score to find the best roll
 
-            # Condition 2: Must be "far" OTM. We define this as having a low delta.
+        # --- 3. Iterate Through All Legs to Find the Best Candidate ---
+        for i, leg in self.portfolio.iterrows():
+            # Condition a) Must be a short leg to collect more credit.
+            if leg['direction'] != 'short':
+                continue
+
+            # Condition b) Must be "far" OTM (i.e., low delta) to be considered "dead premium".
             greeks = self.bs_manager.get_all_greeks_and_price(current_price, leg['strike_price'], days_to_expiry, self.iv_calculator(0, leg['type']), leg['type'] == 'call')
             if abs(greeks['delta']) > 0.15: # Not far enough OTM (delta > 15)
                 continue
 
-            # This leg is a candidate. Let's find a new strike for it at ~35 delta.
+            # This leg is a candidate. Find a potential new strike for it at ~25 delta.
             target_delta = 0.25 if leg['type'] == 'call' else -0.25
             new_strike = self._find_strike_for_delta(target_delta, leg['type'], current_price, iv_bin_index, days_to_expiry)
-            
-            if new_strike is None: continue
+            if new_strike is None:
+                continue
 
-            # --- "What-If" Analysis: Would this roll actually improve the position? ---
+            # --- 4. "What-If" Analysis for the Candidate Roll ---
             hypothetical_legs = self.portfolio.drop(i).to_dict('records')
-            new_leg_def = {'type': leg['type'], 'direction': 'short', 'strike_price': new_strike, 'days_to_expiry': days_to_expiry}
+            new_leg_def = leg.to_dict()
+            new_leg_def['strike_price'] = new_strike
+            
             priced_new_leg = self._price_legs([new_leg_def], current_price, iv_bin_index)
-            if not priced_new_leg: continue
+            if not priced_new_leg:
+                continue
 
-            hypothetical_portfolio = hypothetical_legs + priced_new_leg
-            new_pnl_profile = self._calculate_universal_risk_profile(hypothetical_portfolio, self.realized_pnl)
-            new_max_profit = new_pnl_profile.get('strategy_max_profit', 0)
+            hypothetical_portfolio_legs = hypothetical_legs + priced_new_leg
 
-            # Your crucial condition: only accept the roll if it increases max profit.
-            if new_max_profit > current_max_profit:
-                return i, new_strike # Return the index of the leg to roll and the new target strike
+            # a) Calculate the new Greeks for the stance check.
+            new_greeks = self.get_raw_greeks_for_legs(hypothetical_portfolio_legs, current_price, iv_bin_index)
+            new_delta = new_greeks['delta']
 
-        return None # No profitable roll was found
+            # b) Calculate the new P&L Profile for the profit check.
+            new_pnl_profile = self._calculate_universal_risk_profile(hypothetical_portfolio_legs, self.realized_pnl)
+            new_max_profit = new_pnl_profile.get('strategy_max_profit', -float('inf'))
+
+            # --- 5. The Definitive, Stance-Aware Validation Gate ---
+            is_stance_violated = False
+            if current_stance == "BULLISH" and new_delta < 1: # Delta must remain net positive
+                is_stance_violated = True
+            if current_stance == "BEARISH" and new_delta > -1: # Delta must remain net negative
+                is_stance_violated = True
+            
+            # The roll is only valid if it passes BOTH the profit and stance checks.
+            if not is_stance_violated and new_max_profit > current_max_profit:
+                
+                # We can score the valid rolls to find the best one.
+                # A simple score is just the potential increase in profit.
+                score = new_max_profit - current_max_profit
+                
+                if score > best_score:
+                    best_score = score
+                    best_leg_to_roll_idx = i
+                    best_new_strike = new_strike
+        
+        # --- 6. Return the Best Valid Roll Found ---
+        if best_leg_to_roll_idx is not None and best_new_strike is not None:
+            return best_leg_to_roll_idx, best_new_strike
+
+        return None # No profitable, stance-preserving roll was found
 
     def _identify_strategy_from_legs(self, legs_df: pd.DataFrame) -> str:
         """
@@ -2228,6 +2271,50 @@ class PortfolioManager:
                 current_price, iv_bin_index, current_step, days_to_expiry
             )
 
+    def _find_defensive_roll_strike(self, current_price: float, iv_bin_index: int) -> Tuple[int, float] or None:
+        """
+        A smart helper that implements a professional "roll to delta" defense.
+        It finds the challenged leg, gets its delta, then finds a new strike
+        for the un-challenged leg that has a matching (but opposite) delta.
+        Returns (leg_to_roll_idx, new_strike) if a valid roll is found.
+        """
+        if len(self.portfolio) < 2: return None
+
+        # 1. Identify the challenged and un-challenged short legs.
+        challenged_leg_idx, unchallenged_leg_idx = None, None
+        for i, leg in self.portfolio.iterrows():
+            if leg['direction'] == 'short':
+                if self._is_leg_challenged(leg, current_price):
+                    challenged_leg_idx = i
+                else:
+                    unchallenged_leg_idx = i
+        
+        if challenged_leg_idx is None or unchallenged_leg_idx is None:
+            return None # This defense is only for single-sided challenges.
+
+        # 2. Get the delta of the challenged leg. This is our target.
+        challenged_leg = self.portfolio.iloc[challenged_leg_idx]
+        greeks = self.bs_manager.get_all_greeks_and_price(current_price, challenged_leg['strike_price'], challenged_leg['days_to_expiry'], self.iv_calculator(0, challenged_leg['type']), challenged_leg['type'] == 'call')
+        target_delta = abs(greeks['delta'])
+
+        # 3. Find a new strike for the un-challenged leg that matches this target delta.
+        unchallenged_leg = self.portfolio.iloc[unchallenged_leg_idx]
+        new_strike = self._find_strike_for_delta(
+            target_delta if unchallenged_leg['type'] == 'call' else -target_delta,
+            unchallenged_leg['type'],
+            current_price,
+            iv_bin_index,
+            unchallenged_leg['days_to_expiry']
+        )
+        
+        if new_strike is not None:
+            # Final safety check: ensure the new strike doesn't cross over the old one.
+            if (unchallenged_leg['type'] == 'call' and new_strike > challenged_leg['strike_price']) or \
+               (unchallenged_leg['type'] == 'put' and new_strike < challenged_leg['strike_price']):
+                return unchallenged_leg_idx, new_strike
+
+        return None
+
     def _manage_active_position(self, current_price: float, iv_bin_index: int, current_step: int, days_to_expiry: float) -> str:
         """
         Definitive, intent-aware logic for managing a position. This version
@@ -2237,19 +2324,19 @@ class PortfolioManager:
         # --- PRIORITY 1: Check for immediate danger ---
         is_challenged = self._is_position_challenged(current_price)
         if is_challenged:
+            # 1. First, and most importantly, try the new, sophisticated defensive roll.
+            roll_info = self._find_defensive_roll_strike(current_price, iv_bin_index)
             
-            # 1. First, and most importantly, try to find the un-challenged leg.
-            #    This is the professional's defensive move.
-            leg_to_recenter_idx = self._find_unchallenged_leg_to_recenter(current_price)
-            
-            if leg_to_recenter_idx is not None:
-                # 2. If we found one, the best defense is to roll it to the new ATM strike.
-                #    This collects credit and re-centers the profit tent.
-                self.shift_to_atm(f"SHIFT_TO_ATM_{leg_to_recenter_idx}", current_price, iv_bin_index, current_step)
-                return f"DEFEND: RECENTER_UNCHALLENGED_LEG_{leg_to_recenter_idx}"
+            if roll_info is not None:
+                leg_index, new_strike = roll_info
+                original_strike = self.portfolio.iloc[leg_index]['strike_price']
+                shift_dir = "UP" if new_strike > original_strike else "DOWN"
+                
+                # Execute the roll using the robust shift_position method.
+                self.shift_position(f"SHIFT_{shift_dir}_POS_{leg_index}", current_price, iv_bin_index, current_step)
+                return f"DEFEND: ROLL_TO_DELTA_LEG_{leg_index}"
             else:
-                # 3. If BOTH legs are challenged (a worst-case scenario), then we fall back
-                #    to the original delta hedge as a last-ditch effort to neutralize risk.
+                # 2. If the smart roll is not possible, fall back to the old delta hedge.
                 best_leg_to_hedge = self._find_best_leg_to_hedge_delta(current_price, iv_bin_index)
                 if best_leg_to_hedge is not None:
                     self.hedge_portfolio_by_rolling_leg(best_leg_to_hedge, current_price, iv_bin_index, current_step)
@@ -2257,7 +2344,12 @@ class PortfolioManager:
 
         # --- PRIORITY 2: Proactively manage clear winners (if not challenged) ---
         if self._is_position_safely_itm(current_price):
-            roll_info = self._find_and_validate_improvement_roll(current_price, iv_bin_index, days_to_expiry)
+            roll_info = self._find_and_validate_improvement_roll(
+                current_price, 
+                iv_bin_index, 
+                days_to_expiry, 
+                self.current_portfolio_stance # Pass the stance
+            )
             if roll_info is not None:
                 leg_index, new_strike = roll_info
                 original_strike = self.portfolio.iloc[leg_index]['strike_price']
