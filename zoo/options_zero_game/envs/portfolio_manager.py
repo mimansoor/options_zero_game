@@ -583,22 +583,20 @@ class PortfolioManager:
             if intent_or_specific_action == 'OPEN_BULLISH_POSITION':
                 candidate_actions = [
                     #'OPEN_BULL_PUT_SPREAD', 'OPEN_SHORT_PUT_ATM', 'OPEN_BULL_CALL_SPREAD',
-                    #'OPEN_BIG_LIZARD', 'OPEN_JADE_LIZARD', 'OPEN_PUT_RATIO_SPREAD'
-                    'OPEN_BULL_PUT_SPREAD', 'OPEN_BIG_LIZARD', 'OPEN_JADE_LIZARD'
+                    'OPEN_BULL_PUT_SPREAD', 'OPEN_SHORT_PUT_ATM',
+                    'OPEN_BIG_LIZARD', 'OPEN_JADE_LIZARD', 'OPEN_PUT_RATIO_SPREAD'
                 ]
             elif intent_or_specific_action == 'OPEN_BEARISH_POSITION':
                 candidate_actions = [
                     #'OPEN_BEAR_CALL_SPREAD', 'OPEN_SHORT_CALL_ATM', 'OPEN_BEAR_PUT_SPREAD',
-                    #'OPEN_REVERSE_BIG_LIZARD', 'OPEN_REVERSE_JADE_LIZARD', 'OPEN_CALL_RATIO_SPREAD'
-                    'OPEN_REVERSE_BIG_LIZARD', 'OPEN_REVERSE_JADE_LIZARD', 'OPEN_BEAR_CALL_SPREAD'
+                    'OPEN_BEAR_CALL_SPREAD', 'OPEN_SHORT_CALL_ATM',
+                    'OPEN_REVERSE_BIG_LIZARD', 'OPEN_REVERSE_JADE_LIZARD', 'OPEN_CALL_RATIO_SPREAD'
                 ]
             elif intent_or_specific_action == 'OPEN_NEUTRAL_POSITION':
                 if "High" in volatility_bias:
-                    #candidate_actions = ['OPEN_SHORT_STRADDLE', 'OPEN_SHORT_STRANGLE_DELTA_25', 'OPEN_SHORT_STRANGLE_DELTA_30', 'OPEN_SHORT_IRON_CONDOR']
-                    candidate_actions = ['OPEN_SHORT_STRADDLE', 'OPEN_SHORT_STRANGLE_DELTA_25', 'OPEN_SHORT_STRANGLE_DELTA_30']
+                    candidate_actions = ['OPEN_SHORT_STRADDLE', 'OPEN_SHORT_STRANGLE_DELTA_25', 'OPEN_SHORT_STRANGLE_DELTA_30', 'OPEN_SHORT_IRON_CONDOR']
                 else:
-                    #candidate_actions = ['OPEN_SHORT_STRANGLE_DELTA_25', 'OPEN_SHORT_STRANGLE_DELTA_30', 'OPEN_SHORT_IRON_CONDOR']
-                    candidate_actions = ['OPEN_SHORT_STRANGLE_DELTA_25', 'OPEN_SHORT_STRANGLE_DELTA_30']
+                    candidate_actions = ['OPEN_SHORT_STRANGLE_DELTA_25', 'OPEN_SHORT_STRANGLE_DELTA_30', 'OPEN_SHORT_IRON_FLY']
             
             if not candidate_actions:
                 return False, "NONE"
@@ -958,7 +956,6 @@ class PortfolioManager:
                 else:
                     higher_strike_leg, lower_strike_leg = leg2, leg1
                 
-                # <<< --- THE DEFINITIVE LOGIC FIX --- >>>
                 if option_type == 'CALL':
                     # A Bull Call Spread has the SHORT leg at the HIGHER strike.
                     return 'OPEN_BULL_CALL_SPREAD' if higher_strike_leg['direction'] == 'short' else 'OPEN_BEAR_CALL_SPREAD'
@@ -2661,12 +2658,38 @@ class PortfolioManager:
                 self.shift_position(resolved_action_name, current_price, iv_bin_index, current_step)
 
     def _is_position_challenged(self, current_price: float) -> bool:
-        """ A helper to determine if any short leg is being threatened by the current price. """
+        """
+        A definitive, "hedge-aware" helper. It checks if any NAKED short leg
+        is being threatened in a way that CONTRADICTS the portfolio's stance.
+        Hedged legs within spreads are not considered a strategic threat.
+        """
         if self.portfolio.empty: return False
+        
+        stance = self.current_portfolio_stance
+
         for _, leg in self.portfolio.iterrows():
+            # This check now applies to ALL short legs, but with a new condition.
             if leg['direction'] == 'short':
-                if leg['type'] == 'call' and current_price > leg['strike_price']: return True
-                if leg['type'] == 'put' and current_price < leg['strike_price']: return True
+
+                # <<< --- THE DEFINITIVE, HEDGE-AWARE FIX IS HERE --- >>>
+                # A leg is only a true strategic threat if it is BOTH breached AND un-hedged.
+                if not leg['is_hedged']:
+                    
+                    # For a BULLISH stance, only a challenged NAKED SHORT CALL is a true danger.
+                    if stance == "BULLISH" and leg['type'] == 'call' and current_price > leg['strike_price']:
+                        return True
+                    
+                    # For a BEARISH stance, only a challenged NAKED SHORT PUT is a true danger.
+                    elif stance == "BEARISH" and leg['type'] == 'put' and current_price < leg['strike_price']:
+                        return True
+                    
+                    # For a NEUTRAL stance (like a naked strangle), a challenge on either NAKED side is a danger.
+                    elif stance == "NEUTRAL":
+                        if (leg['type'] == 'call' and current_price > leg['strike_price']) or \
+                           (leg['type'] == 'put' and current_price < leg['strike_price']):
+                            return True
+        
+        # If no un-hedged legs are challenged, the position is considered safe.
         return False
 
     def _is_leg_challenged(self, leg: pd.Series, current_price: float) -> bool:
