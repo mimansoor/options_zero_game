@@ -2669,6 +2669,19 @@ class PortfolioManager:
                 if leg['type'] == 'put' and current_price < leg['strike_price']: return True
         return False
 
+    def _is_leg_challenged(self, leg: pd.Series, current_price: float) -> bool:
+        """
+        A simple helper to determine if a single short leg is being threatened
+        by the current market price (i.e., the price has breached its strike).
+        """
+        # This check only applies to short legs, as they carry the primary risk.
+        if leg['direction'] == 'short':
+            if leg['type'] == 'call' and current_price > leg['strike_price']:
+                return True
+            if leg['type'] == 'put' and current_price < leg['strike_price']:
+                return True
+        return False
+
     def _find_best_leg_to_hedge_delta(self, current_price: float, iv_bin_index: int) -> int or None:
         """
         A smart solver that iterates through all legs in the portfolio to find the
