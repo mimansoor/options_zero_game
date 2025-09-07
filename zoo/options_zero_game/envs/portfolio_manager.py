@@ -583,12 +583,14 @@ class PortfolioManager:
             if intent_or_specific_action == 'OPEN_BULLISH_POSITION':
                 candidate_actions = [
                     #'OPEN_BULL_PUT_SPREAD', 'OPEN_SHORT_PUT_ATM', 'OPEN_BULL_CALL_SPREAD',
-                    'OPEN_BIG_LIZARD', 'OPEN_JADE_LIZARD', 'OPEN_PUT_RATIO_SPREAD'
+                    #'OPEN_BIG_LIZARD', 'OPEN_JADE_LIZARD', 'OPEN_PUT_RATIO_SPREAD'
+                    'OPEN_BULL_PUT_SPREAD', 'OPEN_BIG_LIZARD', 'OPEN_JADE_LIZARD'
                 ]
             elif intent_or_specific_action == 'OPEN_BEARISH_POSITION':
                 candidate_actions = [
                     #'OPEN_BEAR_CALL_SPREAD', 'OPEN_SHORT_CALL_ATM', 'OPEN_BEAR_PUT_SPREAD',
-                    'OPEN_REVERSE_BIG_LIZARD', 'OPEN_REVERSE_JADE_LIZARD', 'OPEN_CALL_RATIO_SPREAD'
+                    #'OPEN_REVERSE_BIG_LIZARD', 'OPEN_REVERSE_JADE_LIZARD', 'OPEN_CALL_RATIO_SPREAD'
+                    'OPEN_REVERSE_BIG_LIZARD', 'OPEN_REVERSE_JADE_LIZARD', 'OPEN_BEAR_CALL_SPREAD'
                 ]
             elif intent_or_specific_action == 'OPEN_NEUTRAL_POSITION':
                 if "High" in volatility_bias:
@@ -2176,27 +2178,16 @@ class PortfolioManager:
         The Tactical Engine. This version includes a critical override to always
         obey a CLOSE_ALL command during the final liquidation period.
         """
-        
-        if agent_intent == 'DECIDE_CLOSE_ALL':
-            if self.portfolio.empty:
-                return "HOLD (Portfolio Empty)"
-            
-            # 1. Determine if we are in the mandatory liquidation period.
-            days_before_liquidation = self.cfg.get('days_before_liquidation', 1)
-            is_liquidation_period = current_day_index >= (episode_time_to_expiry - days_before_liquidation)
 
-            # 2. If it's the liquidation period, we MUST obey the close command.
-            if is_liquidation_period:
-                self.close_all_positions(current_price, iv_bin_index, current_step)
-                return "CLOSE_ALL (Forced Liquidation)"
-            else:
-                # 3. If NOT in liquidation, then apply the standard "let winners run" logic.
-                if self._is_position_safely_itm(current_price):
-                    return "HOLD (Override: Let Winner Run)"
-                else:
-                    self.close_all_positions(current_price, iv_bin_index, current_step)
-                    return "CLOSE_ALL"
-       
+        # --- PRIORITY 1: Check for Mandatory Liquidation ---
+        days_before_liquidation = self.cfg.get('days_before_liquidation', 1)
+        is_liquidation_period = current_day_index >= (episode_time_to_expiry - days_before_liquidation)
+
+        if is_liquidation_period and not self.portfolio.empty:
+            # If we are in the final days, we MUST close the position, overriding all other logic.
+            self.close_all_positions(current_price, iv_bin_index, current_step)
+            return "FORCED_LIQUIDATION" # Return a clear, descriptive action string
+ 
         # --- The rest of the logic is now streamlined ---
         if agent_intent == 'HOLD':
             return "HOLD"
@@ -2239,10 +2230,32 @@ class PortfolioManager:
 
     def _manage_active_position(self, current_price: float, iv_bin_index: int, current_step: int, days_to_expiry: float) -> str:
         """
-        Sophisticated, intent-aware logic for managing a position when the
-        agent's view is consistent with the current stance.
+        Definitive, intent-aware logic for managing a position. This version
+        implements a professional-grade "re-centering defense" for challenged positions.
         """
-        # --- PRIORITY 1: Proactively manage clear winners ---
+
+        # --- PRIORITY 1: Check for immediate danger ---
+        is_challenged = self._is_position_challenged(current_price)
+        if is_challenged:
+            
+            # 1. First, and most importantly, try to find the un-challenged leg.
+            #    This is the professional's defensive move.
+            leg_to_recenter_idx = self._find_unchallenged_leg_to_recenter(current_price)
+            
+            if leg_to_recenter_idx is not None:
+                # 2. If we found one, the best defense is to roll it to the new ATM strike.
+                #    This collects credit and re-centers the profit tent.
+                self.shift_to_atm(f"SHIFT_TO_ATM_{leg_to_recenter_idx}", current_price, iv_bin_index, current_step)
+                return f"DEFEND: RECENTER_UNCHALLENGED_LEG_{leg_to_recenter_idx}"
+            else:
+                # 3. If BOTH legs are challenged (a worst-case scenario), then we fall back
+                #    to the original delta hedge as a last-ditch effort to neutralize risk.
+                best_leg_to_hedge = self._find_best_leg_to_hedge_delta(current_price, iv_bin_index)
+                if best_leg_to_hedge is not None:
+                    self.hedge_portfolio_by_rolling_leg(best_leg_to_hedge, current_price, iv_bin_index, current_step)
+                    return f"DEFEND: HEDGE_ROLL_LEG_{best_leg_to_hedge}"
+
+        # --- PRIORITY 2: Proactively manage clear winners (if not challenged) ---
         if self._is_position_safely_itm(current_price):
             roll_info = self._find_and_validate_improvement_roll(current_price, iv_bin_index, days_to_expiry)
             if roll_info is not None:
@@ -2254,7 +2267,10 @@ class PortfolioManager:
             else:
                 return "HOLD (Let Winner Run)"
 
-        # --- PRIORITY 2: Manage for risk/drift if not a clear winner ---
+        # --- PRIORITY 3: Manage for delta drift if not challenged and not a clear winner ---
+        greeks = self.get_portfolio_greeks(current_price, iv_bin_index)
+        delta_threshold = self.cfg.get('delta_neutral_threshold', 0.1)
+        # --- PRIORITY 4: Manage for risk/drift if not a clear winner ---
         greeks = self.get_portfolio_greeks(current_price, iv_bin_index)
         delta_threshold = self.cfg.get('delta_neutral_threshold', 0.1)
         if abs(greeks['delta_norm']) > delta_threshold:
@@ -2274,7 +2290,7 @@ class PortfolioManager:
                     self.hedge_portfolio_by_rolling_leg(best_leg_to_hedge, current_price, iv_bin_index, current_step)
                     return f"RISK_MGMT: HEDGE_ROLL_LEG_{best_leg_to_hedge}"
 
-        # --- PRIORITY 3: If the position is safe and delta is on target, hold. ---
+        # --- PRIORITY 5: If the position is safe and delta is on target, hold. ---
         return "HOLD (Maintain Position)"
 
     def _handle_view_reversal(self, new_intent: str, current_price: float, iv_bin_index: int, current_step: int, days_to_expiry: float, volatility_bias: str) -> str:

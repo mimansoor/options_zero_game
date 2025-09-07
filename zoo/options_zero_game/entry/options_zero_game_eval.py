@@ -5,6 +5,7 @@ import os
 import time
 import torch
 import numpy as np
+import matplotlib.pyplot as plt
 from tqdm import tqdm
 
 from lzero.entry import eval_muzero
@@ -158,6 +159,34 @@ if __name__ == "__main__":
         
         if args.episodes == 1:
             print(f"\nThe replay_log.json has been successfully saved.")
+
+        # We only generate a histogram if there are enough data points for it to be meaningful.
+        if len(all_episode_pnls) > 1:
+            try:
+                print("\n--- Generating PnL Distribution Histogram ---")
+                output_dir = "zoo/options_zero_game/visualizer-ui/build"
+                output_filename = os.path.join(output_dir, 'pnl_histogram.png')
+
+                # Ensure the directory exists
+                os.makedirs(output_dir, exist_ok=True)
+
+                plt.figure(figsize=(12, 7))
+                plt.hist(all_episode_pnls, bins=20, edgecolor='black', alpha=0.8, color='#2a9d8f')
+                mean_pnl = np.mean(all_episode_pnls)
+                plt.axvline(mean_pnl, color='#e76f51', linestyle='--', linewidth=2, label=f'Mean PnL: ${mean_pnl:,.2f}')
+                plt.title(f'PnL Distribution over {len(all_episode_pnls)} Episodes', fontsize=16)
+                plt.xlabel('Final PnL per Episode ($)', fontsize=12)
+                plt.ylabel('Frequency (Number of Episodes)', fontsize=12)
+                plt.grid(axis='y', linestyle='--', alpha=0.7)
+                plt.legend()
+                
+                plt.savefig(output_filename)
+                plt.close()
+                
+                print(f"Successfully saved histogram to '{os.path.abspath(output_filename)}'")
+            except Exception as e:
+                print(f"\nWarning: Could not generate histogram. Error: {e}")
+
     else:
         print("Evaluation finished, but no valid return values were recorded.")
 

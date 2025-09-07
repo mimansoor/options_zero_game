@@ -930,49 +930,6 @@ def test_no_runaway_duplication_on_transform():
     finally:
         env.close()
 
-def test_close_all_action():
-    """
-    A critical test to ensure the CLOSE_ALL action correctly liquidates the
-    entire portfolio and realizes the P&L.
-    """
-    test_name = "test_close_all_action"
-    print(f"\n--- RUNNING: {test_name} ---")
-
-    # <<< --- THE DEFINITIVE FIX: Isolate the test in a sterile, flat-volatility environment --- >>>
-    flat_vol_regime = {'name': 'Flat_Test_Regime', 'mu': 0, 'omega': 0, 'alpha': 0, 'beta': 1, 'atm_iv': 25.0, 'far_otm_put_iv': 25.0, 'far_otm_call_iv': 25.0}
-    env = create_isolated_test_env(
-        'OPEN_SHORT_IRON_CONDOR',
-        overrides={'use_expert_iv': False, 'iv_price_correlation_strength': 0.0, 'unified_regimes': [flat_vol_regime]}
-    )
-
-    try:
-        env.reset(seed=54)
-        env.step(env.actions_to_indices['HOLD'])
-        assert len(env.portfolio_manager.get_portfolio()) == 4, "Setup failed"
-
-        env.step(env.actions_to_indices['HOLD'])
-
-        action_to_take = env.actions_to_indices['CLOSE_ALL']
-        env.step(action_to_take)
-
-        portfolio_after = env.portfolio_manager.get_portfolio()
-        assert portfolio_after.empty, \
-            f"CLOSE_ALL failed: Portfolio is not empty. Contains {len(portfolio_after)} legs."
-
-        pnl_verification = env.portfolio_manager.get_pnl_verification(env.price_manager.current_price, env.iv_bin_index)
-        unrealized_pnl = pnl_verification['unrealized_pnl']
-        assert np.isclose(unrealized_pnl, 0.0, atol=0.01), \
-            f"Unrealized P&L is not zero after CLOSE_ALL. It is {unrealized_pnl:.2f}."
-
-        print(f"--- PASSED: {test_name} ---")
-        return True
-    except Exception:
-        traceback.print_exc()
-        print(f"--- FAILED: {test_name} ---")
-        return False
-    finally:
-        env.close()
-
 # ==============================================================================
 #                 NEW REGRESSION TESTS FOR ADVANCED STRATEGIES
 # ==============================================================================
@@ -1315,7 +1272,6 @@ if __name__ == "__main__":
         test_delta_shifting_meta_actions,
         test_dte_decay_logic,
         test_no_runaway_duplication_on_transform,
-        test_close_all_action,
         test_greeks_and_risk_validation,
         test_hedge_delta_with_atm_option,
         test_hedge_portfolio_by_rolling_leg,

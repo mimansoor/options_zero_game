@@ -516,6 +516,15 @@ function App() {
                     <div className="main-content">
                         <h2>Historical Strategy Reports</h2>
                         <div className="report-selector">{reportHistory.length > 0 ? reportHistory.map(report => (<div key={report.filename} className="report-item"><button className="report-button" onClick={() => setSelectedReportFile(report.filename)} disabled={selectedReportFile === report.filename}>{report.label}</button><a href={`/reports/${getCheckpointFilename(report.filename)}`} className="download-link" download>Download Model</a></div>)) : <p>No historical reports found.</p>}</div>
+			<div className="card" style={{ marginBottom: '20px' }}>
+                            <h3>Latest PnL Distribution</h3>
+                            {/* The cache-busting timestamp is essential for showing the latest image */}
+                            <img
+                                src={`/pnl_histogram.png?t=${new Date().getTime()}`}
+                                alt="PnL Distribution Histogram"
+                                style={{ maxWidth: '100%', borderRadius: '8px' }}
+                            />
+                        </div>
                         {isLoadingReport ? <p>Loading report...</p> : <StrategyReport reportData={selectedReportData} />}
                     </div>
                 )}

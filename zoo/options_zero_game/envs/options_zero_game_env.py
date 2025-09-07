@@ -73,19 +73,19 @@ class OptionsZeroGameEnv(gym.Env):
         illegal_action_penalty=-1.0,
         
         # Advanced Trading Rules
-        profit_target_pct=3.0,
+        profit_target_pct=5.0,
 
         #Close the short leg if the premium is below 2.0
         close_short_leg_on_profit_threshold=1.0,
         jackpot_reward=1.0,
 
         # For credit strategies, target is a % of the max possible profit (the credit received).
-        credit_strategy_take_profit_pct=50, # Target 25% of max profit. Set to 0 to disable.
+        credit_strategy_take_profit_pct=80, # Target 25% of max profit. Set to 0 to disable.
         
         # For debit strategies, target is a multiple of the initial debit paid.
-        debit_strategy_take_profit_multiple=2, # Target 2x the debit paid (200% return). Set to 0 to disable.
+        debit_strategy_take_profit_multiple=3, # Target 2x the debit paid (200% return). Set to 0 to disable.
 
-        stop_loss_multiple_of_cost=2.00, # NEW: Added stop loss multiple
+        stop_loss_multiple_of_cost=0.50, # NEW: Added stop loss multiple
         use_stop_loss=True,
 
         # The max unrealized loss (as a multiple of initial premium) the Tactical
@@ -639,7 +639,6 @@ class OptionsZeroGameEnv(gym.Env):
         meter = BiasMeter(current_obs_vector, self.OBS_IDX)
         volatility_bias = meter.volatility_bias
         
-        # <<< --- THE DEFINITIVE FIX IS HERE --- >>>
         # 3. Call the Tactical Engine in the PortfolioManager, now with all required arguments.
         resolved_action_details = self.portfolio_manager.manage_portfolio_based_on_intent(
             agent_intent=agent_intent,
@@ -692,14 +691,6 @@ class OptionsZeroGameEnv(gym.Env):
             if legal_open_indices:
                 # Force the agent to explore by picking a random valid OPEN intent.
                 return self.np_random.choice(legal_open_indices), True
-
-        # --- PRIORITY 4: Liquidation Period Override ---
-        is_liquidation_period = self.current_day_index >= (self.episode_time_to_expiry - self._cfg.days_before_liquidation)
-        if is_liquidation_period and not self.portfolio_manager.portfolio.empty:
-            # In the final days, force a close if the position isn't a near-certain winner.
-            summary = self.portfolio_manager.get_portfolio_summary(self.price_manager.current_price, self.iv_bin_index)
-            if not (summary['prob_profit'] > 0.9 and summary.get('profit_factor', 0) > 1.0):
-                return self.actions_to_indices['DECIDE_CLOSE_ALL'], True
 
         # --- PRIORITY 5: Default fallback for all other illegal moves (on an active portfolio) ---
         # The safest action is to HOLD.
@@ -1089,7 +1080,6 @@ class OptionsZeroGameEnv(gym.Env):
             'DECIDE_BULLISH': 1,
             'DECIDE_BEARISH': 2,
             'DECIDE_NEUTRAL': 3,
-            'DECIDE_CLOSE_ALL': 4, # The agent can decide to exit the market
         }
         return actions
        
@@ -1099,15 +1089,6 @@ class OptionsZeroGameEnv(gym.Env):
         This logic is now much simpler than the previous implementation.
         """
         action_mask = np.zeros(self.action_space_size, dtype=np.int8)
-        
-        # --- Rule 1: Liquidation Period Override (Still Important) ---
-        # If we are in the final days, the only valid actions are to HOLD or CLOSE.
-        is_liquidation_period = self.current_day_index >= (self.episode_time_to_expiry - self._cfg.days_before_liquidation)
-        if is_liquidation_period:
-            action_mask[self.actions_to_indices['HOLD']] = 1
-            if not self.portfolio_manager.portfolio.empty:
-                action_mask[self.actions_to_indices['DECIDE_CLOSE_ALL']] = 1
-            return action_mask
 
         # --- Rule 2: Standard Operations ---
         if self.portfolio_manager.portfolio.empty:
@@ -1122,7 +1103,6 @@ class OptionsZeroGameEnv(gym.Env):
             action_mask[self.actions_to_indices['DECIDE_BULLISH']] = 1
             action_mask[self.actions_to_indices['DECIDE_BEARISH']] = 1
             action_mask[self.actions_to_indices['DECIDE_NEUTRAL']] = 1
-            action_mask[self.actions_to_indices['DECIDE_CLOSE_ALL']] = 1
             
         return action_mask
 
