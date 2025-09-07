@@ -73,10 +73,10 @@ class OptionsZeroGameEnv(gym.Env):
         illegal_action_penalty=-1.0,
         
         # Advanced Trading Rules
-        profit_target_pct=5.0,
+        profit_target_pct=6.0,
 
         #Close the short leg if the premium is below 2.0
-        close_short_leg_on_profit_threshold=1.0,
+        close_short_leg_on_profit_threshold=2.0,
         jackpot_reward=1.0,
 
         # For credit strategies, target is a % of the max possible profit (the credit received).
